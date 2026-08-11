@@ -1,0 +1,56 @@
+{
+  "name": "minarrador",
+  "productName": "Minarrador",
+  "version": "1.0.0",
+  "description": "Local-only meeting notes: records mic + system audio, transcribes and summarizes with Ollama on your machine.",
+  "main": "src/main/main.js",
+  "author": "Renato Baeza",
+  "license": "MIT",
+  "private": true,
+  "scripts": {
+    "start": "electron .",
+    "icons": "node scripts/make-icons.js",
+    "pipeline": "electron scripts/run-pipeline.js",
+    "capture-test": "electron scripts/capture-test.js",
+    "dist": "electron-builder --win nsis",
+    "install-app": "node scripts/install.js"
+  },
+  "devDependencies": {
+    "electron": "^43.3.0",
+    "electron-builder": "^26.15.3"
+  },
+  "build": {
+    "appId": "com.rntbz.minarrador",
+    "productName": "Minarrador",
+    "artifactName": "Minarrador-Setup-${version}.${ext}",
+    "files": [
+      "src/**/*",
+      "assets/**/*",
+      "package.json"
+    ],
+    "directories": {
+      "output": "dist"
+    },
+    "win": {
+      "target": [
+        {
+          "target": "nsis",
+          "arch": [
+            "x64"
+          ]
+        }
+      ],
+      "icon": "assets/icon.ico"
+    },
+    "nsis": {
+      "oneClick": false,
+      "perMachine": false,
+      "allowToChangeInstallationDirectory": true,
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true,
+      "shortcutName": "Minarrador",
+      "installerIcon": "assets/icon.ico",
+      "uninstallerIcon": "assets/icon.ico"
+    }
+  }
+}
