@@ -1,0 +1,96 @@
+/* Live transcript window. Kept in its own file so the page can run under a
+   strict CSP with no inline styles. */
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  font-family: 'Segoe UI', system-ui, sans-serif;
+  background: #16161a;
+  color: #eaeaea;
+  display: flex;
+  flex-direction: column;
+  height: 100vh;
+  overflow: hidden;
+  font-size: 14px;
+}
+
+header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 12px 16px;
+  background: #1e1e24;
+  border-bottom: 1px solid #2c2c34;
+}
+
+.title {
+  font-weight: 600;
+}
+
+.status {
+  font-size: 12px;
+  color: #9ca3af;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.status.recording {
+  color: #f87171;
+}
+
+.status.recording::before {
+  content: '';
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: currentColor;
+}
+
+.controls {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 16px;
+  border-bottom: 1px solid #2c2c34;
+  font-size: 12px;
+  color: #9ca3af;
+}
+
+select {
+  flex: 1;
+  background: #24242c;
+  color: #eaeaea;
+  border: 1px solid #34343e;
+  border-radius: 6px;
+  padding: 5px 8px;
+  font: inherit;
+}
+
+#content {
+  flex: 1;
+  padding: 16px;
+  overflow-y: auto;
+  line-height: 1.6;
+  word-break: break-word;
+}
+
+#content p {
+  margin: 0 0 12px;
+}
+
+.hint {
+  color: #6b7280;
+  font-style: italic;
+}
+
+footer {
+  padding: 8px 16px;
+  border-top: 1px solid #2c2c34;
+  color: #6b7280;
+  font-size: 11px;
+}

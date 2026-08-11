@@ -1,0 +1,21 @@
+version: 2
+
+updates:
+  # Electron ships the Chromium that renders model-authored HTML, so security
+  # updates to it matter even though the app never touches the network.
+  - package-ecosystem: npm
+    directory: /
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5
+    groups:
+      dev-tooling:
+        patterns:
+          - eslint
+          - '@eslint/*'
+          - globals
+
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: monthly

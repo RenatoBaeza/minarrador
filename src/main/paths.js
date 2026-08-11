@@ -1,6 +1,5 @@
 'use strict';
 
-const { app } = require('electron');
 const path = require('node:path');
 const fs = require('node:fs');
 
@@ -33,6 +32,7 @@ const FILES = {
   meta: 'meta.json',
 };
 
-const userData = () => app.getPath('userData');
+// Required lazily so this module stays importable outside Electron (tests, tools).
+const userData = () => require('electron').app.getPath('userData');
 
 module.exports = { folderStamp, createMeetingDir, FILES, userData };

@@ -19,7 +19,14 @@ class Ollama {
 
   async #once(route, body, { timeoutMs, signal }) {
     const ctrl = new AbortController();
-    const timer = setTimeout(() => ctrl.abort(new Error('timeout')), timeoutMs);
+    // Tracked explicitly rather than inferred from the rejection: aborting with
+    // a reason makes fetch reject with that reason, so the error arrives as a
+    // plain Error and never as an AbortError.
+    let timedOut = false;
+    const timer = setTimeout(() => {
+      timedOut = true;
+      ctrl.abort();
+    }, timeoutMs);
     const onAbort = () => ctrl.abort(signal.reason);
     if (signal) signal.addEventListener('abort', onAbort, { once: true });
     try {
@@ -40,7 +47,9 @@ class Ollama {
     } catch (err) {
       if (signal?.aborted) throw new OllamaError('Cancelled');
       if (err instanceof OllamaError) throw err;
-      if (err.name === 'AbortError') {
+      if (timedOut) {
+        // Deliberately not retryable: the timeout is already generous, and
+        // three more attempts would triple an already long stall.
         throw new OllamaError(`Ollama did not respond within ${Math.round(timeoutMs / 1000)}s (${route})`);
       }
       const wrapped = new OllamaError(`Cannot reach Ollama at ${this.host} — is it running? (${err.message})`);
@@ -57,7 +66,7 @@ class Ollama {
    * blip — the daemon swapping models, a momentary refused connection — should
    * not throw away everything transcribed so far, so transient faults retry.
    */
-  async #post(route, body, { timeoutMs = 15 * 60 * 1000, signal, attempts = 3 } = {}) {
+  async #post(route, body, { timeoutMs = 15 * 60 * 1000, signal, attempts = 3, retryDelayMs = 2000 } = {}) {
     let lastErr;
     for (let attempt = 1; attempt <= attempts; attempt++) {
       try {
@@ -65,7 +74,7 @@ class Ollama {
       } catch (err) {
         lastErr = err;
         if (!err.retryable || attempt === attempts || signal?.aborted) throw err;
-        await new Promise((r) => setTimeout(r, 2000 * attempt));
+        await new Promise((r) => setTimeout(r, retryDelayMs * attempt));
       }
     }
     throw lastErr;
@@ -130,6 +139,13 @@ class Ollama {
       model,
       temperature: 0,
       max_tokens: maxTokens,
+      // Thinking models deliberate before answering, which is worthless for a
+      // verbatim transcript and actively harmful here: gemma4:12b spends ~265
+      // tokens reasoning, and those count against max_tokens. On a short clip
+      // the budget is gone before a single word of transcript is emitted, so
+      // the reply comes back empty (finish_reason 'length') and the chunk is
+      // silently lost. Turning it off is ~3x faster and makes short windows work.
+      reasoning_effort: 'none',
       messages: [
         {
           role: 'user',
@@ -146,8 +162,12 @@ class Ollama {
   }
 
   /** Text-only chat. Returns the assistant message content. */
-  async chat(model, messages, { signal, temperature = 0.2, timeoutMs } = {}) {
-    const json = await this.#post('/v1/chat/completions', { model, temperature, messages }, { signal, timeoutMs });
+  async chat(model, messages, { signal, temperature = 0.2, timeoutMs, attempts, retryDelayMs } = {}) {
+    const json = await this.#post(
+      '/v1/chat/completions',
+      { model, temperature, messages },
+      { signal, timeoutMs, attempts, retryDelayMs },
+    );
     return json.choices?.[0]?.message?.content ?? '';
   }
 }

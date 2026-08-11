@@ -54,7 +54,7 @@ app.whenReady().then(async () => {
   console.log(`Transcribe : ${config.transcribeModel}`);
   console.log(`Notes      : ${config.summaryModel}\n`);
 
-  let meta = {};
+  let meta;
   try {
     meta = JSON.parse(fs.readFileSync(path.join(folder, FILES.meta), 'utf8'));
   } catch {

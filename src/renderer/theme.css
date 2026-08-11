@@ -1,0 +1,410 @@
+/*
+ * Minarrador design tokens and UI primitives.
+ *
+ * Shared by every visible surface (tray popover, live transcript). Light is the
+ * base; dark is a token swap only, so no component needs to know which theme it
+ * is in. Indigo #4F46E5 is the product accent and matches the exported PDF.
+ */
+
+:root {
+  color-scheme: light dark;
+
+  /* ---------------------------------------------------------------- colour */
+  --bg: #f4f4f8;
+  --surface: #ffffff;
+  --surface-2: #f0f0f5;
+  --surface-3: #e7e7ef;
+  --border: rgba(18, 17, 38, 0.1);
+  --border-strong: rgba(18, 17, 38, 0.16);
+
+  --text: #16152a;
+  --text-2: #56546d;
+  --text-3: #8a889d;
+
+  --accent: #4f46e5;
+  --accent-hover: #4338ca;
+  --accent-soft: rgba(79, 70, 229, 0.1);
+  --on-accent: #ffffff;
+
+  --record: #e11d48;
+  --record-soft: rgba(225, 29, 72, 0.1);
+  --warn: #d97706;
+  --ok: #059669;
+
+  /* --------------------------------------------------------------- shape */
+  --r-sm: 7px;
+  --r-md: 10px;
+  --r-lg: 14px;
+  --r-pill: 999px;
+
+  --shadow-1: 0 1px 2px rgba(18, 17, 38, 0.06), 0 1px 1px rgba(18, 17, 38, 0.04);
+  --shadow-2: 0 10px 30px rgba(18, 17, 38, 0.14), 0 2px 8px rgba(18, 17, 38, 0.08);
+
+  /* ---------------------------------------------------------------- type */
+  --font: "Segoe UI Variable Text", "Segoe UI", system-ui, -apple-system, sans-serif;
+  --font-num: "Segoe UI Variable Display", "Segoe UI", system-ui, sans-serif;
+
+  /* -------------------------------------------------------------- motion */
+  --ease: cubic-bezier(0.22, 0.61, 0.36, 1);
+  --fast: 120ms;
+  --med: 200ms;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #0d0d13;
+    --surface: #15151e;
+    --surface-2: #1d1d28;
+    --surface-3: #262634;
+    --border: rgba(255, 255, 255, 0.08);
+    --border-strong: rgba(255, 255, 255, 0.14);
+
+    --text: #ededf3;
+    --text-2: #a2a0b3;
+    --text-3: #6e6c80;
+
+    /* Lifted so it still clears contrast against a near-black surface. */
+    --accent: #8b85f7;
+    --accent-hover: #a09bf9;
+    --accent-soft: rgba(139, 133, 247, 0.14);
+    --on-accent: #0d0d13;
+
+    --record: #fb7185;
+    --record-soft: rgba(251, 113, 133, 0.14);
+    --warn: #fbbf24;
+    --ok: #34d399;
+
+    --shadow-1: 0 1px 2px rgba(0, 0, 0, 0.4);
+    --shadow-2: 0 16px 40px rgba(0, 0, 0, 0.6), 0 2px 8px rgba(0, 0, 0, 0.4);
+  }
+}
+
+/* ------------------------------------------------------------------- reset */
+
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  margin: 0;
+  height: 100%;
+}
+
+body {
+  font-family: var(--font);
+  font-size: 13px;
+  line-height: 1.5;
+  color: var(--text);
+  background: var(--bg);
+  -webkit-font-smoothing: antialiased;
+  /* A utility window is chrome, not a document: text selection is opt-in. */
+  user-select: none;
+  cursor: default;
+}
+
+:focus:not(:focus-visible) {
+  outline: none;
+}
+
+:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+  border-radius: var(--r-sm);
+}
+
+/* -------------------------------------------------------------- scrollbar */
+
+.scroll {
+  overflow-y: auto;
+  scrollbar-width: thin;
+  scrollbar-color: var(--border-strong) transparent;
+}
+
+.scroll::-webkit-scrollbar {
+  width: 10px;
+}
+
+.scroll::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+.scroll::-webkit-scrollbar-thumb {
+  background: var(--border-strong);
+  border: 3px solid transparent;
+  background-clip: content-box;
+  border-radius: var(--r-pill);
+}
+
+.scroll::-webkit-scrollbar-thumb:hover {
+  background: var(--text-3);
+  background-clip: content-box;
+}
+
+/* ---------------------------------------------------------------- buttons */
+
+.btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 7px;
+  min-height: 32px;
+  padding: 0 12px;
+  border: 1px solid var(--border);
+  border-radius: var(--r-sm);
+  background: var(--surface);
+  color: var(--text);
+  font: inherit;
+  font-weight: 550;
+  cursor: default;
+  white-space: nowrap;
+  transition: background var(--fast) var(--ease), border-color var(--fast) var(--ease),
+    transform var(--fast) var(--ease);
+}
+
+.btn:hover:not(:disabled) {
+  background: var(--surface-2);
+  border-color: var(--border-strong);
+}
+
+.btn:active:not(:disabled) {
+  transform: translateY(1px);
+}
+
+.btn:disabled {
+  opacity: 0.45;
+}
+
+.btn--primary {
+  background: var(--accent);
+  border-color: transparent;
+  color: var(--on-accent);
+}
+
+.btn--primary:hover:not(:disabled) {
+  background: var(--accent-hover);
+  border-color: transparent;
+}
+
+.btn--danger {
+  background: var(--record);
+  border-color: transparent;
+  color: #fff;
+}
+
+.btn--danger:hover:not(:disabled) {
+  filter: brightness(1.08);
+  background: var(--record);
+}
+
+.btn--ghost {
+  background: transparent;
+  border-color: transparent;
+  color: var(--text-2);
+}
+
+.btn--ghost:hover:not(:disabled) {
+  background: var(--surface-2);
+  border-color: transparent;
+  color: var(--text);
+}
+
+.btn--lg {
+  min-height: 40px;
+  width: 100%;
+  font-size: 14px;
+}
+
+.btn--icon {
+  min-height: 28px;
+  width: 28px;
+  padding: 0;
+  border-radius: var(--r-sm);
+}
+
+/* ----------------------------------------------------------------- select */
+
+.select {
+  appearance: none;
+  min-height: 30px;
+  max-width: 100%;
+  padding: 0 26px 0 9px;
+  border: 1px solid var(--border);
+  border-radius: var(--r-sm);
+  background: var(--surface);
+  color: var(--text);
+  font: inherit;
+  text-overflow: ellipsis;
+  cursor: default;
+  /* Chevron drawn inline so the page needs no network or image assets. */
+  background-image: linear-gradient(45deg, transparent 50%, currentcolor 50%),
+    linear-gradient(135deg, currentcolor 50%, transparent 50%);
+  background-position: calc(100% - 14px) center, calc(100% - 9px) center;
+  background-size: 5px 5px, 5px 5px;
+  background-repeat: no-repeat;
+}
+
+.select:hover {
+  border-color: var(--border-strong);
+}
+
+/* ---------------------------------------------------------------- switch */
+
+.switch {
+  position: relative;
+  flex: none;
+  width: 34px;
+  height: 20px;
+  border: none;
+  padding: 0;
+  border-radius: var(--r-pill);
+  background: var(--surface-3);
+  cursor: default;
+  transition: background var(--med) var(--ease);
+}
+
+.switch::after {
+  content: "";
+  position: absolute;
+  top: 3px;
+  left: 3px;
+  width: 14px;
+  height: 14px;
+  border-radius: 50%;
+  background: #fff;
+  box-shadow: var(--shadow-1);
+  transition: transform var(--med) var(--ease);
+}
+
+.switch[aria-checked="true"] {
+  background: var(--accent);
+}
+
+.switch[aria-checked="true"]::after {
+  transform: translateX(14px);
+}
+
+.switch:disabled {
+  opacity: 0.45;
+}
+
+/* ------------------------------------------------------------------ chips */
+
+.chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  height: 20px;
+  padding: 0 8px;
+  border-radius: var(--r-pill);
+  background: var(--surface-2);
+  color: var(--text-2);
+  font-size: 11px;
+  font-weight: 550;
+  white-space: nowrap;
+}
+
+.chip--ok {
+  background: color-mix(in srgb, var(--ok) 14%, transparent);
+  color: var(--ok);
+}
+
+.chip--warn {
+  background: color-mix(in srgb, var(--warn) 16%, transparent);
+  color: var(--warn);
+}
+
+.chip--off {
+  color: var(--text-3);
+}
+
+/* ------------------------------------------------------------------- dots */
+
+.dot {
+  flex: none;
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--text-3);
+}
+
+.dot--ok {
+  background: var(--ok);
+}
+
+.dot--warn {
+  background: var(--warn);
+}
+
+.dot--rec {
+  background: var(--record);
+  animation: pulse 2s var(--ease) infinite;
+}
+
+.dot--busy {
+  background: var(--accent);
+  animation: pulse 1.4s var(--ease) infinite;
+}
+
+@keyframes pulse {
+  0%,
+  100% {
+    opacity: 1;
+    transform: scale(1);
+  }
+  50% {
+    opacity: 0.45;
+    transform: scale(0.86);
+  }
+}
+
+/* ------------------------------------------------------------- typography */
+
+.label {
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--text-3);
+}
+
+.num {
+  font-family: var(--font-num);
+  font-variant-numeric: tabular-nums;
+  letter-spacing: -0.01em;
+}
+
+.muted {
+  color: var(--text-2);
+}
+
+.truncate {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* --------------------------------------------------------------- a11y/motion */
+
+.visually-hidden {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  margin: -1px;
+  padding: 0;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  white-space: nowrap;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.001ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.001ms !important;
+  }
+}

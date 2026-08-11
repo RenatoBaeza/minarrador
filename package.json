@@ -6,16 +6,36 @@
   "main": "src/main/main.js",
   "author": "Renato Baeza",
   "license": "MIT",
+  "private": true,
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/RenatoBaeza/minarrador.git"
+  },
+  "bugs": {
+    "url": "https://github.com/RenatoBaeza/minarrador/issues"
+  },
+  "homepage": "https://github.com/RenatoBaeza/minarrador#readme",
+  "engines": {
+    "node": ">=20.11"
+  },
   "scripts": {
     "start": "electron .",
+    "test": "node --test \"test/**/*.test.js\"",
+    "test:watch": "node --test --watch \"test/**/*.test.js\"",
+    "lint": "eslint .",
+    "lint:fix": "eslint . --fix",
+    "check": "npm run lint && npm test",
     "icons": "node scripts/make-icons.js",
     "pipeline": "electron scripts/run-pipeline.js",
     "capture-test": "electron scripts/capture-test.js",
     "dist": "electron-builder --win nsis"
   },
   "devDependencies": {
+    "@eslint/js": "^10.0.1",
     "electron": "^43.3.0",
-    "electron-builder": "^26.15.3"
+    "electron-builder": "^26.15.3",
+    "eslint": "^10.8.1",
+    "globals": "^17.9.0"
   },
   "build": {
     "appId": "com.rntbz.minarrador",
@@ -24,11 +44,15 @@
     "files": [
       "src/**/*",
       "assets/**/*",
-      "package.json"
+      "package.json",
+      "!**/*.map"
     ],
     "directories": {
-      "output": "dist"
+      "output": "dist",
+      "buildResources": "assets"
     },
+    "asar": true,
+    "publish": null,
     "win": {
       "target": [
         {
@@ -48,7 +72,9 @@
       "createStartMenuShortcut": true,
       "shortcutName": "Minarrador",
       "installerIcon": "assets/icon.ico",
-      "uninstallerIcon": "assets/icon.ico"
+      "uninstallerIcon": "assets/icon.ico",
+      "runAfterFinish": true,
+      "deleteAppDataOnUninstall": false
     }
   }
 }

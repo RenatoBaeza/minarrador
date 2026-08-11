@@ -1,0 +1,16 @@
+{
+  "// note": "Editor-only. Drives IntelliSense and JSDoc-based checking in VS Code; the project ships no TypeScript and needs no compile step.",
+  "compilerOptions": {
+    "target": "ES2023",
+    "lib": ["ES2023", "DOM"],
+    "module": "CommonJS",
+    "moduleResolution": "node",
+    "checkJs": false,
+    "strict": false,
+    "noEmit": true,
+    "resolveJsonModule": true,
+    "maxNodeModuleJsDepth": 2
+  },
+  "include": ["src/**/*.js", "scripts/**/*.js", "test/**/*.js", "eslint.config.js"],
+  "exclude": ["node_modules", "dist"]
+}

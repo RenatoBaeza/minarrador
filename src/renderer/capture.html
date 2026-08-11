@@ -4,25 +4,11 @@
     <meta charset="utf-8" />
     <meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self'" />
     <title>Minarrador capture</title>
-    <style>
-      body { font-family: sans-serif; margin: 10px; background: #fafafa; }
-      #transcript { border: 1px solid #ccc; padding: 8px; height: 200px; overflow-y: auto; background: #fff; }
-      #language { margin-bottom: 8px; }
-    </style>
   </head>
   <body>
-    <div id="language">
-      <label for="langSelect">Language:</label>
-      <select id="langSelect">
-        <option value="" selected>Auto Detect</option>
-        <option value="English">English</option>
-        <option value="Spanish">Spanish</option>
-        <option value="French">French</option>
-        <option value="German">German</option>
-      </select>
-    </div>
-    <div id="transcript" placeholder="Live transcript will appear here..."></div>
-    <!-- Hidden worker window: owns the mic + system-audio graph. Never shown. -->
+    <!-- Hidden worker window: owns the mic + system-audio graph. Never shown,
+         so it deliberately has no markup of its own. The live transcript is a
+         separate window (transcript.html). -->
     <script src="capture.js"></script>
   </body>
 </html>

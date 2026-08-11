@@ -3,41 +3,45 @@
 // Main-process side of audio capture: owns the hidden renderer, writes PCM to
 // disk as it arrives, and watches idle levels to spot a meeting starting.
 
-const { BrowserWindow, ipcMain, desktopCapturer, session } = require('electron');
+const { BrowserWindow, ipcMain, desktopCapturer, session, webContents } = require('electron');
 const { EventEmitter } = require('node:events');
 const path = require('node:path');
 
 const log = require('./logger');
-const { WavWriter } = require('./wav');
-
+const { WavWriter, buildWav } = require('./wav');
 const { Ollama } = require('./ollama');
 
 const SAMPLE_RATE = 16000;
+const BYTES_PER_SECOND = SAMPLE_RATE * 2; // 16-bit mono
 
-function createWavBuffer(chunks) {
-  const data = Buffer.concat(chunks);
-  const byteRate = SAMPLE_RATE * 2; // 16-bit mono
-  const blockAlign = 2;
-  const subchunk2Size = data.length;
-  const chunkSize = 36 + subchunk2Size;
-  const header = Buffer.alloc(44);
-  header.write('RIFF', 0);
-  header.writeUInt32LE(chunkSize, 4);
-  header.write('WAVE', 8);
-  header.write('fmt ', 12);
-  header.writeUInt32LE(16, 16); // Subchunk1Size
-  header.writeUInt16LE(1, 20); // AudioFormat PCM
-  header.writeUInt16LE(1, 22); // NumChannels
-  header.writeUInt32LE(SAMPLE_RATE, 24); // SampleRate
-  header.writeUInt32LE(byteRate, 28); // ByteRate
-  header.writeUInt16LE(blockAlign, 32); // BlockAlign
-  header.writeUInt16LE(16, 34); // BitsPerSample
-  header.write('data', 36);
-  header.writeUInt32LE(subchunk2Size, 40);
-  return Buffer.concat([header, data]);
-}
+/**
+ * How much audio each live-transcript request covers, and therefore the floor
+ * on how stale a subtitle line is when it appears.
+ *
+ * Measured on gemma4:12b, a request costs ~1s almost regardless of window
+ * length — the cost is per-request overhead, not audio length — so a short
+ * window is nearly free and this sits well inside a 20% duty cycle. Much below
+ * ~4s the model starts getting too little context to transcribe well.
+ */
+const LIVE_WINDOW_SECONDS = 5;
+/**
+ * Hard ceiling on buffered live audio. Without this the queue grows for the
+ * whole meeting whenever the model cannot keep up (~115 MB/hour), so old audio
+ * is dropped rather than allowed to accumulate.
+ */
+const LIVE_MAX_SECONDS = 60;
 
 const RENDERER = path.join(__dirname, '..', 'renderer');
+
+/**
+ * webContents ids allowed to open a microphone or screen-audio stream.
+ *
+ * The permission handlers below are installed on the default session, which
+ * every window shares. Gating on an explicit allow-list means only the capture
+ * worker can reach a capture device — a future window (or anything loaded into
+ * one) cannot silently open the mic.
+ */
+const mediaClients = new Set();
 
 /**
  * Fires 'speech' when the room has been consistently audible for a while.
@@ -83,20 +87,108 @@ class SpeechDetector extends EventEmitter {
   }
 }
 
+/**
+ * Buffers recorded PCM and turns it into rough live transcript lines.
+ *
+ * Deliberately independent of the post-recording pipeline: this is a preview
+ * for the person in the meeting, and dropping audio under load is preferable
+ * to falling behind. The saved WAV is always transcribed properly afterwards.
+ *
+ * @fires LiveTranscriber#text
+ */
+class LiveTranscriber extends EventEmitter {
+  /** @param {{ ollama: Ollama }} deps */
+  constructor({ ollama }) {
+    super();
+    this.ollama = ollama;
+    this.enabled = false;
+    this.model = '';
+    this.language = '';
+    this.chunks = [];
+    this.bytes = 0;
+    this.busy = false;
+    this.timer = null;
+  }
+
+  /** @param {{ enabled?: boolean, model?: string, language?: string }} cfg */
+  configure(cfg = {}) {
+    if ('enabled' in cfg) this.enabled = Boolean(cfg.enabled);
+    if ('model' in cfg) this.model = cfg.model ?? '';
+    if ('language' in cfg) this.language = cfg.language ?? '';
+    if (!this.enabled) this.stop();
+  }
+
+  get active() {
+    return this.enabled && Boolean(this.model) && this.timer !== null;
+  }
+
+  start() {
+    if (!this.enabled || !this.model || this.timer) return;
+    this.reset();
+    this.timer = setInterval(() => void this.drain(), LIVE_WINDOW_SECONDS * 1000);
+  }
+
+  stop() {
+    if (this.timer) clearInterval(this.timer);
+    this.timer = null;
+    this.reset();
+  }
+
+  reset() {
+    this.chunks.length = 0;
+    this.bytes = 0;
+  }
+
+  /** @param {Buffer} buf 16-bit mono PCM at SAMPLE_RATE */
+  push(buf) {
+    if (!this.timer) return;
+    this.chunks.push(buf);
+    this.bytes += buf.length;
+    // Drop the oldest audio rather than letting a slow model grow the queue.
+    while (this.bytes > LIVE_MAX_SECONDS * BYTES_PER_SECOND && this.chunks.length > 1) {
+      this.bytes -= this.chunks.shift().length;
+    }
+  }
+
+  /** Sends everything buffered so far as one request. Driven by the timer. */
+  async drain() {
+    // One request in flight at a time; audio keeps buffering (bounded) meanwhile.
+    if (this.busy || !this.model || this.bytes < BYTES_PER_SECOND) return;
+    this.busy = true;
+    const pcm = Buffer.concat(this.chunks, this.bytes);
+    const seconds = this.bytes / BYTES_PER_SECOND;
+    this.reset();
+
+    try {
+      const text = await this.ollama.transcribe(this.model, buildWav(pcm, SAMPLE_RATE), {
+        language: this.language || undefined,
+        seconds,
+      });
+      if (text) this.emit('text', text);
+    } catch (err) {
+      // A live preview is best-effort; the recording itself is unaffected.
+      log.warn('live transcription failed:', err.message);
+    } finally {
+      this.busy = false;
+    }
+  }
+}
+
 class CaptureController extends EventEmitter {
-  constructor() {
+  /** @param {{ ollamaHost?: string }} [options] */
+  constructor({ ollamaHost } = {}) {
     super();
     this.window = null;
     this.writer = null;
     this.status = { micOk: false, systemOk: false, micError: '', systemError: '', running: false };
     this.levels = { mixed: 0, mic: 0, system: 0 };
     this.detector = new SpeechDetector();
-    this.pcmChunks = [];
-    this.transcribing = false;
-    this.currentLanguage = '';
-    this.ollama = new Ollama();
+    this.ollama = new Ollama(ollamaHost);
+    this.liveTranscriber = new LiveTranscriber({ ollama: this.ollama });
     this.detector.on('speech', (info) => this.emit('speech', info));
+    this.liveTranscriber.on('text', (text) => this.emit('transcript', text));
     this.monitoring = false;
+    this._quitting = false;
   }
 
   /** Grants screen-audio loopback without showing a picker. */
@@ -104,7 +196,11 @@ class CaptureController extends EventEmitter {
     const ses = session.defaultSession;
 
     ses.setDisplayMediaRequestHandler(
-      async (_request, callback) => {
+      async (request, callback) => {
+        if (!isMediaClient(request?.frame)) {
+          log.warn('denied a display-media request from an unrecognised frame');
+          return callback({});
+        }
         try {
           const sources = await desktopCapturer.getSources({ types: ['screen'] });
           if (!sources.length) return callback({});
@@ -120,45 +216,32 @@ class CaptureController extends EventEmitter {
     );
 
     const allow = new Set(['media', 'audioCapture', 'display-capture']);
-    ses.setPermissionRequestHandler((_wc, permission, callback) => callback(allow.has(permission)));
-    ses.setPermissionCheckHandler((_wc, permission) => allow.has(permission));
+    ses.setPermissionRequestHandler((wc, permission, callback) =>
+      callback(allow.has(permission) && mediaClients.has(wc.id)),
+    );
+    ses.setPermissionCheckHandler((wc, permission) => allow.has(permission) && mediaClients.has(wc?.id));
   }
 
   async init() {
-    ipcMain.on('capture:pcm', async (_e, arrayBuffer) => {
+    ipcMain.on('capture:pcm', (event, arrayBuffer) => {
+      // Only the capture worker feeds the recording.
+      if (event.sender.id !== this.window?.webContents.id) return;
       const buf = Buffer.from(arrayBuffer);
-      if (this.writer) this.writer.write(buf);
-      // accumulate for transcription
-      this.pcmChunks.push(buf);
-      if (!this.transcribing && this.currentLanguage) {
-        this.transcribing = true;
-        setTimeout(async () => {
-          const wav = createWavBuffer(this.pcmChunks);
-          this.pcmChunks = [];
-          try {
-            const models = await this.ollama.audioModels();
-            const model = models[0] || 'gemma4:12b';
-            const text = await this.ollama.transcribe(model, wav, { language: this.currentLanguage });
-            if (text) this.window?.webContents.send('capture:transcript', text);
-          } catch (e) {
-            // ignore transcription errors
-          } finally {
-            this.transcribing = false;
-          }
-        }, 500);
+      if (this.writer) {
+        this.writer.write(buf);
+        this.liveTranscriber.push(buf);
       }
     });
 
-    ipcMain.on('capture:setLanguage', (_e, lang) => {
-      this.currentLanguage = lang;
-    });
-    ipcMain.on('capture:level', (_e, levels) => {
+    ipcMain.on('capture:level', (event, levels) => {
+      if (event.sender.id !== this.window?.webContents.id) return;
       this.levels = levels;
       if (this.monitoring && !this.writer) this.detector.push(levels);
       this.emit('levels', levels);
     });
 
-    ipcMain.on('capture:status', (_e, status) => {
+    ipcMain.on('capture:status', (event, status) => {
+      if (event.sender.id !== this.window?.webContents.id) return;
       this.status = { ...this.status, ...status };
       if (status.fatal) log.error('capture fatal:', status.fatal);
       else if (status.micError || status.systemError) {
@@ -180,6 +263,8 @@ class CaptureController extends EventEmitter {
         backgroundThrottling: false,
       },
     });
+    mediaClients.add(this.window.webContents.id);
+
     // Nothing in this window is user-facing; never let it appear.
     this.window.on('close', (e) => {
       if (!this._quitting) e.preventDefault();
@@ -202,6 +287,15 @@ class CaptureController extends EventEmitter {
     this.window?.webContents.send('capture:configure', { active, ...config });
   }
 
+  /**
+   * Points the live preview at a model, or turns it off.
+   * @param {{ enabled?: boolean, model?: string, language?: string }} cfg
+   */
+  configureLive(cfg) {
+    this.liveTranscriber.configure(cfg);
+    if (this.isRecording && this.liveTranscriber.enabled) this.liveTranscriber.start();
+  }
+
   get isRecording() {
     return Boolean(this.writer);
   }
@@ -212,8 +306,9 @@ class CaptureController extends EventEmitter {
 
   startRecording(filePath) {
     if (this.writer) return;
-    this.writer = new WavWriter(filePath, { sampleRate: 16000, channels: 1 });
+    this.writer = new WavWriter(filePath, { sampleRate: SAMPLE_RATE, channels: 1 });
     this.detector.reset();
+    this.liveTranscriber.start();
     this.window?.webContents.send('capture:setRecording', true);
     log.info('recording ->', filePath);
   }
@@ -221,6 +316,7 @@ class CaptureController extends EventEmitter {
   stopRecording() {
     if (!this.writer) return null;
     this.window?.webContents.send('capture:setRecording', false);
+    this.liveTranscriber.stop();
     // Let the worklet's final flush land before we patch the header.
     const writer = this.writer;
     return new Promise((resolve) => {
@@ -237,13 +333,28 @@ class CaptureController extends EventEmitter {
 
   destroy() {
     this._quitting = true;
+    this.liveTranscriber.stop();
     if (this.writer) {
       this.writer.close();
       this.writer = null;
     }
-    if (this.window && !this.window.isDestroyed()) this.window.destroy();
+    if (this.window && !this.window.isDestroyed()) {
+      mediaClients.delete(this.window.webContents.id);
+      this.window.destroy();
+    }
     this.window = null;
   }
 }
 
-module.exports = { CaptureController, SpeechDetector };
+/** Resolves a display-media request back to a registered capture client. */
+function isMediaClient(frame) {
+  if (!frame) return false;
+  try {
+    const wc = webContents.fromFrame(frame);
+    return Boolean(wc && mediaClients.has(wc.id));
+  } catch {
+    return false;
+  }
+}
+
+module.exports = { CaptureController, SpeechDetector, LiveTranscriber };

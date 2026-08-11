@@ -1,53 +1,28 @@
 <!DOCTYPE html>
 <html lang="en">
-<head>
-<meta charset="UTF-8">
-<title>Live Transcription</title>
-<style>
-  body {
-    margin: 0;
-    font-family: 'Segoe UI', system-ui, sans-serif;
-    background: linear-gradient(135deg, #2b2b2b, #111);
-    color: #eaeaea;
-    display: flex;
-    flex-direction: column;
-    height: 100vh;
-    overflow: hidden;
-  }
-  header {
-    padding: 12px 16px;
-    background: rgba(255,255,255,0.07);
-    backdrop-filter: blur(6px);
-    font-size: 1.2rem;
-    font-weight: 600;
-    text-align: center;
-    border-bottom: 1px solid rgba(255,255,255,0.15);
-  }
-  #content {
-    flex: 1;
-    padding: 16px;
-    overflow-y: auto;
-    line-height: 1.5;
-    white-space: pre-wrap;
-    word-break: break-word;
-  }
-</style>
-</head>
-<body>
-<header>Live Transcription</header>
-<div id="content"></div>
-<script>
-  const { ipcRenderer } = require('electron');
-  const content = document.getElementById('content');
-  ipcRenderer.on('clear', () => {
-    content.innerHTML = '';
-  });
-  ipcRenderer.on('update', (_, text) => {
-    const p = document.createElement('div');
-    p.textContent = text;
-    content.appendChild(p);
-    content.scrollTop = content.scrollHeight;
-  });
-</script>
-</body>
+  <head>
+    <meta charset="utf-8" />
+    <meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self'; style-src 'self'" />
+    <title>Live Transcription</title>
+    <link rel="stylesheet" href="transcript.css" />
+  </head>
+  <body>
+    <header>
+      <span class="title">Live transcript</span>
+      <span id="status" class="status">Idle</span>
+    </header>
+
+    <div class="controls">
+      <label for="langSelect">Language</label>
+      <select id="langSelect"></select>
+    </div>
+
+    <div id="content" role="log" aria-live="polite" aria-label="Live transcript">
+      <p class="hint" id="hint">Transcript lines appear here a few seconds after people start speaking.</p>
+    </div>
+
+    <footer>A rough live preview — the saved notes are transcribed properly after you stop.</footer>
+
+    <script src="transcript.js"></script>
+  </body>
 </html>

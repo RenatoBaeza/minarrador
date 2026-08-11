@@ -9,8 +9,11 @@ const path = require('node:path');
 
 const { Ollama } = require('./ollama');
 const { readWav, buildWav, splitIntoChunks, rms } = require('./wav');
-const { htmlToPdf } = require('./pdf');
 const { FILES } = require('./paths');
+
+// ./pdf pulls in Electron, so it is required at call time rather than on import.
+// That keeps every pure stage of this file usable from a plain Node process.
+const htmlToPdf = (...args) => require('./pdf').htmlToPdf(...args);
 
 /** Chunks quieter than this are almost certainly room tone; skip them. */
 const SILENCE_RMS = 0.004;
@@ -217,9 +220,21 @@ function fmtDuration(seconds) {
   return `${s}s`;
 }
 
+/** Meta comes from disk or a re-run, so neither field is guaranteed present. */
+const modelsOf = (meta) => ({
+  transcribe: meta?.models?.transcribe || 'unknown',
+  summary: meta?.models?.summary || 'unknown',
+});
+
+/** Formats a stored ISO timestamp, tolerating a missing or unparseable one. */
+function fmtRecordedAt(startedAt) {
+  const d = new Date(startedAt ?? NaN);
+  return Number.isNaN(d.getTime()) ? 'date unknown' : d.toLocaleString();
+}
+
 function renderMarkdown(notes, meta) {
   const L = [`# ${notes.title}`, ''];
-  L.push(`*Recorded ${new Date(meta.startedAt).toLocaleString()} · ${fmtDuration(meta.durationSeconds)}*`, '');
+  L.push(`*Recorded ${fmtRecordedAt(meta.startedAt)} · ${fmtDuration(meta.durationSeconds)}*`, '');
 
   L.push('## Summary', '');
   for (const b of notes.summary) L.push(`- ${b}`);
@@ -243,7 +258,8 @@ function renderMarkdown(notes, meta) {
   }
   L.push('');
 
-  L.push('---', '', `<sub>Transcribed with \`${meta.models.transcribe}\` and summarised with \`${meta.models.summary}\` locally via Ollama. Nothing left this machine.</sub>`, '');
+  const models = modelsOf(meta);
+  L.push('---', '', `<sub>Transcribed with \`${models.transcribe}\` and summarised with \`${models.summary}\` locally via Ollama. Nothing left this machine.</sub>`, '');
   return L.join('\n');
 }
 
@@ -273,7 +289,7 @@ async function renderPdf(dir, config, { onProgress, signal, ollama, notes, meta 
           role: 'user',
           content:
             `Build a polished one-page meeting brief from this data.\n\n` +
-            `Meeting date: ${new Date(meta.startedAt).toLocaleString()}\nDuration: ${fmtDuration(meta.durationSeconds)}\n\n` +
+            `Meeting date: ${fmtRecordedAt(meta.startedAt)}\nDuration: ${fmtDuration(meta.durationSeconds)}\n\n` +
             JSON.stringify(notes, null, 2),
         },
       ],
@@ -353,7 +369,7 @@ function fallbackHtml(notes, meta) {
 <body>
   <header>
     <h1>${esc(notes.title)}</h1>
-    <div class="meta">${esc(new Date(meta.startedAt).toLocaleString())} · ${esc(fmtDuration(meta.durationSeconds))}</div>
+    <div class="meta">${esc(fmtRecordedAt(meta.startedAt))} · ${esc(fmtDuration(meta.durationSeconds))}</div>
   </header>
 
   <h2>Summary</h2>
@@ -374,7 +390,7 @@ function fallbackHtml(notes, meta) {
     </tbody>
   </table>
 
-  <footer>Transcribed and summarised locally with Ollama (${esc(meta.models.transcribe)} / ${esc(meta.models.summary)}). Nothing left this machine.</footer>
+  <footer>Transcribed and summarised locally with Ollama (${esc(modelsOf(meta).transcribe)} / ${esc(modelsOf(meta).summary)}). Nothing left this machine.</footer>
 </body>
 </html>`;
 }
