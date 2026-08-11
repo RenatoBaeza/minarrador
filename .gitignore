@@ -11,6 +11,9 @@ pnpm-debug.log*
 *.exe
 *.dll
 
+# whisper.cpp binaries and GGML weights (npm run whisper:setup)
+/vendor/
+
 # Electron specific
 /.cache/
 *.blockmap

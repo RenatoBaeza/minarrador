@@ -13,6 +13,7 @@ const settingsStore = require('./settings');
 const { CaptureController } = require('./capture');
 const { AppTray } = require('./tray');
 const { Ollama } = require('./ollama');
+const { WhisperServer } = require('./whisper');
 const { runPipeline, fmtDuration } = require('./pipeline');
 const { createMeetingDir, FILES } = require('./paths');
 
@@ -38,6 +39,7 @@ const state = {
 
 let tray = null;
 let capture = null;
+let whisper = null;
 let settings = null;
 let uiTimer = null;
 let transcriptionWindow = null;
@@ -104,9 +106,13 @@ function sendToTranscript(channel, payload) {
 }
 
 function transcriptState() {
+  const engine = capture?.liveTranscriber.engine === 'whisper' ? 'whisper.cpp' : settings?.transcribeModel;
   return {
     recording: state.phase === 'recording',
     label: state.phase === 'recording' ? 'Recording' : state.phase === 'processing' ? state.progress || 'Processing…' : 'Idle',
+    // Which engine is producing these lines. Worth showing: the two differ
+    // enough in speed and phrasing that "why is this slow" has a real answer.
+    engine: state.phase === 'recording' && settings?.liveTranscript ? engine : '',
   };
 }
 
@@ -122,6 +128,8 @@ function refreshTray() {
     ollamaUp: state.ollamaUp,
     models: state.models,
     audioModels: state.audioModels,
+    whisper: whisper?.describe() ?? null,
+    liveEngine: capture?.liveTranscriber.engine ?? settings?.liveEngine,
     lastDir: state.lastDir,
   });
 }
@@ -332,8 +340,20 @@ function applyCaptureConfig() {
   capture.setActive(true, { captureMic: settings.captureMic, captureSystem: settings.captureSystem });
 }
 
+function applyWhisperConfig() {
+  whisper?.configure({
+    root: settings.whisperRoot,
+    model: settings.whisperModel,
+    threads: settings.whisperThreads,
+  });
+}
+
 function applyLiveConfig() {
-  capture?.configureLive({ enabled: settings.liveTranscript, model: settings.transcribeModel });
+  capture?.configureLive({
+    enabled: settings.liveTranscript,
+    engine: settings.liveEngine,
+    model: settings.transcribeModel,
+  });
 }
 
 function diagnostics() {
@@ -348,6 +368,8 @@ function diagnostics() {
       ollamaUp: state.ollamaUp,
       models: state.models,
       audioModels: state.audioModels,
+      whisper: whisper?.describe(),
+      liveEngine: capture?.liveTranscriber.engine,
       captureStatus: capture?.status,
       levels: capture?.levels,
       settings,
@@ -411,7 +433,22 @@ if (!app.requestSingleInstanceLock()) {
     applyLoginItem();
 
     CaptureController.installMediaHandlers();
-    capture = new CaptureController({ ollamaHost: settings.ollamaHost });
+    whisper = new WhisperServer({
+      root: settings.whisperRoot,
+      model: settings.whisperModel,
+      threads: settings.whisperThreads,
+    });
+    log.info(
+      whisper.available
+        ? `whisper.cpp found: ${path.basename(whisper.model)} in ${whisper.root}`
+        : `whisper.cpp not installed in ${whisper.root} — the live preview falls back to Ollama`,
+    );
+    // A crash takes the preview with it until the next recording; the meeting
+    // itself and the proper transcription afterwards are untouched.
+    whisper.on('exit', refreshTray);
+    whisper.on('ready', refreshTray);
+
+    capture = new CaptureController({ ollamaHost: settings.ollamaHost, whisper });
     capture.on('status', refreshTray);
     capture.on('transcript', (text) => sendToTranscript('transcript:line', text));
     capture.on('speech', () => {
@@ -449,7 +486,12 @@ if (!app.requestSingleInstanceLock()) {
         settings = settingsStore.save(patch);
         if ('startAtLogin' in patch) applyLoginItem();
         if ('captureMic' in patch || 'captureSystem' in patch) applyCaptureConfig();
-        if ('liveTranscript' in patch || 'transcribeModel' in patch) applyLiveConfig();
+        // Whisper first: which engine the live transcriber can actually use
+        // depends on what the server resolved to.
+        if ('whisperModel' in patch || 'whisperRoot' in patch || 'whisperThreads' in patch) applyWhisperConfig();
+        if ('liveTranscript' in patch || 'transcribeModel' in patch || 'liveEngine' in patch || 'whisperModel' in patch) {
+          applyLiveConfig();
+        }
         refreshTray();
       },
       // before-quit owns the shutdown sequence, including its re-entrancy guard.

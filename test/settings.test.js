@@ -16,6 +16,10 @@ const BASE = Object.freeze({
   suggestOnAudio: true,
   startAtLogin: true,
   liveTranscript: true,
+  liveEngine: 'whisper',
+  whisperModel: 'ggml-base.bin',
+  whisperRoot: '',
+  whisperThreads: 0,
   chunkSeconds: 60,
 });
 
@@ -89,4 +93,25 @@ test('coerce does not mutate the defaults it is given', () => {
   const base = { ...BASE };
   coerce({ captureMic: false, chunkSeconds: 5 }, base);
   assert.deepEqual(base, BASE);
+});
+
+test('coerce keeps liveEngine to the engines that exist', () => {
+  assert.equal(coerce({ liveEngine: 'ollama' }, BASE).liveEngine, 'ollama');
+  // A typo here would otherwise reach a switch that silently picks a branch.
+  assert.equal(coerce({ liveEngine: 'whispr' }, BASE).liveEngine, 'whisper');
+  assert.equal(coerce({ liveEngine: 42 }, BASE).liveEngine, 'whisper');
+});
+
+test('coerce clamps whisperThreads to something a machine can run', () => {
+  assert.equal(coerce({ whisperThreads: 8 }, BASE).whisperThreads, 8);
+  assert.equal(coerce({ whisperThreads: -4 }, BASE).whisperThreads, 0);
+  assert.equal(coerce({ whisperThreads: 5000 }, BASE).whisperThreads, 64);
+  assert.equal(coerce({ whisperThreads: 6.7 }, BASE).whisperThreads, 7);
+});
+
+test('coerce leaves a partial base partial', () => {
+  // defaults() is not the only caller: writing a key the base never had would
+  // invent a setting rather than clamp one.
+  const partial = { captureMic: true };
+  assert.deepEqual(Object.keys(coerce({ liveEngine: 'ollama', whisperThreads: 4 }, partial)), ['captureMic']);
 });

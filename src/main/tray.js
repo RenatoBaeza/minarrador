@@ -47,10 +47,13 @@ class AppTray {
    * @param {boolean} view.ollamaUp
    * @param {string[]} view.models installed Ollama models
    * @param {string[]} view.audioModels models that accept audio
+   * @param {object|null} view.whisper WhisperServer.describe(), or null
+   * @param {'whisper'|'ollama'} view.liveEngine the engine actually in use
    * @param {string|null} view.lastDir most recent finished meeting folder
    */
   update(view) {
-    const { state, elapsed, progress, settings, status, ollamaUp, models, audioModels, lastDir } = view;
+    const { state, elapsed, progress, settings, status, ollamaUp, models, audioModels, whisper, liveEngine, lastDir } =
+      view;
     const a = this.actions;
 
     const iconState = state === 'recording' ? 'recording' : state === 'processing' ? 'processing' : 'idle';
@@ -72,16 +75,56 @@ class AppTray {
       status.systemOk ? 'System audio ✓' : settings.captureSystem ? 'System audio ✗' : 'System audio off',
     ].join('   ');
 
-    const modelItems = (list, current, onPick) =>
+    const modelItems = (list, current, onPick, empty = 'No models found — is Ollama running?') =>
       list.length
         ? list.map((name) => ({ label: name, type: 'radio', checked: name === current, click: () => onPick(name) }))
-        : [{ label: 'No models found — is Ollama running?', enabled: false }];
+        : [{ label: empty, enabled: false }];
+
+    const whisperInstalled = Boolean(whisper?.available);
+    // The setting says what was asked for; liveEngine says what is running. They
+    // part company when whisper.cpp was picked but never installed, and the menu
+    // should show the fallback rather than quietly claim otherwise.
+    const engineItems = [
+      {
+        label: whisperInstalled
+          ? `whisper.cpp — ${whisper.model}`
+          : 'whisper.cpp — not installed (npm run whisper:setup)',
+        type: 'radio',
+        checked: settings.liveEngine === 'whisper',
+        enabled: whisperInstalled,
+        click: () => a.setSetting({ liveEngine: 'whisper' }),
+      },
+      {
+        label: `Ollama — ${settings.transcribeModel}`,
+        type: 'radio',
+        checked: settings.liveEngine === 'ollama' || !whisperInstalled,
+        click: () => a.setSetting({ liveEngine: 'ollama' }),
+      },
+      ...(settings.liveEngine === 'whisper' && !whisperInstalled
+        ? [{ type: 'separator' }, { label: 'Falling back to Ollama until whisper.cpp is set up', enabled: false }]
+        : []),
+    ];
 
     const template = [
       { label: headline, enabled: false },
       { label: sources, enabled: false },
+      ...(state === 'recording' && settings.liveTranscript
+        ? [
+            {
+              label: `Live: ${
+                liveEngine === 'whisper' && whisper ? `whisper.cpp (${whisper.model})` : settings.transcribeModel
+              }`,
+              enabled: false,
+            },
+          ]
+        : []),
       ...(state === 'processing' && progress ? [{ label: progress, enabled: false }] : []),
+      // Ollama still writes the notes even when whisper.cpp handles the preview,
+      // so this stays a warning either way.
       ...(!ollamaUp ? [{ label: '⚠ Ollama not reachable', enabled: false }] : []),
+      ...(liveEngine === 'whisper' && whisper?.lastError
+        ? [{ label: `⚠ whisper.cpp: ${whisper.lastError.slice(0, 60)}`, enabled: false }]
+        : []),
       { type: 'separator' },
 
       state === 'recording'
@@ -133,6 +176,18 @@ class AppTray {
             checked: settings.captureSystem,
             enabled: state !== 'recording',
             click: (item) => a.setSetting({ captureSystem: item.checked }),
+          },
+          { type: 'separator' },
+          { label: 'Live transcript engine', submenu: engineItems },
+          {
+            label: 'Whisper model',
+            enabled: whisperInstalled,
+            submenu: modelItems(
+              whisper?.models ?? [],
+              whisper?.model ?? '',
+              (name) => a.setSetting({ whisperModel: name }),
+              'No GGML models — run npm run whisper:setup',
+            ),
           },
           { type: 'separator' },
           {

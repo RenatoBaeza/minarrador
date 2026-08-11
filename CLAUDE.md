@@ -6,7 +6,8 @@ Local-only meeting notes app for Windows. Records mic + system audio, transcribe
 
 - **Electron** (tray-only, no visible window) — entry point `src/main/main.js`
 - **Node.js** — all backend logic in `src/main/`
-- **Ollama** — local LLM inference for transcription and summarisation
+- **Ollama** — local LLM inference for the saved transcript and summarisation
+- **whisper.cpp** — local ASR binary driving the real-time live transcript (`npm run whisper:setup`)
 - **electron-builder** — packaging and NSIS installer (`npm run dist`)
 - No framework, no bundler, no TypeScript — plain CommonJS throughout
 
@@ -14,7 +15,7 @@ Local-only meeting notes app for Windows. Records mic + system audio, transcribe
 
 ```
 ├── assets/            # App & tray icons (ico, png, @2x variants)
-├── scripts/           # Dev/build helpers (icon gen, pipeline runner, capture test)
+├── scripts/           # Dev/build helpers (icon gen, pipeline runner, capture test, whisper setup)
 ├── src/
 │   ├── main/          # Electron main process
 │   │   ├── main.js        # App lifecycle, tray wiring, recording start/stop
@@ -22,6 +23,7 @@ Local-only meeting notes app for Windows. Records mic + system audio, transcribe
 │   │   ├── capture.js     # Audio capture controller + speech detector
 │   │   ├── pipeline.js    # Post-recording chain: transcribe → summarise → PDF
 │   │   ├── ollama.js      # Ollama HTTP client (transcription + chat)
+│   │   ├── whisper.js     # whisper.cpp server supervisor + /inference client
 │   │   ├── wav.js         # WAV read/write, PCM chunking, RMS
 │   │   ├── pdf.js         # HTML → PDF via hidden BrowserWindow
 │   │   ├── paths.js       # Meeting folder naming, canonical file names
@@ -32,6 +34,7 @@ Local-only meeting notes app for Windows. Records mic + system audio, transcribe
 │       ├── capture.js     # Web Audio graph (mic + system loopback)
 │       ├── pcm-worklet.js # AudioWorklet that ships PCM to main
 │       └── preload.js     # contextBridge exposing IPC to renderer
+├── vendor/whisper/    # whisper.cpp binaries + GGML models (gitignored, see setup)
 ├── dist/              # Build output (gitignored)
 └── package.json
 ```
@@ -49,6 +52,25 @@ No main window is shown. A hidden `BrowserWindow` exists solely to run the Web A
 3. `pcm-worklet.js` downmixes to mono 16 kHz and ships PCM buffers over IPC
 4. Main process writes PCM to a `WavWriter` during recording
 5. `SpeechDetector` watches idle levels and fires `'speech'` when sustained audio is detected
+
+### Live transcript (`whisper.js` + `LiveTranscriber` in `capture.js`)
+
+Independent of the post-recording pipeline — a rough preview for the person in the
+meeting, always superseded by the full pass over the saved WAV.
+
+1. `LiveTranscriber` buffers recorded PCM and cuts it into **segments at natural
+   pauses** (trailing silence ≥ `silenceHoldMs`), not on a fixed clock, with a
+   `maxSeconds` ceiling for someone who never pauses. The minimum measures
+   *voiced* bytes, so a door slam plus silence is not an utterance.
+2. Each segment is POSTed as a WAV to a `whisper-server` child process
+   (`/inference`, multipart). The previous line is passed as `prompt` so a
+   sentence split across segments keeps its context.
+3. whisper.cpp runs ~7-8x realtime on CPU with `ggml-base`, so a caption lands
+   about a second after the speaker stops.
+
+`LIVE_SEGMENT` in `capture.js` holds the per-engine timing. If whisper.cpp is not
+installed, `LiveTranscriber.engine` silently falls back to the Ollama audio model,
+which uses longer segments because a request costs ~1s regardless of clip length.
 
 ### Post-recording pipeline (`pipeline.js`)
 
@@ -71,7 +93,8 @@ Each recording creates a timestamped folder (e.g. `2026-08-11_14-32-05/`) under 
 
 - **`'use strict'`** at the top of every file
 - **CommonJS** (`require` / `module.exports`) — no ES modules
-- **No external runtime dependencies** — only Electron APIs, Node built-ins, and the Ollama HTTP API
+- **No external runtime dependencies** — only Electron APIs, Node built-ins, and two local HTTP APIs (Ollama, whisper-server). whisper.cpp is a downloaded binary, not an npm package
+- **Network access lives in `ollama.js` and `whisper.js`** — eslint blocks bare `fetch` elsewhere in `src/main/`
 - **Dev dependencies only**: `electron`, `electron-builder`
 - Settings default to `gemma4:12b` for both transcription and summarisation
 - Ollama host defaults to `http://127.0.0.1:11434`
@@ -84,6 +107,7 @@ Each recording creates a timestamped folder (e.g. `2026-08-11_14-32-05/`) under 
 | `npm start` | Launch the app in dev mode |
 | `npm run dist` | Build the NSIS installer for Windows x64 |
 | `npm run icons` | Regenerate tray/app icons from source |
+| `npm run whisper:setup` | Download whisper.cpp + a GGML model into `vendor/whisper` |
 | `npm run pipeline -- "path"` | Re-run the transcribe→summarise→PDF pipeline on a folder |
 | `npm run capture-test` | Test audio capture in isolation |
 
@@ -91,6 +115,7 @@ Each recording creates a timestamped folder (e.g. `2026-08-11_14-32-05/`) under 
 
 - **Node.js** ≥ 18
 - **Ollama** running locally (`ollama serve`) with an audio-capable model pulled (e.g. `ollama pull gemma4:12b`)
+- **whisper.cpp** for live captions: `npm run whisper:setup` (optional — the preview falls back to Ollama without it)
 - Windows 10/11 — system audio capture uses Electron's `desktopCapturer` loopback
 
 ## Common patterns
@@ -121,4 +146,6 @@ Each stage in `pipeline.js` is a standalone async function (`transcribe`, `summa
 - The Ollama transcription uses the **OpenAI-compatible** `/v1/chat/completions` endpoint because the native `/api/chat` route silently drops audio fields.
 - Recordings shorter than 1 second are automatically discarded.
 - The `collapseRepeats` function in `ollama.js` defends against audio model repetition loops.
+- `cleanWhisperText` in `whisper.js` strips whisper's bracketed annotations and the phrases it invents on near-silence (`"you"`, `"Thanks for watching"`), which is the usual source of phantom captions during a pause.
+- `npm run whisper:setup` is the only code in the repo that makes a non-localhost request, and it never runs from the app.
 - Pipeline retries transient Ollama failures (3 attempts with backoff) so a model swap mid-run doesn't kill a long transcription.

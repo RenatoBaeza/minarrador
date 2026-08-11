@@ -22,10 +22,35 @@ function defaults() {
     startAtLogin: true,
     /** Show the live transcript window while recording. */
     liveTranscript: true,
+    /**
+     * Which engine produces the live preview: 'whisper' (whisper.cpp, a local
+     * binary — see `npm run whisper:setup`) or 'ollama' (the audio model, also
+     * used for the post-recording pass). whisper falls back to ollama on its
+     * own when it is not installed.
+     */
+    liveEngine: 'whisper',
+    /** GGML weights for whisper.cpp; a bare name resolves inside its models folder. */
+    whisperModel: 'ggml-base.bin',
+    /** Override where whisper.cpp lives; '' discovers vendor/ or the packaged resources. */
+    whisperRoot: '',
+    /** Decode threads for whisper.cpp; 0 lets it choose. */
+    whisperThreads: 0,
     /** Seconds of audio per transcription request. */
     chunkSeconds: 60,
   };
 }
+
+/** Values a field is allowed to hold, beyond simply matching its default's type. */
+const ENUMS = { liveEngine: ['whisper', 'ollama'] };
+
+/** Numeric fields with a range that has to hold however the file was edited. */
+const RANGES = {
+  // Chunks drive both request size and model context use; keep them sane.
+  chunkSeconds: [5, 300],
+  // 0 means "let whisper.cpp decide"; the ceiling is a guard against a typo
+  // spawning hundreds of decode threads mid-meeting.
+  whisperThreads: [0, 64],
+};
 
 /**
  * Settings are a plain JSON file a user may hand-edit, and a wrong type here
@@ -53,8 +78,18 @@ function coerce(stored, base) {
     }
   }
 
-  // Chunks drive both request size and model context use; keep them sane.
-  out.chunkSeconds = Math.min(300, Math.max(5, Math.round(out.chunkSeconds)));
+  // Both passes below are keyed on what `base` actually defines, never on the
+  // full settings shape: coerce is also called with a partial base, and writing
+  // a key that was not asked for turns a clamp into an invented setting.
+
+  // Fields with a fixed vocabulary: anything else would reach code that switches
+  // on the value and silently take the wrong branch.
+  for (const [key, allowed] of Object.entries(ENUMS)) {
+    if (key in out && !allowed.includes(out[key])) out[key] = base[key];
+  }
+  for (const [key, [lo, hi]] of Object.entries(RANGES)) {
+    if (key in out) out[key] = Math.min(hi, Math.max(lo, Math.round(out[key])));
+  }
   return out;
 }
 

@@ -39,13 +39,19 @@ module.exports = [
     rules: {
       ...shared,
       // The main process is the only place with filesystem and shell reach.
-      'no-restricted-globals': ['error', { name: 'fetch', message: 'Use the Ollama client so retries and timeouts apply.' }],
+      'no-restricted-globals': [
+        'error',
+        { name: 'fetch', message: 'Go through the Ollama or whisper.cpp client so retries and timeouts apply.' },
+      ],
     },
   },
 
   {
-    // The Ollama client is the one place allowed to talk to the network.
-    files: ['src/main/ollama.js'],
+    // The two engine clients are the only places allowed to talk to the
+    // network, and both only ever reach a daemon on this machine. The setup
+    // script is the sole exception that leaves it: it runs from a terminal, not
+    // from the app, and only to fetch whisper.cpp itself.
+    files: ['src/main/ollama.js', 'src/main/whisper.js', 'scripts/setup-whisper.js'],
     rules: { 'no-restricted-globals': 'off' },
   },
 

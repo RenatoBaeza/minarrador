@@ -41,7 +41,8 @@ window.transcript.onLine((text) => {
   if (stick) content.scrollTop = content.scrollHeight;
 });
 
-window.transcript.onState(({ recording, label }) => {
-  statusEl.textContent = label ?? (recording ? 'Recording' : 'Idle');
+window.transcript.onState(({ recording, label, engine }) => {
+  const text = label ?? (recording ? 'Recording' : 'Idle');
+  statusEl.textContent = engine ? `${text} · ${engine}` : text;
   statusEl.classList.toggle('recording', Boolean(recording));
 });

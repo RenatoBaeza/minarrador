@@ -15,15 +15,25 @@ const SAMPLE_RATE = 16000;
 const BYTES_PER_SECOND = SAMPLE_RATE * 2; // 16-bit mono
 
 /**
- * How much audio each live-transcript request covers, and therefore the floor
- * on how stale a subtitle line is when it appears.
+ * How the live transcriber cuts the stream into requests, per engine.
  *
- * Measured on gemma4:12b, a request costs ~1s almost regardless of window
- * length — the cost is per-request overhead, not audio length — so a short
- * window is nearly free and this sits well inside a 20% duty cycle. Much below
- * ~4s the model starts getting too little context to transcribe well.
+ * Segments end at a pause rather than on a fixed clock, so a line arrives as
+ * soon as the speaker stops instead of whenever the next window happens to
+ * close, and words are not sliced in half at the boundary. `maxSeconds` forces
+ * a cut through someone who never pauses.
+ *
+ * whisper.cpp decodes several seconds of speech in a fraction of a second, so it
+ * can afford short segments — that is what makes the preview keep up with the
+ * room. An audio LLM costs ~1s per request almost regardless of clip length (the
+ * cost is per-request overhead, not audio length), and gets too little context
+ * to transcribe well much below ~4s, so it waits for more.
  */
-const LIVE_WINDOW_SECONDS = 5;
+const LIVE_SEGMENT = {
+  whisper: { minSeconds: 1, maxSeconds: 12, silenceHoldMs: 600 },
+  ollama: { minSeconds: 4, maxSeconds: 20, silenceHoldMs: 900 },
+};
+/** How often a segment boundary is checked for. Well under human pause length. */
+const LIVE_POLL_MS = 250;
 /**
  * Hard ceiling on buffered live audio, and so on how far behind the speaker a
  * line can be. Without a ceiling the queue grows for the whole meeting whenever
@@ -38,6 +48,8 @@ const LIVE_MAX_SECONDS = 20;
  * subtitles during a pause. Matches SILENCE_RMS in pipeline.js.
  */
 const LIVE_SILENCE_RMS = 0.004;
+/** How much of the previous line whisper is given as decoder context. */
+const LIVE_PROMPT_CHARS = 300;
 
 const RENDERER = path.join(__dirname, '..', 'renderer');
 
@@ -102,45 +114,79 @@ class SpeechDetector extends EventEmitter {
  * for the person in the meeting, and dropping audio under load is preferable
  * to falling behind. The saved WAV is always transcribed properly afterwards.
  *
+ * Two engines can do the transcribing. whisper.cpp is the one that makes this
+ * feel live and is preferred whenever it is installed; the Ollama audio model is
+ * the fallback for a machine that has never run `npm run whisper:setup`.
+ *
  * @fires LiveTranscriber#text
  */
 class LiveTranscriber extends EventEmitter {
-  /** @param {{ ollama: Ollama }} deps */
-  constructor({ ollama }) {
+  /** @param {{ ollama: Ollama, whisper?: import('./whisper').WhisperServer }} deps */
+  constructor({ ollama, whisper = null }) {
     super();
     this.ollama = ollama;
+    this.whisper = whisper;
     this.enabled = false;
+    /** What the user asked for; `engine` is what is actually usable. */
+    this.preferredEngine = 'whisper';
     this.model = '';
     this.language = '';
     this.chunks = [];
     this.bytes = 0;
+    /** Trailing silence, in bytes — how a segment boundary is spotted. */
+    this.quietBytes = 0;
+    /** Audible audio in the buffer, which is what decides if there is anything to send. */
+    this.voicedBytes = 0;
+    /** Tail of the last line, handed to whisper as decoder context. */
+    this.tail = '';
     this.busy = false;
     this.running = false;
     this.timer = null;
   }
 
-  /** @param {{ enabled?: boolean, model?: string, language?: string }} cfg */
+  /**
+   * @param {{ enabled?: boolean, engine?: 'whisper'|'ollama', model?: string, language?: string }} cfg
+   *   `model` names the Ollama audio model; the whisper model is chosen by the
+   *   WhisperServer itself, since it is a file on disk rather than a daemon tag.
+   */
   configure(cfg = {}) {
+    const was = this.engine;
     const wasModel = this.model;
     if ('enabled' in cfg) this.enabled = Boolean(cfg.enabled);
+    if ('engine' in cfg) this.preferredEngine = cfg.engine === 'ollama' ? 'ollama' : 'whisper';
     if ('model' in cfg) this.model = cfg.model ?? '';
     if ('language' in cfg) this.language = cfg.language ?? '';
     if (!this.enabled) this.stop();
-    // Swapping models mid-meeting puts us back on a cold model; warm it now
-    // rather than on the next window of audio.
-    else if (this.running && this.model && this.model !== wasModel) this.#warm();
+    // Swapping engines or models mid-meeting puts us back on a cold one; warm it
+    // now rather than on the next window of audio.
+    else if (this.running && (this.engine !== was || this.model !== wasModel)) this.#warm();
+  }
+
+  /**
+   * The engine that will actually run, which is not always the one configured:
+   * whisper.cpp is only there once its binary and weights are on disk, and
+   * silently falling back beats a preview that stops working.
+   */
+  get engine() {
+    return this.preferredEngine === 'whisper' && this.whisper?.available ? 'whisper' : 'ollama';
+  }
+
+  /** Whether the chosen engine has everything it needs to transcribe. */
+  get ready() {
+    return this.engine === 'whisper' ? Boolean(this.whisper?.available) : Boolean(this.model);
   }
 
   get active() {
-    return this.enabled && Boolean(this.model) && this.running;
+    return this.enabled && this.ready && this.running;
   }
 
   start() {
-    if (!this.enabled || !this.model || this.running) return;
+    if (!this.enabled || !this.ready || this.running) return;
     this.reset();
+    this.tail = '';
     this.running = true;
     this.#warm();
-    this.#schedule(LIVE_WINDOW_SECONDS * 1000);
+    this.#schedule(LIVE_POLL_MS);
   }
 
   stop() {
@@ -153,11 +199,19 @@ class LiveTranscriber extends EventEmitter {
   reset() {
     this.chunks.length = 0;
     this.bytes = 0;
+    this.quietBytes = 0;
+    this.voicedBytes = 0;
   }
 
-  /** Loads the model so the first window does not also pay for the load. */
+  /** Loads the engine so the first segment does not also pay for the load. */
   #warm() {
-    void this.ollama.preload?.(this.model);
+    if (this.engine === 'whisper') {
+      // Spawning the server and loading the weights takes seconds; a failure
+      // here is reported when the first segment tries to use it.
+      this.whisper?.ensureReady?.().catch((err) => log.warn('whisper warm-up failed:', err.message));
+    } else {
+      void this.ollama.preload?.(this.model);
+    }
   }
 
   #schedule(ms) {
@@ -166,23 +220,27 @@ class LiveTranscriber extends EventEmitter {
   }
 
   /**
-   * Runs one drain and schedules the next.
+   * True once the buffer holds a segment worth sending: enough actual speech in
+   * it, and either followed by a pause or long enough that waiting for one would
+   * put the caption behind the room.
    *
-   * Chained rather than a fixed interval: a request that overruns the window
-   * used to leave the audio behind it sitting until the next tick, so every
-   * slow response added up to a whole extra window of lag. Here a backlog is
-   * picked up the moment the model frees up.
+   * The minimum counts audible audio rather than buffer length. Measured on the
+   * whole buffer, a door closing during a quiet meeting clears it on the silence
+   * that follows the bang, and a second of near-silence is precisely what a
+   * transcription model answers with an invented line.
    */
+  get segmentReady() {
+    const shape = LIVE_SEGMENT[this.engine];
+    if (this.bytes >= shape.maxSeconds * BYTES_PER_SECOND) return true;
+    if (this.voicedBytes < shape.minSeconds * BYTES_PER_SECOND) return false;
+    return this.quietBytes >= (shape.silenceHoldMs / 1000) * BYTES_PER_SECOND;
+  }
+
+  /** Sends a segment when one is ready, then looks again shortly. */
   async #tick() {
     this.timer = null;
-    const startedAt = Date.now();
-    await this.drain();
-    if (!this.running) return;
-    const backlogSeconds = this.bytes / BYTES_PER_SECOND;
-    const spent = Date.now() - startedAt;
-    this.#schedule(
-      backlogSeconds >= LIVE_WINDOW_SECONDS ? 0 : Math.max(0, LIVE_WINDOW_SECONDS * 1000 - spent),
-    );
+    if (this.segmentReady) await this.drain();
+    this.#schedule(LIVE_POLL_MS);
   }
 
   /** @param {Buffer} buf 16-bit mono PCM at SAMPLE_RATE */
@@ -193,33 +251,54 @@ class LiveTranscriber extends EventEmitter {
     if (!this.running) return;
     this.chunks.push(buf);
     this.bytes += buf.length;
+    // Buffers arrive every ~256 ms, which is fine enough to find a pause with.
+    if (rms(buf) < LIVE_SILENCE_RMS) {
+      this.quietBytes += buf.length;
+    } else {
+      this.quietBytes = 0;
+      this.voicedBytes += buf.length;
+    }
     // Drop the oldest audio rather than letting a slow model grow the queue.
     while (this.bytes > LIVE_MAX_SECONDS * BYTES_PER_SECOND && this.chunks.length > 1) {
       this.bytes -= this.chunks.shift().length;
     }
+    // Dropped audio may have been the speech that was counted; the buffer is the
+    // ceiling either way, and over-counting here would send a segment early.
+    this.voicedBytes = Math.min(this.voicedBytes, this.bytes);
   }
 
   /** Sends everything buffered so far as one request. Driven by #tick. */
   async drain() {
     // One request in flight at a time; audio keeps buffering (bounded) meanwhile.
-    if (this.busy || !this.model || this.bytes < BYTES_PER_SECOND) return;
+    if (this.busy || !this.ready || this.bytes < BYTES_PER_SECOND) return;
     this.busy = true;
     const pcm = Buffer.concat(this.chunks, this.bytes);
     const seconds = this.bytes / BYTES_PER_SECOND;
+    const engine = this.engine;
     this.reset();
 
     try {
       // Nobody spoke: asking the model anyway costs a request and tends to come
       // back as an invented line.
       if (rms(pcm) < LIVE_SILENCE_RMS) return;
-      const text = await this.ollama.transcribe(this.model, buildWav(pcm, SAMPLE_RATE), {
-        language: this.language || undefined,
-        seconds,
-      });
-      if (text) this.emit('text', text);
+      const wav = buildWav(pcm, SAMPLE_RATE);
+      const text =
+        engine === 'whisper'
+          ? // The trailing silence that ended the segment is sent along with it:
+            // whisper reads it as the end of an utterance and stops cleanly,
+            // where a hard cut on the last syllable tends to lose the word.
+            await this.whisper.transcribe(wav, { language: this.language || undefined, prompt: this.tail })
+          : await this.ollama.transcribe(this.model, wav, {
+              language: this.language || undefined,
+              seconds,
+            });
+      if (text) {
+        this.tail = text.slice(-LIVE_PROMPT_CHARS);
+        this.emit('text', text);
+      }
     } catch (err) {
       // A live preview is best-effort; the recording itself is unaffected.
-      log.warn('live transcription failed:', err.message);
+      log.warn(`live transcription (${engine}) failed:`, err.message);
     } finally {
       this.busy = false;
     }
@@ -227,8 +306,8 @@ class LiveTranscriber extends EventEmitter {
 }
 
 class CaptureController extends EventEmitter {
-  /** @param {{ ollamaHost?: string }} [options] */
-  constructor({ ollamaHost } = {}) {
+  /** @param {{ ollamaHost?: string, whisper?: import('./whisper').WhisperServer }} [options] */
+  constructor({ ollamaHost, whisper = null } = {}) {
     super();
     this.window = null;
     this.writer = null;
@@ -236,7 +315,8 @@ class CaptureController extends EventEmitter {
     this.levels = { mixed: 0, mic: 0, system: 0 };
     this.detector = new SpeechDetector();
     this.ollama = new Ollama(ollamaHost);
-    this.liveTranscriber = new LiveTranscriber({ ollama: this.ollama });
+    this.whisper = whisper;
+    this.liveTranscriber = new LiveTranscriber({ ollama: this.ollama, whisper });
     this.detector.on('speech', (info) => this.emit('speech', info));
     this.liveTranscriber.on('text', (text) => this.emit('transcript', text));
     this.monitoring = false;
@@ -340,8 +420,8 @@ class CaptureController extends EventEmitter {
   }
 
   /**
-   * Points the live preview at a model, or turns it off.
-   * @param {{ enabled?: boolean, model?: string, language?: string }} cfg
+   * Points the live preview at an engine, or turns it off.
+   * @param {{ enabled?: boolean, engine?: 'whisper'|'ollama', model?: string, language?: string }} cfg
    */
   configureLive(cfg) {
     this.liveTranscriber.configure(cfg);
@@ -386,6 +466,7 @@ class CaptureController extends EventEmitter {
   destroy() {
     this._quitting = true;
     this.liveTranscriber.stop();
+    this.whisper?.stop();
     if (this.writer) {
       this.writer.close();
       this.writer = null;

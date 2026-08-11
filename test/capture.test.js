@@ -117,6 +117,25 @@ function fakeOllama(reply = async () => 'hello') {
   };
 }
 
+/** A stand-in whisper.cpp server. `available` decides whether it gets used. */
+function fakeWhisper(reply = async () => 'whisper line', { available = true, ready = async () => true } = {}) {
+  const calls = [];
+  const state = { readied: 0 };
+  return {
+    calls,
+    state,
+    available,
+    async ensureReady() {
+      state.readied++;
+      return ready();
+    },
+    async transcribe(wav, opts) {
+      calls.push({ wavBytes: wav.length, opts });
+      return reply(calls.length);
+    },
+  };
+}
+
 test('LiveTranscriber buffers nothing until it is started', () => {
   const live = new LiveTranscriber({ ollama: fakeOllama() });
   live.configure({ enabled: true, model: 'gemma4:12b' });
@@ -334,4 +353,205 @@ test('LiveTranscriber stops buffering when disabled mid-recording', () => {
 
   live.push(pcmSeconds(2));
   assert.equal(live.bytes, 0, 'a disabled transcriber must not accumulate audio');
+});
+
+// ------------------------------------------------------- engine choice
+
+test('LiveTranscriber uses whisper.cpp when it is installed', async () => {
+  const ollama = fakeOllama();
+  const whisper = fakeWhisper();
+  const live = new LiveTranscriber({ ollama, whisper });
+  live.configure({ enabled: true, engine: 'whisper', model: 'gemma4:12b', language: 'German' });
+  live.start();
+  live.push(pcmSeconds(3));
+  await live.drain();
+
+  assert.equal(live.engine, 'whisper');
+  assert.equal(ollama.calls.length, 0, 'the audio model should not be asked as well');
+  assert.equal(whisper.calls.length, 1);
+  assert.equal(whisper.calls[0].opts.language, 'German');
+  assert.equal(whisper.calls[0].wavBytes, 3 * BYTES_PER_SECOND + 44);
+
+  live.stop();
+});
+
+test('LiveTranscriber falls back to Ollama when whisper.cpp is not installed', async () => {
+  const ollama = fakeOllama();
+  const whisper = fakeWhisper(undefined, { available: false });
+  const live = new LiveTranscriber({ ollama, whisper });
+  live.configure({ enabled: true, engine: 'whisper', model: 'gemma4:12b' });
+  live.start();
+  live.push(pcmSeconds(5));
+  await live.drain();
+
+  assert.equal(live.engine, 'ollama', 'a missing binary must not take the preview down with it');
+  assert.equal(whisper.calls.length, 0);
+  assert.equal(ollama.calls.length, 1);
+
+  live.stop();
+});
+
+test('LiveTranscriber honours an explicit choice of Ollama', async () => {
+  const ollama = fakeOllama();
+  const whisper = fakeWhisper();
+  const live = new LiveTranscriber({ ollama, whisper });
+  live.configure({ enabled: true, engine: 'ollama', model: 'gemma4:12b' });
+  live.start();
+  live.push(pcmSeconds(5));
+  await live.drain();
+
+  assert.equal(whisper.calls.length, 0);
+  assert.equal(ollama.calls.length, 1);
+
+  live.stop();
+});
+
+test('LiveTranscriber runs on whisper.cpp with no Ollama audio model configured', () => {
+  const live = new LiveTranscriber({ ollama: fakeOllama(), whisper: fakeWhisper() });
+  live.configure({ enabled: true, engine: 'whisper', model: '' });
+  live.start();
+
+  assert.equal(live.running, true, 'whisper.cpp does not need an Ollama model name');
+  live.push(pcmSeconds(2));
+  assert.ok(live.bytes > 0);
+
+  live.stop();
+});
+
+test('LiveTranscriber starts the whisper server when a recording starts', () => {
+  const whisper = fakeWhisper();
+  const live = new LiveTranscriber({ ollama: fakeOllama(), whisper });
+  live.configure({ enabled: true, engine: 'whisper' });
+  live.start();
+
+  assert.equal(whisper.state.readied, 1, 'loading the model should not land on the first caption');
+  live.stop();
+});
+
+test('LiveTranscriber survives a whisper server that will not start', async () => {
+  const whisper = fakeWhisper(undefined, {
+    ready: async () => {
+      throw new Error('port in use');
+    },
+  });
+  const live = new LiveTranscriber({ ollama: fakeOllama(), whisper });
+  live.configure({ enabled: true, engine: 'whisper' });
+
+  assert.doesNotThrow(() => live.start());
+  // A rejected warm-up must be handled, not left to crash the main process.
+  await new Promise((r) => setImmediate(r));
+  assert.equal(live.running, true);
+
+  live.stop();
+});
+
+test('LiveTranscriber hands whisper the previous line as context', async () => {
+  const whisper = fakeWhisper(async (n) => (n === 1 ? 'we should ship the' : 'release on Friday'));
+  const live = new LiveTranscriber({ ollama: fakeOllama(), whisper });
+  live.configure({ enabled: true, engine: 'whisper' });
+  live.start();
+
+  live.push(pcmSeconds(3));
+  await live.drain();
+  live.push(pcmSeconds(3));
+  await live.drain();
+
+  assert.equal(whisper.calls[0].opts.prompt, '', 'nothing precedes the first segment');
+  assert.equal(
+    whisper.calls[1].opts.prompt,
+    'we should ship the',
+    'a sentence split across segments should not restart mid-phrase',
+  );
+
+  live.stop();
+});
+
+test('LiveTranscriber forgets the previous line between recordings', async () => {
+  const whisper = fakeWhisper();
+  const live = new LiveTranscriber({ ollama: fakeOllama(), whisper });
+  live.configure({ enabled: true, engine: 'whisper' });
+  live.start();
+  live.push(pcmSeconds(3));
+  await live.drain();
+  live.stop();
+
+  live.start();
+  live.push(pcmSeconds(3));
+  await live.drain();
+
+  assert.equal(whisper.calls[1].opts.prompt, '', 'last week\'s meeting is not context for this one');
+  live.stop();
+});
+
+// -------------------------------------------------------- segment boundaries
+
+test('LiveTranscriber waits for a pause before sending a segment', () => {
+  const live = new LiveTranscriber({ ollama: fakeOllama(), whisper: fakeWhisper() });
+  live.configure({ enabled: true, engine: 'whisper' });
+  live.start();
+
+  live.push(pcmSeconds(3));
+  assert.equal(live.segmentReady, false, 'cutting mid-word loses the word');
+
+  live.push(silentSeconds(0.7));
+  assert.equal(live.segmentReady, true, 'the speaker stopped, so the line can go out');
+
+  live.stop();
+});
+
+test('LiveTranscriber ignores a pause too short to be one', () => {
+  const live = new LiveTranscriber({ ollama: fakeOllama(), whisper: fakeWhisper() });
+  live.configure({ enabled: true, engine: 'whisper' });
+  live.start();
+
+  live.push(pcmSeconds(3));
+  live.push(silentSeconds(0.25)); // a breath between words
+  assert.equal(live.segmentReady, false);
+
+  live.push(pcmSeconds(1)); // and they carry on
+  assert.equal(live.segmentReady, false, 'the pause counter must restart when speech resumes');
+
+  live.stop();
+});
+
+test('LiveTranscriber needs more than a blip to call it a segment', () => {
+  const live = new LiveTranscriber({ ollama: fakeOllama(), whisper: fakeWhisper() });
+  live.configure({ enabled: true, engine: 'whisper' });
+  live.start();
+
+  live.push(pcmSeconds(0.3));
+  live.push(silentSeconds(0.7));
+  assert.equal(live.segmentReady, false, 'a chair scrape is not an utterance');
+
+  live.stop();
+});
+
+test('LiveTranscriber cuts through someone who never pauses', () => {
+  const live = new LiveTranscriber({ ollama: fakeOllama(), whisper: fakeWhisper() });
+  live.configure({ enabled: true, engine: 'whisper' });
+  live.start();
+
+  live.push(pcmSeconds(11));
+  assert.equal(live.segmentReady, false);
+
+  live.push(pcmSeconds(1.5));
+  assert.equal(live.segmentReady, true, 'waiting for a pause that never comes would strand the caption');
+
+  live.stop();
+});
+
+test('LiveTranscriber gives Ollama longer segments than whisper.cpp', () => {
+  const live = new LiveTranscriber({ ollama: fakeOllama(), whisper: fakeWhisper({ available: false }) });
+  live.configure({ enabled: true, engine: 'ollama', model: 'gemma4:12b' });
+  live.start();
+
+  live.push(pcmSeconds(2));
+  live.push(silentSeconds(1));
+  assert.equal(live.segmentReady, false, 'an audio model gets too little context from a short clip');
+
+  live.push(pcmSeconds(2));
+  live.push(silentSeconds(1));
+  assert.equal(live.segmentReady, true);
+
+  live.stop();
 });

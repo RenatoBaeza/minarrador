@@ -26,6 +26,7 @@
     "lint:fix": "eslint . --fix",
     "check": "npm run lint && npm test",
     "icons": "node scripts/make-icons.js",
+    "whisper:setup": "node scripts/setup-whisper.js",
     "pipeline": "electron scripts/run-pipeline.js",
     "capture-test": "electron scripts/capture-test.js",
     "dist": "electron-builder --win nsis"
@@ -46,6 +47,15 @@
       "assets/**/*",
       "package.json",
       "!**/*.map"
+    ],
+    "extraResources": [
+      {
+        "from": "vendor/whisper",
+        "to": "whisper",
+        "filter": [
+          "**/*"
+        ]
+      }
     ],
     "directories": {
       "output": "dist",
