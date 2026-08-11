@@ -6,14 +6,12 @@
   "main": "src/main/main.js",
   "author": "Renato Baeza",
   "license": "MIT",
-  "private": true,
   "scripts": {
     "start": "electron .",
     "icons": "node scripts/make-icons.js",
     "pipeline": "electron scripts/run-pipeline.js",
     "capture-test": "electron scripts/capture-test.js",
-    "dist": "electron-builder --win nsis",
-    "install-app": "node scripts/install.js"
+    "dist": "electron-builder --win nsis"
   },
   "devDependencies": {
     "electron": "^43.3.0",

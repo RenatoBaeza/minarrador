@@ -14,7 +14,7 @@ pnpm-debug.log*
 # Electron specific
 /.cache/
 *.blockmap
-*.yml
+builder-debug.yml
 *.asar
 
 # OS generated files

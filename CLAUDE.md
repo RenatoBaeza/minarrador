@@ -33,8 +33,7 @@ Local-only meeting notes app for Windows. Records mic + system audio, transcribe
 │       ├── pcm-worklet.js # AudioWorklet that ships PCM to main
 │       └── preload.js     # contextBridge exposing IPC to renderer
 ├── dist/              # Build output (gitignored)
-├── package.json
-└── init.txt           # Original project brief
+└── package.json
 ```
 
 ## Architecture
@@ -87,7 +86,6 @@ Each recording creates a timestamped folder (e.g. `2026-08-11_14-32-05/`) under 
 | `npm run icons` | Regenerate tray/app icons from source |
 | `npm run pipeline -- "path"` | Re-run the transcribe→summarise→PDF pipeline on a folder |
 | `npm run capture-test` | Test audio capture in isolation |
-| `npm run install-app` | Post-install setup script |
 
 ## Prerequisites
 
