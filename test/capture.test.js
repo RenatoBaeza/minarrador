@@ -8,9 +8,25 @@ const { SpeechDetector, LiveTranscriber } = require('../src/main/capture');
 
 const BYTES_PER_SECOND = 16000 * 2;
 /** Mirrors LIVE_MAX_SECONDS in capture.js. */
-const LIVE_MAX_BYTES = 60 * BYTES_PER_SECOND;
+const LIVE_MAX_BYTES = 20 * BYTES_PER_SECOND;
 
-const pcmSeconds = (seconds) => Buffer.alloc(Math.round(seconds * BYTES_PER_SECOND));
+/** One second of a 300 Hz tone, comfortably above the live silence gate. */
+const TONE_SECOND = (() => {
+  const buf = Buffer.alloc(BYTES_PER_SECOND);
+  for (let i = 0; i < buf.length; i += 2) {
+    buf.writeInt16LE(Math.round(Math.sin(((i / 2) * 2 * Math.PI * 300) / 16000) * 8000), i);
+  }
+  return buf;
+})();
+
+/** `seconds` of audible PCM — silence is deliberately skipped, so tests need sound. */
+const pcmSeconds = (seconds) => {
+  const out = Buffer.alloc(Math.round(seconds * BYTES_PER_SECOND));
+  for (let off = 0; off < out.length; off += TONE_SECOND.length) TONE_SECOND.copy(out, off);
+  return out;
+};
+
+const silentSeconds = (seconds) => Buffer.alloc(Math.round(seconds * BYTES_PER_SECOND));
 
 /** Feeds `count` level readings at the given loudness. */
 function feed(detector, count, rms) {
@@ -86,8 +102,14 @@ test('SpeechDetector snooze mutes an in-progress conversation', () => {
 /** A stand-in Ollama that records what it was asked to transcribe. */
 function fakeOllama(reply = async () => 'hello') {
   const calls = [];
+  const preloaded = [];
   return {
     calls,
+    preloaded,
+    async preload(model) {
+      preloaded.push(model);
+      return true;
+    },
     async transcribe(model, wav, opts) {
       calls.push({ model, wavBytes: wav.length, opts });
       return reply(calls.length);
@@ -202,6 +224,74 @@ test('LiveTranscriber keeps one request in flight at a time', async () => {
   await first;
   assert.equal(live.busy, false);
 
+  live.stop();
+});
+
+test('LiveTranscriber keeps buffering while a request is in flight', async () => {
+  // Regression: buffering was gated on the interval handle, which the chained
+  // scheduler clears for the duration of a request — everything said while the
+  // model was thinking went missing from the preview.
+  let release;
+  const gate = new Promise((r) => (release = r));
+  const ollama = fakeOllama(async () => gate.then(() => 'text'));
+
+  const live = new LiveTranscriber({ ollama });
+  live.configure({ enabled: true, model: 'm' });
+  live.start();
+
+  live.push(pcmSeconds(5));
+  const inFlight = live.drain();
+
+  live.push(pcmSeconds(3));
+  assert.equal(live.bytes, 3 * BYTES_PER_SECOND, 'audio recorded during a request must be kept');
+
+  release();
+  await inFlight;
+  live.stop();
+});
+
+test('LiveTranscriber warms the model when a recording starts', () => {
+  const ollama = fakeOllama();
+  const live = new LiveTranscriber({ ollama });
+  live.configure({ enabled: true, model: 'gemma4:12b' });
+  live.start();
+
+  assert.deepEqual(ollama.preloaded, ['gemma4:12b'], 'the load should not land on the first window');
+  live.stop();
+});
+
+test('LiveTranscriber warms a model swapped in mid-recording', () => {
+  const ollama = fakeOllama();
+  const live = new LiveTranscriber({ ollama });
+  live.configure({ enabled: true, model: 'gemma4:e4b' });
+  live.start();
+  live.configure({ model: 'gemma4:12b' });
+
+  assert.deepEqual(ollama.preloaded, ['gemma4:e4b', 'gemma4:12b']);
+  live.stop();
+});
+
+test('LiveTranscriber does not ask the model to transcribe a silent window', async () => {
+  const ollama = fakeOllama();
+  const live = new LiveTranscriber({ ollama });
+  live.configure({ enabled: true, model: 'm' });
+  live.start();
+
+  live.push(silentSeconds(5)); // an empty room
+  await live.drain();
+
+  assert.equal(ollama.calls.length, 0, 'silence invites the model to invent a line');
+  assert.equal(live.bytes, 0, 'the window is still consumed, not left to pile up');
+  live.stop();
+});
+
+test('LiveTranscriber survives an Ollama client with no preload support', () => {
+  const ollama = fakeOllama();
+  delete ollama.preload;
+  const live = new LiveTranscriber({ ollama });
+  live.configure({ enabled: true, model: 'm' });
+
+  assert.doesNotThrow(() => live.start());
   live.stop();
 });
 

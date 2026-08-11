@@ -107,6 +107,34 @@ class Ollama {
     }
   }
 
+  /**
+   * Loads a model into memory without asking it for anything.
+   *
+   * The first request after a cold start pays the load: measured at 5s against
+   * gemma4:12b with the weights still in the page cache, and 10-20s from disk.
+   * That cost used to land on the first live subtitle, which is most of why one
+   * took so long to appear. Calling this when a recording starts moves it off
+   * that path — the load and the first window of audio overlap.
+   *
+   * Best-effort by design: if it fails the next real request loads the model.
+   */
+  async preload(model, { keepAlive = '30m', timeoutMs = 2 * 60 * 1000 } = {}) {
+    if (!model) return false;
+    try {
+      // An /api/generate with no prompt loads the model and returns immediately.
+      // The OpenAI-compatible route has no equivalent — and no keep_alive field.
+      const res = await fetch(`${this.host}/api/generate`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ model, keep_alive: keepAlive }),
+        signal: AbortSignal.timeout(timeoutMs),
+      });
+      return res.ok;
+    } catch {
+      return false;
+    }
+  }
+
   /** Models that can accept audio input. */
   async audioModels() {
     const names = await this.listModels();

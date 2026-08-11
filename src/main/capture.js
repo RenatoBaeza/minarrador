@@ -8,7 +8,7 @@ const { EventEmitter } = require('node:events');
 const path = require('node:path');
 
 const log = require('./logger');
-const { WavWriter, buildWav } = require('./wav');
+const { WavWriter, buildWav, rms } = require('./wav');
 const { Ollama } = require('./ollama');
 
 const SAMPLE_RATE = 16000;
@@ -25,11 +25,19 @@ const BYTES_PER_SECOND = SAMPLE_RATE * 2; // 16-bit mono
  */
 const LIVE_WINDOW_SECONDS = 5;
 /**
- * Hard ceiling on buffered live audio. Without this the queue grows for the
- * whole meeting whenever the model cannot keep up (~115 MB/hour), so old audio
- * is dropped rather than allowed to accumulate.
+ * Hard ceiling on buffered live audio, and so on how far behind the speaker a
+ * line can be. Without a ceiling the queue grows for the whole meeting whenever
+ * the model cannot keep up (~115 MB/hour); with a loose one it grows until each
+ * request covers a minute of audio and the preview trails the room by that long.
+ * Old audio is dropped instead — the saved WAV is transcribed in full afterwards.
  */
-const LIVE_MAX_SECONDS = 60;
+const LIVE_MAX_SECONDS = 20;
+/**
+ * Windows quieter than this are room tone. Sending them anyway invites the model
+ * to hallucinate a line out of nothing, which is the usual source of junk
+ * subtitles during a pause. Matches SILENCE_RMS in pipeline.js.
+ */
+const LIVE_SILENCE_RMS = 0.004;
 
 const RENDERER = path.join(__dirname, '..', 'renderer');
 
@@ -107,29 +115,37 @@ class LiveTranscriber extends EventEmitter {
     this.chunks = [];
     this.bytes = 0;
     this.busy = false;
+    this.running = false;
     this.timer = null;
   }
 
   /** @param {{ enabled?: boolean, model?: string, language?: string }} cfg */
   configure(cfg = {}) {
+    const wasModel = this.model;
     if ('enabled' in cfg) this.enabled = Boolean(cfg.enabled);
     if ('model' in cfg) this.model = cfg.model ?? '';
     if ('language' in cfg) this.language = cfg.language ?? '';
     if (!this.enabled) this.stop();
+    // Swapping models mid-meeting puts us back on a cold model; warm it now
+    // rather than on the next window of audio.
+    else if (this.running && this.model && this.model !== wasModel) this.#warm();
   }
 
   get active() {
-    return this.enabled && Boolean(this.model) && this.timer !== null;
+    return this.enabled && Boolean(this.model) && this.running;
   }
 
   start() {
-    if (!this.enabled || !this.model || this.timer) return;
+    if (!this.enabled || !this.model || this.running) return;
     this.reset();
-    this.timer = setInterval(() => void this.drain(), LIVE_WINDOW_SECONDS * 1000);
+    this.running = true;
+    this.#warm();
+    this.#schedule(LIVE_WINDOW_SECONDS * 1000);
   }
 
   stop() {
-    if (this.timer) clearInterval(this.timer);
+    this.running = false;
+    if (this.timer) clearTimeout(this.timer);
     this.timer = null;
     this.reset();
   }
@@ -139,9 +155,42 @@ class LiveTranscriber extends EventEmitter {
     this.bytes = 0;
   }
 
+  /** Loads the model so the first window does not also pay for the load. */
+  #warm() {
+    void this.ollama.preload?.(this.model);
+  }
+
+  #schedule(ms) {
+    if (!this.running) return;
+    this.timer = setTimeout(() => void this.#tick(), ms);
+  }
+
+  /**
+   * Runs one drain and schedules the next.
+   *
+   * Chained rather than a fixed interval: a request that overruns the window
+   * used to leave the audio behind it sitting until the next tick, so every
+   * slow response added up to a whole extra window of lag. Here a backlog is
+   * picked up the moment the model frees up.
+   */
+  async #tick() {
+    this.timer = null;
+    const startedAt = Date.now();
+    await this.drain();
+    if (!this.running) return;
+    const backlogSeconds = this.bytes / BYTES_PER_SECOND;
+    const spent = Date.now() - startedAt;
+    this.#schedule(
+      backlogSeconds >= LIVE_WINDOW_SECONDS ? 0 : Math.max(0, LIVE_WINDOW_SECONDS * 1000 - spent),
+    );
+  }
+
   /** @param {Buffer} buf 16-bit mono PCM at SAMPLE_RATE */
   push(buf) {
-    if (!this.timer) return;
+    // Gated on `running`, not on the timer handle: there is no timer pending
+    // while a request is in flight, and that is exactly when audio must keep
+    // accumulating.
+    if (!this.running) return;
     this.chunks.push(buf);
     this.bytes += buf.length;
     // Drop the oldest audio rather than letting a slow model grow the queue.
@@ -150,7 +199,7 @@ class LiveTranscriber extends EventEmitter {
     }
   }
 
-  /** Sends everything buffered so far as one request. Driven by the timer. */
+  /** Sends everything buffered so far as one request. Driven by #tick. */
   async drain() {
     // One request in flight at a time; audio keeps buffering (bounded) meanwhile.
     if (this.busy || !this.model || this.bytes < BYTES_PER_SECOND) return;
@@ -160,6 +209,9 @@ class LiveTranscriber extends EventEmitter {
     this.reset();
 
     try {
+      // Nobody spoke: asking the model anyway costs a request and tends to come
+      // back as an invented line.
+      if (rms(pcm) < LIVE_SILENCE_RMS) return;
       const text = await this.ollama.transcribe(this.model, buildWav(pcm, SAMPLE_RATE), {
         language: this.language || undefined,
         seconds,

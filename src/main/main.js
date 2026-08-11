@@ -272,9 +272,24 @@ async function refreshOllama() {
     state.models = await client.listModels();
     state.audioModels = await client.audioModels();
     // Keep the configured models pointing at something that exists.
-    if (state.audioModels.length && !state.audioModels.includes(settings.transcribeModel)) {
-      settings = settingsStore.save({ transcribeModel: state.audioModels[0] });
-      log.warn('transcription model missing; switched to', settings.transcribeModel);
+    //
+    // Tested against the installed list, never against audioModels: the audio
+    // capability is probed per model with a request that reports nothing when
+    // it fails, so a daemon busy loading something else can make a perfectly
+    // good model look unusable. Switching on that weaker signal silently moved
+    // a working setup onto whichever model Ollama happened to list first, which
+    // in practice meant a smaller variant that returns repetition loops instead
+    // of a transcript.
+    if (state.models.length && !state.models.includes(settings.transcribeModel)) {
+      const replacement = state.audioModels[0] ?? state.models[0];
+      const previous = settings.transcribeModel;
+      settings = settingsStore.save({ transcribeModel: replacement });
+      log.warn(`transcription model ${previous} is not installed; switched to ${replacement}`);
+      notify(
+        'Transcription model changed',
+        `${previous} is no longer installed, so Minarrador switched to ${replacement}. ` +
+          'Pick another under Settings → Transcription model.',
+      );
     }
     if (state.models.length && !state.models.includes(settings.summaryModel)) {
       settings = settingsStore.save({ summaryModel: state.models[0] });
