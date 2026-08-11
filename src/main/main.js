@@ -202,12 +202,26 @@ async function finalizeRecording() {
 async function stopRecording() {
   const finished = await finalizeRecording();
   if (!finished) return;
-  await processMeeting(finished.dir, finished.meta);
-  shell.showItemInFolder(finished.dir);
+
+  // Opening Explorer is the "your notes are ready" signal, so it waits for the
+  // whole chain — transcription, notes, and the PDF export that ends it. A run
+  // that failed leaves a half-written folder with no brief in it; that case gets
+  // the failure notification, not a folder popped open as though it were done.
+  const out = await processMeeting(finished.dir, finished.meta);
+  if (!out) return;
+
+  const err = await shell.openPath(finished.dir);
+  if (err) log.warn('could not open the notes folder:', err);
 }
 
 // --------------------------------------------------------------- post-process
 
+/**
+ * Runs the pipeline over a finished recording.
+ *
+ * @returns {Promise<object|null>} the pipeline result, or null if it failed —
+ *   callers use that to tell a complete folder from a half-written one.
+ */
 async function processMeeting(dir, meta) {
   // The rough live preview is superseded by the proper pass that follows, so
   // clear it — but never force a window open on someone who closed it.
@@ -241,6 +255,7 @@ async function processMeeting(dir, meta) {
       `${fmtDuration(meta.durationSeconds)} · ${out.notes.action_items.length} action item(s). Click to open the folder.`,
       () => shell.openPath(dir),
     );
+    return out;
   } catch (err) {
     log.error('pipeline failed for', dir, err);
     try {
@@ -252,6 +267,7 @@ async function processMeeting(dir, meta) {
       );
     } catch {}
     notify('Notes failed', `${err.message.slice(0,180)} — audio was saved. Click to open the folder.`, () => shell.openPath(dir));
+    return null;
   } finally {
     state.jobs--;
     if (state.jobs === 0 && state.phase === 'processing') state.phase = 'idle';

@@ -309,12 +309,20 @@ async function renderPdf(dir, config, { onProgress, signal, ollama, notes, meta 
   fs.writeFileSync(htmlPath, html, 'utf8');
 
   onProgress?.({ phase: 'rendering' });
-  try {
-    await htmlToPdf(htmlPath, pdfPath);
-  } finally {
-    // The HTML is an intermediate artefact; the PDF is the deliverable.
-    fs.rmSync(htmlPath, { force: true });
+  await htmlToPdf(htmlPath, pdfPath);
+
+  // The PDF is the last artefact the pipeline produces, so this is where the
+  // folder is declared finished — and callers open Explorer on the strength of
+  // it. printToPDF resolving is not proof that usable bytes reached the disk,
+  // so confirm them here rather than reporting a folder that has no brief in it.
+  if (!fs.existsSync(pdfPath) || fs.statSync(pdfPath).size === 0) {
+    throw new Error(`PDF export produced no usable file at ${pdfPath}`);
   }
+
+  // Only now is the HTML redundant. Deleting it unconditionally used to discard
+  // the model-authored design at the exact moment a failed render made it worth
+  // keeping, leaving a re-run nothing to salvage.
+  fs.rmSync(htmlPath, { force: true });
   return pdfPath;
 }
 
