@@ -10,6 +10,33 @@ const path = require('node:path');
 const log = require('./logger');
 const { WavWriter } = require('./wav');
 
+const { Ollama } = require('./ollama');
+
+const SAMPLE_RATE = 16000;
+
+function createWavBuffer(chunks) {
+  const data = Buffer.concat(chunks);
+  const byteRate = SAMPLE_RATE * 2; // 16-bit mono
+  const blockAlign = 2;
+  const subchunk2Size = data.length;
+  const chunkSize = 36 + subchunk2Size;
+  const header = Buffer.alloc(44);
+  header.write('RIFF', 0);
+  header.writeUInt32LE(chunkSize, 4);
+  header.write('WAVE', 8);
+  header.write('fmt ', 12);
+  header.writeUInt32LE(16, 16); // Subchunk1Size
+  header.writeUInt16LE(1, 20); // AudioFormat PCM
+  header.writeUInt16LE(1, 22); // NumChannels
+  header.writeUInt32LE(SAMPLE_RATE, 24); // SampleRate
+  header.writeUInt32LE(byteRate, 28); // ByteRate
+  header.writeUInt16LE(blockAlign, 32); // BlockAlign
+  header.writeUInt16LE(16, 34); // BitsPerSample
+  header.write('data', 36);
+  header.writeUInt32LE(subchunk2Size, 40);
+  return Buffer.concat([header, data]);
+}
+
 const RENDERER = path.join(__dirname, '..', 'renderer');
 
 /**
@@ -64,6 +91,10 @@ class CaptureController extends EventEmitter {
     this.status = { micOk: false, systemOk: false, micError: '', systemError: '', running: false };
     this.levels = { mixed: 0, mic: 0, system: 0 };
     this.detector = new SpeechDetector();
+    this.pcmChunks = [];
+    this.transcribing = false;
+    this.currentLanguage = '';
+    this.ollama = new Ollama();
     this.detector.on('speech', (info) => this.emit('speech', info));
     this.monitoring = false;
   }
@@ -94,10 +125,33 @@ class CaptureController extends EventEmitter {
   }
 
   async init() {
-    ipcMain.on('capture:pcm', (_e, arrayBuffer) => {
-      if (this.writer) this.writer.write(Buffer.from(arrayBuffer));
+    ipcMain.on('capture:pcm', async (_e, arrayBuffer) => {
+      const buf = Buffer.from(arrayBuffer);
+      if (this.writer) this.writer.write(buf);
+      // accumulate for transcription
+      this.pcmChunks.push(buf);
+      if (!this.transcribing && this.currentLanguage) {
+        this.transcribing = true;
+        setTimeout(async () => {
+          const wav = createWavBuffer(this.pcmChunks);
+          this.pcmChunks = [];
+          try {
+            const models = await this.ollama.audioModels();
+            const model = models[0] || 'gemma4:12b';
+            const text = await this.ollama.transcribe(model, wav, { language: this.currentLanguage });
+            if (text) this.window?.webContents.send('capture:transcript', text);
+          } catch (e) {
+            // ignore transcription errors
+          } finally {
+            this.transcribing = false;
+          }
+        }, 500);
+      }
     });
 
+    ipcMain.on('capture:setLanguage', (_e, lang) => {
+      this.currentLanguage = lang;
+    });
     ipcMain.on('capture:level', (_e, levels) => {
       this.levels = levels;
       if (this.monitoring && !this.writer) this.detector.push(levels);

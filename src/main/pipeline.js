@@ -30,8 +30,6 @@ async function transcribe(dir, config, { onProgress, signal, ollama }) {
   for (let i = 0; i < chunks.length; i++) {
     if (signal?.aborted) throw new Error('cancelled');
     const c = chunks[i];
-    onProgress?.({ phase: 'transcribing', done: i, total: chunks.length });
-
     let text = '';
     if (rms(c.pcm) >= SILENCE_RMS) {
       text = await ollama.transcribe(config.transcribeModel, buildWav(c.pcm, sampleRate), {
@@ -39,6 +37,7 @@ async function transcribe(dir, config, { onProgress, signal, ollama }) {
         seconds: c.endSeconds - c.startSeconds,
       });
     }
+    onProgress?.({ phase: 'transcribing', done: i, total: chunks.length, text });
     segments.push({
       index: i,
       startSeconds: Math.round(c.startSeconds * 10) / 10,

@@ -1,6 +1,6 @@
 'use strict';
 
-const { Tray, Menu, nativeImage, shell, app, clipboard } = require('electron');
+const { Tray, Menu, nativeImage, shell, app, clipboard, ipcMain, BrowserWindow } = require('electron');
 const path = require('node:path');
 
 const ASSETS = path.join(__dirname, '..', '..', 'assets');
@@ -31,8 +31,77 @@ class AppTray {
     this.actions = actions;
     this.tray = new Tray(icon('idle'));
     this.tray.setToolTip('Minarrador');
-    this.tray.on('click', () => this.tray.popUpContextMenu());
+    this.tray.on('click', () => this.togglePopover());
     this.lastIconState = 'idle';
+    // IPC handlers for actions from renderer popover
+    ipcMain.on('tray-action', (event, payload) => {
+      const a = this.actions;
+      switch (payload.type) {
+        case 'start':
+          a.startRecording();
+          break;
+        case 'stop':
+          a.stopRecording();
+          break;
+        case 'openNotesFolder':
+          a.chooseNotesFolder();
+          break;
+        case 'openLast':
+          a.openLast();
+          break;
+        case 'openLog':
+          a.openLog();
+          break;
+        case 'copyDiagnostics':
+          if (a.diagnostics) clipboard.writeText(a.diagnostics());
+          break;
+        case 'restartCapture':
+          a.restartCapture();
+          break;
+        case 'chooseNotesFolder':
+          a.chooseNotesFolder();
+          break;
+        case 'setSetting':
+          a.setSetting(payload.patch);
+          break;
+        case 'quit':
+          a.quit();
+          break;
+      }
+    });
+  }
+  // Toggle the custom popover window
+  togglePopover() {
+    if (this.popover && !this.popover.isDestroyed()) {
+      if (this.popover.isVisible()) {
+        this.popover.hide();
+      } else {
+        this.popover.show();
+        this.popover.focus();
+      }
+      return;
+    }
+    const bounds = this.tray.getBounds();
+    this.popover = new BrowserWindow({
+      width: 320,
+      height: 460,
+      show: false,
+      frame: false,
+      transparent: true,
+      resizable: false,
+      alwaysOnTop: true,
+      skipTaskbar: true,
+      x: Math.round(bounds.x),
+      y: Math.round(bounds.y - 460),
+      webPreferences: { nodeIntegration: true, contextIsolation: false },
+    });
+    this.popover.loadFile(path.join(__dirname, '..', '..', 'renderer', 'tray.html'));
+    this.popover.once('ready-to-show', () => {
+      this.popover.show();
+    });
+    this.popover.on('blur', () => {
+      if (this.popover && !this.popover.isDestroyed()) this.popover.hide();
+    });
   }
 
   /**
@@ -153,6 +222,9 @@ class AppTray {
     ];
 
     this.tray.setContextMenu(Menu.buildFromTemplate(template));
+    if (this.popover && !this.popover.isDestroyed()) {
+      this.popover.webContents.send('tray-state', view);
+    }
   }
 
   destroy() {

@@ -1,0 +1,53 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Live Transcription</title>
+<style>
+  body {
+    margin: 0;
+    font-family: 'Segoe UI', system-ui, sans-serif;
+    background: linear-gradient(135deg, #2b2b2b, #111);
+    color: #eaeaea;
+    display: flex;
+    flex-direction: column;
+    height: 100vh;
+    overflow: hidden;
+  }
+  header {
+    padding: 12px 16px;
+    background: rgba(255,255,255,0.07);
+    backdrop-filter: blur(6px);
+    font-size: 1.2rem;
+    font-weight: 600;
+    text-align: center;
+    border-bottom: 1px solid rgba(255,255,255,0.15);
+  }
+  #content {
+    flex: 1;
+    padding: 16px;
+    overflow-y: auto;
+    line-height: 1.5;
+    white-space: pre-wrap;
+    word-break: break-word;
+  }
+</style>
+</head>
+<body>
+<header>Live Transcription</header>
+<div id="content"></div>
+<script>
+  const { ipcRenderer } = require('electron');
+  const content = document.getElementById('content');
+  ipcRenderer.on('clear', () => {
+    content.innerHTML = '';
+  });
+  ipcRenderer.on('update', (_, text) => {
+    const p = document.createElement('div');
+    p.textContent = text;
+    content.appendChild(p);
+    content.scrollTop = content.scrollHeight;
+  });
+</script>
+</body>
+</html>

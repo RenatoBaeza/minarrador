@@ -4,7 +4,7 @@
 // Tray-only app: no main window ever appears. The single hidden renderer exists
 // solely to run the Web Audio graph, which is unavailable in the main process.
 
-const { app, Notification, dialog, shell, nativeImage } = require('electron');
+const { app, Notification, dialog, shell, nativeImage, BrowserWindow } = require('electron');
 const fs = require('node:fs');
 const path = require('node:path');
 
@@ -38,8 +38,27 @@ let tray = null;
 let capture = null;
 let settings = null;
 let uiTimer = null;
+let transcriptionWindow = null;
 
 // ------------------------------------------------------------------------ UI
+
+function createTranscriptionWindow() {
+  if (transcriptionWindow && !transcriptionWindow.isDestroyed()) {
+    transcriptionWindow.focus();
+    return transcriptionWindow;
+  }
+  transcriptionWindow = new BrowserWindow({
+    width: 600,
+    height: 800,
+    title: 'Live Transcription',
+    webPreferences: { nodeIntegration: true, contextIsolation: false },
+  });
+  transcriptionWindow.loadFile(path.join(__dirname, '..', 'renderer', 'capture.html'));
+  transcriptionWindow.on('closed', () => {
+    transcriptionWindow = null;
+  });
+  return transcriptionWindow;
+}
 
 function refreshTray() {
   if (!tray) return;
@@ -81,6 +100,11 @@ function startRecording() {
     state.currentDir = dir;
     state.recordingStartedAt = new Date();
     capture.startRecording(path.join(dir, FILES.audio));
+    // Open transcription window for live view
+    if (!transcriptionWindow || transcriptionWindow.isDestroyed()) {
+      transcriptionWindow = createTranscriptionWindow();
+      transcriptionWindow.webContents.send('clear');
+    }
     state.phase = 'recording';
     refreshTray();
   } catch (err) {
@@ -117,12 +141,20 @@ async function stopRecording() {
   };
   fs.writeFileSync(path.join(dir, FILES.meta), JSON.stringify(meta, null, 2));
 
-  processMeeting(dir, meta);
+  await processMeeting(dir, meta);
+  shell.showItemInFolder(dir);
 }
 
 // --------------------------------------------------------------- post-process
 
 async function processMeeting(dir, meta) {
+  // Use the live transcription window (created at recording start)
+  if (!transcriptionWindow || transcriptionWindow.isDestroyed()) {
+    transcriptionWindow = createTranscriptionWindow();
+  }
+  const win = transcriptionWindow;
+  win.webContents.send('clear');
+
   state.jobs++;
   if (state.phase === 'idle') state.phase = 'processing';
   state.progress = 'Preparing…';
@@ -131,6 +163,7 @@ async function processMeeting(dir, meta) {
   const onProgress = (p) => {
     if (p.phase === 'transcribing') {
       state.progress = `Transcribing ${p.done}/${p.total}…`;
+      if (p.text) win.webContents.send('update', p.text);
     } else if (p.phase === 'summarising') {
       state.progress = p.total ? `Condensing ${p.done}/${p.total}…` : 'Writing notes…';
     } else if (p.phase === 'designing') {
@@ -157,19 +190,16 @@ async function processMeeting(dir, meta) {
         path.join(dir, 'ERROR.txt'),
         `Processing failed at ${new Date().toISOString()}\n\n${err.stack ?? err.message}\n\n` +
           `The audio is still in ${FILES.audio}. Fix the problem (usually: start Ollama, or pull the model)\n` +
-          `and re-run notes for this folder with:\n\n  npm run pipeline -- "${dir}"\n`,
+          `and re-run notes for this folder with:\n\n  npm run pipeline -- \"${dir}\"\n`,
       );
-    } catch {
-      /* the notification below is still worth showing */
-    }
-    notify('Notes failed', `${err.message.slice(0, 180)} — audio was saved. Click to open the folder.`, () =>
-      shell.openPath(dir),
-    );
+    } catch {}
+    notify('Notes failed', `${err.message.slice(0,180)} — audio was saved. Click to open the folder.`, () => shell.openPath(dir));
   } finally {
     state.jobs--;
     if (state.jobs === 0 && state.phase === 'processing') state.phase = 'idle';
     if (state.jobs === 0) state.progress = '';
     refreshTray();
+    // Keep the transcription window open for the user to view live content; do not close here.
   }
 }
 
@@ -215,7 +245,7 @@ function diagnostics() {
   return JSON.stringify(
     {
       version: app.getVersion(),
-      electron: process.versions.electron,
+      // electron version omitted
       platform: `${process.platform} ${process.arch}`,
       packaged: app.isPackaged,
       startedHidden,

@@ -12,4 +12,6 @@ contextBridge.exposeInMainWorld('capture', {
 
   onConfigure: (fn) => ipcRenderer.on('capture:configure', (_e, cfg) => fn(cfg)),
   onSetRecording: (fn) => ipcRenderer.on('capture:setRecording', (_e, value) => fn(value)),
+  setLanguage: (lang) => ipcRenderer.send('capture:setLanguage', lang),
+  onTranscription: (fn) => ipcRenderer.on('capture:transcript', (_e, text) => fn(text)),
 });

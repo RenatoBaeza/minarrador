@@ -211,4 +211,30 @@ window.capture.onConfigure(async (cfg) => {
 window.capture.onSetRecording((value) => {
   state.recording = Boolean(value);
   state.worklet?.port.postMessage({ type: 'record', value: state.recording });
+  // Reset transcript when a new recording starts
+  if (state.recording) {
+    const transDiv = document.getElementById('transcript');
+    if (transDiv) transDiv.textContent = '';
+  }
+});
+
+// Language selector handling
+const langSelect = document.getElementById('langSelect');
+if (langSelect) {
+  langSelect.addEventListener('change', (e) => {
+    const lang = e.target.value;
+    window.capture.setLanguage(lang);
+  });
+}
+
+// Transcription display
+window.capture.onTranscription((text) => {
+  const transDiv = document.getElementById('transcript');
+  if (transDiv) {
+    const span = document.createElement('span');
+    span.className = 'sentence';
+    span.textContent = text + ' ';
+    transDiv.appendChild(span);
+    transDiv.scrollTop = transDiv.scrollHeight;
+  }
 });
