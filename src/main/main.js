@@ -238,8 +238,8 @@ async function processMeeting(dir, meta) {
     log.info('pipeline complete:', dir);
     notify(
       out.notes.title,
-      `${fmtDuration(meta.durationSeconds)} · ${out.notes.action_items.length} action item(s). Click to open the notes.`,
-      () => shell.openPath(path.join(dir, FILES.pdf)),
+      `${fmtDuration(meta.durationSeconds)} · ${out.notes.action_items.length} action item(s). Click to open the folder.`,
+      () => shell.openPath(dir),
     );
   } catch (err) {
     log.error('pipeline failed for', dir, err);
