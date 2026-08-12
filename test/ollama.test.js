@@ -239,6 +239,22 @@ test('an aborted request stops rather than retrying', async () => {
   }
 });
 
+test('a signal aborted before the call never reaches the daemon', async () => {
+  // An already-aborted signal does not fire 'abort' again, so a listener alone
+  // misses it and the request runs to completion — minutes of transcription
+  // nobody is waiting for, with the model occupied while the next one queues.
+  const fake = await fakeOllama(() => completion('should never be asked for'));
+  try {
+    await assert.rejects(
+      () => fake.client.chat('m', [], { signal: AbortSignal.abort() }),
+      (err) => err instanceof OllamaError && /Cancelled/.test(err.message),
+    );
+    assert.equal(fake.calls.length, 0, 'the daemon should not have been called at all');
+  } finally {
+    await fake.close();
+  }
+});
+
 test('the host is normalised so a trailing slash cannot double up', async () => {
   const fake = await fakeOllama(() => completion('ok'));
   try {

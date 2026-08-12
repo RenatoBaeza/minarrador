@@ -50,9 +50,13 @@ class AppTray {
     this.actions = actions;
     this.tray = new Tray(icon('idle'));
     this.tray.setToolTip('Minarrador');
-    // Left-click is the fastest path to the thing people actually want.
-    this.tray.on('click', () => this.tray.popUpContextMenu());
-    this.tray.on('double-click', () => this.actions.toggleTranscript());
+    // Left-click opens the meeting library — the app's front door, and the one
+    // surface with somewhere to go. Right-click keeps the menu, which is where
+    // recording lives, so the two clicks stay meaningfully different.
+    //
+    // Nothing is bound to double-click: Windows sends a plain click first, so a
+    // second action here would always arrive with the library already opening.
+    this.tray.on('click', () => this.actions.openLibrary());
     this.lastIconState = 'idle';
   }
 
@@ -191,6 +195,9 @@ class AppTray {
         : { label: 'Start Recording', click: () => a.startRecording() },
 
       { type: 'separator' },
+      // Also what a left-click on the icon does; listed anyway, because a
+      // shortcut nobody is told about is one nobody uses.
+      { label: 'Meetings…', click: () => a.openLibrary() },
       { label: 'Show Live Transcript', click: () => a.toggleTranscript() },
       { label: 'Open Notes Folder', click: () => shell.openPath(settings.notesDir) },
       {

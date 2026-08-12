@@ -1,0 +1,47 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self'; style-src 'self'" />
+    <title>Meetings</title>
+    <link rel="stylesheet" href="library.css" />
+  </head>
+  <body>
+    <header class="titlebar">
+      <span class="brand">Minarrador</span>
+      <span class="sub">Meetings</span>
+      <button id="folder" class="ghost" type="button" title="Open the notes folder">Notes folder</button>
+      <button id="minimize" class="chrome" type="button" title="Minimise" aria-label="Minimise">&#8211;</button>
+      <button id="close" class="chrome danger" type="button" title="Close" aria-label="Close">&#10005;</button>
+    </header>
+
+    <main>
+      <aside class="rail">
+        <div class="search">
+          <input
+            id="query"
+            type="search"
+            autocomplete="off"
+            spellcheck="false"
+            placeholder="Search titles and transcripts…"
+            aria-label="Search meetings"
+          />
+        </div>
+        <div id="count" class="count"></div>
+        <div id="list" class="list" role="listbox" aria-label="Recorded meetings" tabindex="-1"></div>
+      </aside>
+
+      <section class="reader" id="reader" aria-live="polite">
+        <div id="placeholder" class="placeholder">
+          <h1>Your meetings live here</h1>
+          <p>
+            Every recording keeps its own folder of artefacts. Pick one on the left to read the notes and the full
+            transcript — or search across everything that has ever been said.
+          </p>
+        </div>
+      </section>
+    </main>
+
+    <script src="library.js"></script>
+  </body>
+</html>

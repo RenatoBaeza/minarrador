@@ -55,9 +55,15 @@ module.exports = [
     rules: { 'no-restricted-globals': 'off' },
   },
 
+  // The three renderer blocks below match by naming convention rather than by
+  // listing files. Naming them individually meant every new window silently
+  // fell through to no environment at all, and a page that had simply not been
+  // added to the list failed with a screenful of "'document' is not defined"
+  // that says nothing about the actual mistake.
+
   {
     // Preloads: browser context, but with require() and the contextBridge.
-    files: ['src/renderer/preload.js', 'src/renderer/transcript-preload.js', 'src/renderer/snippets-preload.js'],
+    files: ['src/renderer/**/*preload.js'],
     languageOptions: {
       ecmaVersion: 2024,
       sourceType: 'commonjs',
@@ -67,13 +73,15 @@ module.exports = [
   },
 
   {
-    // Renderer pages: browser only, no Node. contextIsolation means the bridge
-    // objects arrive on window, so they are declared read-only globals.
-    files: ['src/renderer/capture.js', 'src/renderer/transcript.js', 'src/renderer/snippets.js'],
+    // Renderer pages: browser only, no Node. Whatever the preload exposed
+    // arrives on `window`, and is reached through it — there is no bare global
+    // to declare here, which is what keeps this block free of a file list too.
+    files: ['src/renderer/**/*.js'],
+    ignores: ['src/renderer/**/*preload.js', 'src/renderer/**/*worklet.js'],
     languageOptions: {
       ecmaVersion: 2024,
       sourceType: 'script',
-      globals: { ...globals.browser, capture: 'readonly', transcript: 'readonly', quickCopy: 'readonly' },
+      globals: { ...globals.browser },
     },
     rules: {
       ...shared,
@@ -86,7 +94,7 @@ module.exports = [
 
   {
     // AudioWorklet global scope: no window, no Node, no fetch.
-    files: ['src/renderer/pcm-worklet.js'],
+    files: ['src/renderer/**/*worklet.js'],
     languageOptions: {
       ecmaVersion: 2024,
       sourceType: 'script',

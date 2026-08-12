@@ -1,0 +1,521 @@
+/* Meeting library window. Same palette and frameless-header treatment as the
+   live transcript and the quick-copy editor, kept in its own file so the page
+   can run under a strict CSP with no inline styles.
+
+   Two panes: a rail of meetings on the left, a reading column on the right.
+   The reading column is the point of the window, so it gets the space, the
+   larger type and the only serif-free measure worth reading a transcript in. */
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  /* Both panes scroll; this is what keeps their scrollbars from being drawn in
+     Chromium's default light grey against the dark page. */
+  color-scheme: dark;
+  font-family: 'Segoe UI', system-ui, sans-serif;
+  background: #16161a;
+  color: #eaeaea;
+  display: flex;
+  flex-direction: column;
+  height: 100vh;
+  overflow: hidden;
+  font-size: 14px;
+}
+
+/* ------------------------------------------------------------------ chrome */
+
+/* The window is frameless, so this header is also its title bar: the only
+   region that drags the window. Anything clickable inside must opt back out. */
+.titlebar {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 8px 10px 16px;
+  background: #1e1e24;
+  border-bottom: 1px solid #2c2c34;
+  user-select: none;
+  -webkit-app-region: drag;
+}
+
+.brand {
+  font-weight: 600;
+  letter-spacing: -0.01em;
+}
+
+.sub {
+  color: #6b7280;
+  margin-right: auto;
+}
+
+.chrome,
+.ghost {
+  -webkit-app-region: no-drag;
+  flex: none;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: #9ca3af;
+  font: inherit;
+  line-height: 1;
+  cursor: default;
+}
+
+.chrome {
+  width: 28px;
+  height: 28px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 12px;
+}
+
+.chrome:hover {
+  background: #2e2e38;
+  color: #eaeaea;
+}
+
+.chrome.danger:hover {
+  background: #e11d48;
+  color: #fff;
+}
+
+.ghost {
+  font-size: 12px;
+  padding: 6px 10px;
+  border: 1px solid #2c2c34;
+}
+
+.ghost:hover {
+  background: #2e2e38;
+  color: #eaeaea;
+}
+
+main {
+  flex: 1;
+  display: flex;
+  min-height: 0;
+}
+
+/* -------------------------------------------------------------------- rail */
+
+.rail {
+  flex: none;
+  width: 300px;
+  border-right: 1px solid #2c2c34;
+  background: #1a1a20;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+}
+
+.search {
+  padding: 12px;
+  border-bottom: 1px solid #2c2c34;
+}
+
+.search input {
+  width: 100%;
+  background: #24242c;
+  color: #eaeaea;
+  border: 1px solid #34343e;
+  border-radius: 6px;
+  padding: 7px 10px;
+  font: inherit;
+  font-size: 13px;
+}
+
+.search input:focus {
+  outline: none;
+  border-color: #4c6ef5;
+}
+
+.search input::placeholder {
+  color: #6b7280;
+}
+
+.count {
+  padding: 8px 14px 4px;
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: #6b7280;
+}
+
+.list {
+  flex: 1;
+  overflow-y: auto;
+  padding: 4px 8px 12px;
+  min-height: 0;
+}
+
+.list:focus {
+  outline: none;
+}
+
+/* A date heading, the way a meeting list is actually scanned. */
+.group {
+  padding: 12px 6px 6px;
+  font-size: 11px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: #6b7280;
+}
+
+.card {
+  display: block;
+  width: 100%;
+  text-align: left;
+  border: 1px solid transparent;
+  border-radius: 8px;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  padding: 9px 10px;
+  margin-bottom: 2px;
+  cursor: default;
+}
+
+.card:hover {
+  background: #22222a;
+}
+
+.card.selected {
+  background: #24242c;
+  border-color: #3b5bdb;
+}
+
+.card-title {
+  font-weight: 600;
+  font-size: 13.5px;
+  line-height: 1.35;
+  /* Two lines of title, then an ellipsis: enough to tell meetings apart
+     without letting one long title push the rest of the list off screen. */
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+
+.card-meta {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-top: 3px;
+  font-size: 11.5px;
+  color: #6b7280;
+}
+
+.card-preview {
+  margin-top: 4px;
+  font-size: 12px;
+  line-height: 1.45;
+  color: #8b8b98;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+
+/* States that mean "this folder has no notes in it yet", so the card explains
+   itself rather than looking like a meeting the model had nothing to say about. */
+.tag {
+  flex: none;
+  border-radius: 999px;
+  padding: 1px 7px;
+  font-size: 10.5px;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  background: #2e2e38;
+  color: #9ca3af;
+}
+
+.tag.recording {
+  background: rgba(225, 29, 72, 0.16);
+  color: #fb7185;
+}
+
+.tag.working {
+  background: rgba(59, 91, 219, 0.18);
+  color: #93a7f7;
+}
+
+.tag.failed {
+  background: rgba(180, 83, 9, 0.2);
+  color: #f0a04b;
+}
+
+.tag.hits {
+  background: rgba(76, 110, 245, 0.16);
+  color: #93a7f7;
+}
+
+.rail-empty {
+  padding: 18px 14px;
+  color: #6b7280;
+  font-style: italic;
+  line-height: 1.6;
+}
+
+/* ------------------------------------------------------------------ reader */
+
+.reader {
+  flex: 1;
+  overflow-y: auto;
+  min-width: 0;
+  padding: 28px 40px 64px;
+}
+
+.placeholder {
+  max-width: 460px;
+  margin: 14vh auto 0;
+  text-align: center;
+  color: #6b7280;
+}
+
+.placeholder h1 {
+  font-size: 19px;
+  font-weight: 600;
+  color: #9ca3af;
+  margin: 0 0 10px;
+}
+
+.placeholder p {
+  margin: 0;
+  line-height: 1.65;
+  font-size: 13.5px;
+}
+
+/* The reading column. Everything below sits inside it, so the measure holds
+   however wide the window is dragged. */
+.doc {
+  max-width: 720px;
+  margin: 0 auto;
+}
+
+.doc h1 {
+  font-size: 26px;
+  line-height: 1.2;
+  letter-spacing: -0.02em;
+  margin: 0 0 8px;
+}
+
+.doc-meta {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  color: #8b8b98;
+  font-size: 12.5px;
+}
+
+.dot {
+  color: #45454f;
+}
+
+.actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin: 18px 0 4px;
+}
+
+.button {
+  flex: none;
+  border: 1px solid #34343e;
+  border-radius: 6px;
+  background: #24242c;
+  color: #eaeaea;
+  font: inherit;
+  font-size: 12.5px;
+  padding: 6px 12px;
+  cursor: default;
+}
+
+.button:hover:not(:disabled) {
+  background: #2e2e38;
+}
+
+.button:disabled {
+  opacity: 0.4;
+}
+
+.button.primary {
+  background: #3b5bdb;
+  border-color: #3b5bdb;
+  color: #fff;
+}
+
+.button.primary:hover:not(:disabled) {
+  background: #4c6ef5;
+}
+
+/* Notes / Transcript. A segmented control rather than two links: the two are
+   the same meeting seen twice, not two places to navigate to. */
+.tabs {
+  display: flex;
+  gap: 2px;
+  margin: 22px 0 20px;
+  padding: 3px;
+  border: 1px solid #2c2c34;
+  border-radius: 8px;
+  background: #1b1b21;
+  width: fit-content;
+}
+
+.tab {
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: #9ca3af;
+  font: inherit;
+  font-size: 12.5px;
+  padding: 6px 16px;
+  cursor: default;
+}
+
+.tab:hover {
+  color: #eaeaea;
+}
+
+.tab.active {
+  background: #2e2e38;
+  color: #fff;
+}
+
+.doc h2 {
+  font-size: 11.5px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.09em;
+  color: #93a7f7;
+  margin: 30px 0 12px;
+}
+
+.doc h2:first-child {
+  margin-top: 0;
+}
+
+.bullets {
+  margin: 0;
+  padding-left: 20px;
+}
+
+.bullets li {
+  margin-bottom: 9px;
+  line-height: 1.65;
+  font-size: 14.5px;
+}
+
+.decision {
+  border-left: 2px solid #3b5bdb;
+  padding: 2px 0 2px 12px;
+  margin-bottom: 12px;
+  line-height: 1.6;
+}
+
+.decision .why {
+  display: block;
+  color: #8b8b98;
+  font-size: 13px;
+  margin-top: 2px;
+}
+
+.action {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  padding: 9px 0;
+  border-bottom: 1px solid #24242c;
+  line-height: 1.55;
+}
+
+.action .box {
+  flex: none;
+  width: 13px;
+  height: 13px;
+  border: 1.5px solid #45454f;
+  border-radius: 3px;
+  transform: translateY(2px);
+}
+
+.action .task {
+  flex: 1;
+}
+
+.action .owner {
+  flex: none;
+  font-size: 12px;
+  color: #93a7f7;
+  font-weight: 600;
+}
+
+.action .due {
+  flex: none;
+  font-size: 12px;
+  color: #8b8b98;
+}
+
+.none {
+  color: #6b7280;
+  font-style: italic;
+  margin: 0;
+}
+
+/* --------------------------------------------------------------- transcript */
+
+.line {
+  display: flex;
+  gap: 14px;
+  padding: 7px 0;
+  line-height: 1.7;
+}
+
+.line .at {
+  flex: none;
+  width: 48px;
+  padding-top: 2px;
+  text-align: right;
+  font-size: 11.5px;
+  font-variant-numeric: tabular-nums;
+  color: #5b5b68;
+}
+
+.line .said {
+  flex: 1;
+  font-size: 14.5px;
+  white-space: pre-wrap;
+}
+
+mark {
+  background: rgba(251, 191, 36, 0.28);
+  color: #fde68a;
+  border-radius: 2px;
+  padding: 0 1px;
+}
+
+.notice {
+  border: 1px solid #2c2c34;
+  border-radius: 8px;
+  background: #1b1b21;
+  padding: 14px 16px;
+  color: #9ca3af;
+  line-height: 1.65;
+  font-size: 13.5px;
+}
+
+.notice strong {
+  color: #eaeaea;
+  font-weight: 600;
+}
+
+.notice code {
+  font-family: Consolas, 'Cascadia Mono', monospace;
+  font-size: 12.5px;
+  background: #24242c;
+  border-radius: 4px;
+  padding: 1px 5px;
+}

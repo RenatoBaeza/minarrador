@@ -12,6 +12,26 @@ function folderStamp(date = new Date()) {
   );
 }
 
+/**
+ * Inverse of folderStamp: the local time a folder name encodes, or null when
+ * the name was not written by this app. Tolerates the `-2` suffix two meetings
+ * in the same second get.
+ *
+ * Reconstructing the date is not enough on its own — `Date` happily rolls
+ * `2026-13-45` over into the following year — so the parse is only accepted
+ * when it stamps back to the name it came from.
+ *
+ * @param {string} name folder name, e.g. '2026-08-11_14-32-05'
+ * @returns {Date|null}
+ */
+function parseFolderStamp(name) {
+  const m = /^(\d{4})-(\d{2})-(\d{2})_(\d{2})-(\d{2})-(\d{2})(?:-\d+)?$/.exec(String(name ?? ''));
+  if (!m) return null;
+  const [y, mo, d, h, mi, s] = m.slice(1).map(Number);
+  const date = new Date(y, mo - 1, d, h, mi, s);
+  return folderStamp(date) === name.slice(0, 19) ? date : null;
+}
+
 /** Creates and returns a fresh folder for one recording. */
 function createMeetingDir(notesDir, date = new Date()) {
   let dir = path.join(notesDir, folderStamp(date));
@@ -35,4 +55,4 @@ const FILES = {
 // Required lazily so this module stays importable outside Electron (tests, tools).
 const userData = () => require('electron').app.getPath('userData');
 
-module.exports = { folderStamp, createMeetingDir, FILES, userData };
+module.exports = { folderStamp, parseFolderStamp, createMeetingDir, FILES, userData };

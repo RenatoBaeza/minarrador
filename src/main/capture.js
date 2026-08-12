@@ -305,6 +305,17 @@ class LiveTranscriber extends EventEmitter {
   }
 }
 
+/** How long to wait before rebuilding a worker whose renderer died. */
+const RECOVER_DELAY_MS = 1500;
+/**
+ * Consecutive rebuilds before we stop trying.
+ *
+ * The count resets the moment a rebuilt graph reports itself running, so this
+ * only ever bites a renderer that cannot stay up — where retrying forever would
+ * spin for the rest of the meeting instead of saying so once.
+ */
+const MAX_RECOVERIES = 3;
+
 class CaptureController extends EventEmitter {
   /** @param {{ ollamaHost?: string, whisper?: import('./whisper').WhisperServer }} [options] */
   constructor({ ollamaHost, whisper = null } = {}) {
@@ -321,6 +332,10 @@ class CaptureController extends EventEmitter {
     this.liveTranscriber.on('text', (text) => this.emit('transcript', text));
     this.monitoring = false;
     this._quitting = false;
+    /** Last configuration sent to the renderer, replayed after a rebuild. */
+    this.config = { active: false, captureMic: true, captureSystem: true };
+    this.recoveries = 0;
+    this.recoverTimer = null;
   }
 
   /** Grants screen-audio loopback without showing a picker. */
@@ -379,10 +394,24 @@ class CaptureController extends EventEmitter {
       else if (status.micError || status.systemError) {
         log.warn('capture sources —', `mic: ${status.micError || 'ok'};`, `system: ${status.systemError || 'ok'}`);
       }
+      // A graph that came back up is proof the rebuild worked, so the next crash
+      // starts from a full budget rather than inheriting this one's.
+      if (this.status.running) this.recoveries = 0;
       this.emit('status', this.status);
     });
 
-    this.window = new BrowserWindow({
+    await this.#createWindow();
+  }
+
+  /**
+   * Builds the hidden worker that owns the Web Audio graph.
+   *
+   * Separate from init() because it runs again after a renderer crash, and the
+   * IPC handlers above must not be registered twice — a second set would double
+   * every PCM buffer into the WAV.
+   */
+  async #createWindow() {
+    const win = new BrowserWindow({
       show: false,
       width: 420,
       height: 320,
@@ -391,32 +420,98 @@ class CaptureController extends EventEmitter {
         preload: path.join(RENDERER, 'preload.js'),
         contextIsolation: true,
         nodeIntegration: false,
-        sandbox: false,
+        sandbox: true,
         backgroundThrottling: false,
       },
     });
-    mediaClients.add(this.window.webContents.id);
+    this.window = win;
+    mediaClients.add(win.webContents.id);
 
     // Nothing in this window is user-facing; never let it appear.
-    this.window.on('close', (e) => {
+    win.on('close', (e) => {
       if (!this._quitting) e.preventDefault();
     });
 
     // The audio graph lives in the renderer, so its console is where capture
     // problems surface. Mirror it into the log file.
-    this.window.webContents.on('console-message', (e) => {
+    win.webContents.on('console-message', (e) => {
       const level = e.level === 'error' ? 'error' : e.level === 'warning' ? 'warn' : null;
       if (level) log[level](`renderer: ${e.message}`);
     });
 
-    await this.window.loadFile(path.join(RENDERER, 'capture.html'));
+    // The one failure this app cannot afford to miss. Nothing in the main
+    // process notices a dead renderer on its own: the writer stays open, the
+    // tray still says "Recording", and the WAV simply stops growing — so a
+    // meeting ends as a few minutes of audio and no warning.
+    win.webContents.on('render-process-gone', (_e, details) => this.#onRendererGone(win, details));
+
+    await win.loadFile(path.join(RENDERER, 'capture.html'));
+  }
+
+  /**
+   * Rebuilds the worker after its renderer dies, and re-arms it if a meeting was
+   * in progress.
+   *
+   * The audio between the crash and the new graph opening is gone — nothing can
+   * recover that — but the WAV is written in the main process and stays intact,
+   * so the recording continues into the same file with a gap in it. That is the
+   * whole point: the alternative is a meeting that silently stopped recording.
+   *
+   * @param {import('electron').BrowserWindow} win the window that died
+   * @param {{ reason?: string, exitCode?: number }} details
+   */
+  #onRendererGone(win, details) {
+    // Only the live worker counts. Tearing the old window down during a rebuild
+    // can raise this same event on it, and acting on that would schedule another
+    // rebuild, which would tear down another window, for as long as the app runs.
+    if (this._quitting || this.window !== win) return;
+    const wasRecording = this.isRecording;
+    log.error(`capture renderer gone (${details?.reason ?? 'unknown'}, exit ${details?.exitCode ?? '?'})`, wasRecording ? '— mid-recording' : '');
+
+    this.status = { ...this.status, micOk: false, systemOk: false, running: false };
+    this.emit('status', this.status);
+
+    const recovering = ++this.recoveries <= MAX_RECOVERIES;
+    this.emit('rendererGone', { ...details, wasRecording, recovering });
+    if (!recovering) {
+      log.error(`capture renderer failed ${this.recoveries} times in a row; not rebuilding it again`);
+      return;
+    }
+
+    clearTimeout(this.recoverTimer);
+    this.recoverTimer = setTimeout(() => {
+      this.recoverTimer = null;
+      this.#rebuild(wasRecording).catch((err) => log.error('capture renderer rebuild failed', err));
+    }, RECOVER_DELAY_MS);
+  }
+
+  async #rebuild(wasRecording) {
+    if (this._quitting) return;
+    log.info('rebuilding the capture worker');
+    const dead = this.window;
+    this.window = null;
+    if (dead && !dead.isDestroyed()) {
+      mediaClients.delete(dead.webContents.id);
+      dead.destroy();
+    }
+
+    await this.#createWindow();
+    // Replay what the renderer was told before it died. Re-arming last means a
+    // buffer can never arrive for a graph that has not been configured yet.
+    this.window.webContents.send('capture:configure', { ...this.config });
+    if (wasRecording && this.isRecording) {
+      this.window.webContents.send('capture:setRecording', true);
+      log.info('capture worker rebuilt; recording continues into the same file');
+    }
   }
 
   /** Opens (or closes) the audio graph. Required before recording. */
   setActive(active, config = {}) {
     this.monitoring = active;
     if (!active) this.detector.reset();
-    this.window?.webContents.send('capture:configure', { active, ...config });
+    // Remembered so a rebuilt renderer comes back on the same sources.
+    this.config = { ...this.config, ...config, active };
+    this.window?.webContents.send('capture:configure', { ...this.config });
   }
 
   /**
@@ -465,6 +560,8 @@ class CaptureController extends EventEmitter {
 
   destroy() {
     this._quitting = true;
+    clearTimeout(this.recoverTimer);
+    this.recoverTimer = null;
     this.liveTranscriber.stop();
     this.whisper?.stop();
     if (this.writer) {

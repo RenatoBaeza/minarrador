@@ -11,7 +11,8 @@ Local-only meeting notes for Windows. Records mic + system audio, transcribes an
    - Transcribes the audio locally using an Ollama model
    - Generates structured notes: a 5-bullet summary, decisions made, and action items with owners
    - Produces a polished PDF brief
-3. **Everything stays local.** No accounts, no cloud, no telemetry. Audio, transcripts and notes live in a folder on your machine.
+3. **Read it back later.** Left-click the tray icon to open your meetings: every recording you have made, its notes, and the full transcript — with a search box that reads across all of them.
+4. **Everything stays local.** No accounts, no cloud, no telemetry. Audio, transcripts and notes live in a folder on your machine.
 
 While you record, a **live transcript** window shows what is being said, a second or so behind the room. That preview is produced by [whisper.cpp](https://github.com/ggml-org/whisper.cpp) running as a local process — it transcribes several seconds of speech in a fraction of that, which is what lets captions keep up. The transcript that actually gets saved is a separate, more careful pass over the recorded audio once you stop.
 
@@ -110,6 +111,24 @@ Ollama runs a local HTTP server on `127.0.0.1:11434`. If a firewall prompt appea
 - **Right-click** the waveform icon in the system tray
 - Click **Start Recording** to begin, **Stop Recording** to finish
 - When processing completes, you'll get a notification — click it to open the PDF
+
+### Your meetings
+
+**Left-click** the tray icon (or **Meetings…** in the menu) to open the library:
+every recording down the left, grouped by day, and whichever one you pick opened
+on the right. **Notes** shows the summary, the decisions and the action items;
+**Transcript** shows everything that was said, timestamped by the minute.
+
+The search box reads titles *and* transcripts, so "what did we say about
+pricing" is one search rather than a trawl through folders — matches are
+highlighted and counted per meeting. From an open meeting you can jump to the
+PDF brief, the folder itself, or the audio, and copy the whole transcript in one
+click. `Ctrl+F` focuses the search, the arrow keys walk the list, and `Esc`
+clears the search before it closes the window.
+
+The library only ever reads. A meeting still recording or still being written up
+says so on its card, and one whose notes never got written explains why — the
+audio is always safe in the folder either way.
 
 ### Quick copy
 

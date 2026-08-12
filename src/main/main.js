@@ -4,13 +4,14 @@
 // Tray-only app: no main window ever appears. The single hidden renderer exists
 // solely to run the Web Audio graph, which is unavailable in the main process.
 
-const { app, Notification, dialog, shell, nativeImage, BrowserWindow, ipcMain } = require('electron');
+const { app, Notification, clipboard, dialog, shell, nativeImage, BrowserWindow, ipcMain } = require('electron');
 const fs = require('node:fs');
 const path = require('node:path');
 
 const log = require('./logger');
 const settingsStore = require('./settings');
 const snippetsStore = require('./snippets');
+const library = require('./library');
 const { CaptureController } = require('./capture');
 const { AppTray } = require('./tray');
 const { Ollama } = require('./ollama');
@@ -19,6 +20,28 @@ const { runPipeline, fmtDuration } = require('./pipeline');
 const { createMeetingDir, FILES } = require('./paths');
 
 const APP_ID = 'com.rntbz.minarrador';
+
+/** How often to look for the Ollama daemon while idle. */
+const OLLAMA_POLL_MS = 60_000;
+
+/**
+ * A main-process fault is the one failure this app has no way to show.
+ *
+ * There is no window to put a stack in, and Electron's default handler pops a
+ * dialog that says "A JavaScript error occurred in the main process" and never
+ * writes to the log file the tray menu offers — so the one artefact a bug report
+ * is built from is the one place the error does not appear.
+ *
+ * Neither handler exits. A recording in progress is worth more than a tidy
+ * process: the WAV is written here in the main process, and staying up means the
+ * meeting keeps landing on disk and Stop still works.
+ */
+process.on('uncaughtException', (err) => {
+  log.error('uncaught exception in the main process', err);
+});
+process.on('unhandledRejection', (reason) => {
+  log.error('unhandled rejection in the main process', reason instanceof Error ? reason : String(reason));
+});
 
 /**
  * The identity Windows files this process under.
@@ -47,7 +70,12 @@ const state = {
   ollamaChecking: false,
   models: [],
   audioModels: [],
-  jobs: 0,
+  /**
+   * Meetings still being processed, keyed by folder so a quit can name them.
+   * The value aborts that run's model requests.
+   * @type {Map<string, AbortController>}
+   */
+  jobs: new Map(),
   /** Guards the shutdown sequence against re-entering before-quit. */
   quitting: false,
 };
@@ -57,8 +85,10 @@ let capture = null;
 let whisper = null;
 let settings = null;
 let uiTimer = null;
+let ollamaTimer = null;
 let transcriptionWindow = null;
 let snippetsWindow = null;
+let libraryWindow = null;
 
 // ------------------------------------------------------------------------ UI
 
@@ -181,6 +211,72 @@ function showSnippetsWindow() {
   return snippetsWindow;
 }
 
+/**
+ * The meeting library: the archive of everything ever recorded, and the only
+ * window in this app someone opens without a meeting in progress.
+ *
+ * Left-clicking the tray icon lands here, so it is the app's front door — hence
+ * the size, and hence single-instance like the rest: a second copy would be a
+ * second reader over the same folders with nothing to gain from the split.
+ *
+ * Read-only. Everything it shows comes out of library.js, which never writes.
+ */
+function showLibraryWindow() {
+  if (libraryWindow && !libraryWindow.isDestroyed()) {
+    if (libraryWindow.isMinimized()) libraryWindow.restore();
+    libraryWindow.show();
+    libraryWindow.focus();
+    return libraryWindow;
+  }
+
+  libraryWindow = new BrowserWindow({
+    width: 1120,
+    height: 760,
+    minWidth: 780,
+    minHeight: 480,
+    show: false,
+    frame: false,
+    title: 'Meetings',
+    backgroundColor: '#16161a',
+    icon: appIcon(),
+    webPreferences: {
+      preload: path.join(RENDERER, 'library-preload.js'),
+      contextIsolation: true,
+      nodeIntegration: false,
+      sandbox: true,
+    },
+  });
+
+  libraryWindow.once('ready-to-show', () => libraryWindow?.show());
+  libraryWindow.on('closed', () => {
+    libraryWindow = null;
+  });
+  libraryWindow.loadFile(path.join(RENDERER, 'library.html')).catch((err) => {
+    log.error('library window failed to load', err);
+  });
+  return libraryWindow;
+}
+
+/**
+ * Tells an open library its list is stale.
+ *
+ * Sent at the four moments the folder actually changes — a recording starting
+ * or ending, a pipeline run starting or finishing — rather than from
+ * refreshTray, which ticks once a second while recording and would have the
+ * window re-reading every transcript on disk for a clock.
+ */
+function notifyLibrary() {
+  if (libraryWindow && !libraryWindow.isDestroyed()) libraryWindow.webContents.send('library:changed');
+}
+
+/** What the library shows on folders the app is still busy with. */
+function libraryActivity() {
+  return {
+    recordingId: state.phase === 'recording' && state.currentDir ? path.basename(state.currentDir) : null,
+    processingIds: [...state.jobs.keys()].map((dir) => path.basename(dir)),
+  };
+}
+
 /** Posts to the transcript window when one is open; a no-op otherwise. */
 function sendToTranscript(channel, payload) {
   if (transcriptionWindow && !transcriptionWindow.isDestroyed()) {
@@ -248,6 +344,7 @@ function startRecording() {
     if (settings.liveTranscript) showTranscriptWindow();
     sendToTranscript('transcript:clear');
     refreshTray();
+    notifyLibrary();
   } catch (err) {
     log.error('startRecording failed', err);
     dialog.showErrorBox('Minarrador', `Could not start recording:\n\n${err.message}`);
@@ -279,6 +376,7 @@ async function finalizeRecording() {
     log.warn('discarding recording shorter than a second:', dir);
     fs.rmSync(dir, { recursive: true, force: true });
     notify('Nothing recorded', 'The recording was too short to keep.');
+    notifyLibrary(); // The folder the library was showing as recording is gone.
     return null;
   }
 
@@ -289,7 +387,31 @@ async function finalizeRecording() {
     sources,
   };
   fs.writeFileSync(path.join(dir, FILES.meta), JSON.stringify(meta, null, 2));
+  // The folder is now a meeting the library can list, notes or no notes.
+  notifyLibrary();
   return { dir, meta };
+}
+
+/**
+ * Leaves a folder able to explain itself.
+ *
+ * A meeting folder with audio in it and no notes looks identical whether the app
+ * quit mid-recording, quit mid-pipeline, or never ran the pipeline at all. This
+ * is what tells the three apart, and it carries the command that finishes the
+ * job — the audio is the irreplaceable part, and it is already safe on disk.
+ *
+ * Synchronous on purpose: both callers are on the quit path, where nothing waits
+ * for a promise.
+ */
+function writeResumeNote(dir, reason) {
+  try {
+    fs.writeFileSync(
+      path.join(dir, 'UNPROCESSED.txt'),
+      `${reason}\n\nThe audio is still in ${FILES.audio}. Produce the notes with:\n\n  npm run pipeline -- "${dir}"\n`,
+    );
+  } catch (err) {
+    log.warn('could not write the resume note in', dir, err.message);
+  }
 }
 
 async function stopRecording() {
@@ -320,10 +442,12 @@ async function processMeeting(dir, meta) {
   // clear it — but never force a window open on someone who closed it.
   sendToTranscript('transcript:clear');
 
-  state.jobs++;
+  const abort = new AbortController();
+  state.jobs.set(dir, abort);
   if (state.phase === 'idle') state.phase = 'processing';
   state.progress = 'Preparing…';
   refreshTray();
+  notifyLibrary();
 
   const onProgress = (p) => {
     if (p.phase === 'transcribing') {
@@ -340,7 +464,7 @@ async function processMeeting(dir, meta) {
   };
 
   try {
-    const out = await runPipeline(dir, settings, { onProgress, meta });
+    const out = await runPipeline(dir, settings, { onProgress, meta, signal: abort.signal });
     state.lastDir = dir;
     log.info('pipeline complete:', dir);
     notify(
@@ -350,6 +474,12 @@ async function processMeeting(dir, meta) {
     );
     return out;
   } catch (err) {
+    // A run cancelled by quit is not a failure to report: shutdown has already
+    // left its own note in the folder, and there is nobody left to notify.
+    if (abort.signal.aborted) {
+      log.warn('pipeline cancelled for', dir);
+      return null;
+    }
     log.error('pipeline failed for', dir, err);
     try {
       fs.writeFileSync(
@@ -362,10 +492,14 @@ async function processMeeting(dir, meta) {
     notify('Notes failed', `${err.message.slice(0,180)} — audio was saved. Click to open the folder.`, () => shell.openPath(dir));
     return null;
   } finally {
-    state.jobs--;
-    if (state.jobs === 0 && state.phase === 'processing') state.phase = 'idle';
-    if (state.jobs === 0) state.progress = '';
+    state.jobs.delete(dir);
+    if (state.jobs.size === 0) {
+      if (state.phase === 'processing') state.phase = 'idle';
+      state.progress = '';
+    }
     refreshTray();
+    // Whichever way the run ended, the folder now holds something new to read.
+    notifyLibrary();
     // The transcript window stays open; closing it is the user's call.
   }
 }
@@ -564,7 +698,70 @@ if (!app.requestSingleInstanceLock()) {
     snippetsWindow.close();
   });
 
-  app.whenReady().then(async () => {
+  // The library reads the notes folder and nothing else. Its channels are
+  // sender-checked like every other renderer's, and the folder name it sends
+  // back is resolved by library.js rather than trusted as a path — the notes
+  // folder is full of user files, and a window that could name any path could
+  // hand any of them to the shell.
+  const fromLibrary = (event) => event.sender.id === libraryWindow?.webContents.id;
+
+  ipcMain.handle('library:list', (event, query) => {
+    if (!fromLibrary(event)) return { meetings: [], activity: libraryActivity() };
+    try {
+      return { meetings: library.listMeetings(settings.notesDir, { query }), activity: libraryActivity() };
+    } catch (err) {
+      log.error('library list failed', err);
+      return { meetings: [], activity: libraryActivity() };
+    }
+  });
+
+  ipcMain.handle('library:read', (event, id) => {
+    if (!fromLibrary(event)) return null;
+    try {
+      return library.readMeeting(settings.notesDir, id);
+    } catch (err) {
+      log.error('library read failed for', id, err);
+      return null;
+    }
+  });
+
+  ipcMain.handle('library:open', async (event, req) => {
+    if (!fromLibrary(event)) return false;
+    const file = library.openTarget(settings.notesDir, req?.id, req?.target);
+    if (!file) return false;
+    const err = await shell.openPath(file);
+    if (err) log.warn('could not open', file, err);
+    return !err;
+  });
+
+  ipcMain.handle('library:openNotesFolder', async (event) => {
+    if (!fromLibrary(event)) return false;
+    const err = await shell.openPath(settings.notesDir);
+    if (err) log.warn('could not open the notes folder:', err);
+    return !err;
+  });
+
+  // The library is a reader, so the clipboard is the one way text leaves it.
+  ipcMain.on('library:copy', (event, text) => {
+    if (!fromLibrary(event)) return;
+    clipboard.writeText(String(text ?? ''));
+  });
+
+  ipcMain.on('library:minimize', (event) => {
+    if (!fromLibrary(event)) return;
+    libraryWindow.minimize();
+  });
+
+  ipcMain.on('library:close', (event) => {
+    if (!fromLibrary(event)) return;
+    libraryWindow.close();
+  });
+
+  /**
+   * Brings the app up. Everything here has to succeed for there to be a tray
+   * icon at all, which is why the caller treats a throw as fatal — see below.
+   */
+  async function startup() {
     log.init(app.getPath('userData'));
     log.info(`Minarrador ${app.getVersion()} starting (hidden=${startedHidden}, packaged=${app.isPackaged})`);
 
@@ -595,6 +792,21 @@ if (!app.requestSingleInstanceLock()) {
       if (!settings.suggestOnAudio || state.phase === 'recording') return;
       notify('Sounds like a meeting', 'Minarrador heard sustained audio. Click to start recording.', startRecording);
     });
+    // The worker rebuilds itself; this is only about telling the person in the
+    // meeting, who otherwise has no way to know the room stopped being recorded.
+    capture.on('rendererGone', ({ wasRecording, recovering }) => {
+      refreshTray();
+      if (!recovering) {
+        notify(
+          'Audio capture has stopped',
+          wasRecording
+            ? 'The capture worker keeps crashing. Stop the recording to keep what was captured so far.'
+            : 'The capture worker keeps crashing. Try Troubleshooting → Restart Audio Capture.',
+        );
+      } else if (wasRecording) {
+        notify('Audio capture restarted', 'A few seconds of the meeting were lost. Recording continues into the same file.');
+      }
+    });
 
     tray = new AppTray({
       startRecording,
@@ -606,6 +818,7 @@ if (!app.requestSingleInstanceLock()) {
       },
       openLog: () => shell.openPath(log.path),
       retryOllama,
+      openLibrary: showLibraryWindow,
       toggleTranscript: toggleTranscriptWindow,
       editSnippets: showSnippetsWindow,
       diagnostics,
@@ -623,6 +836,8 @@ if (!app.requestSingleInstanceLock()) {
         settings = settingsStore.save({ notesDir: res.filePaths[0] });
         fs.mkdirSync(settings.notesDir, { recursive: true });
         refreshTray();
+        // An open library is now looking at the wrong folder entirely.
+        notifyLibrary();
       },
       setSetting: (patch) => {
         settings = settingsStore.save(patch);
@@ -646,7 +861,12 @@ if (!app.requestSingleInstanceLock()) {
     refreshTray();
 
     await refreshOllama();
-    setInterval(refreshOllama, 60_000);
+    // The poll is fire-and-forget, so it swallows its own failures: an
+    // unhandled rejection every 60 seconds would bury the log in the one file
+    // a bug report is built from.
+    ollamaTimer = setInterval(() => {
+      refreshOllama().catch((err) => log.warn('Ollama poll failed:', err.message));
+    }, OLLAMA_POLL_MS);
     // Keeps the recording clock in the tooltip/menu moving.
     uiTimer = setInterval(() => {
       if (state.phase === 'recording') refreshTray();
@@ -655,7 +875,43 @@ if (!app.requestSingleInstanceLock()) {
     if (!startedHidden) {
       notify('Minarrador is running', 'Use the waveform icon in your system tray to start recording.');
     }
-  });
+  }
+
+  // A tray-only app that fails to start has nowhere to say so: no window, no
+  // icon, just a process sitting in Task Manager. Say it in the one place
+  // guaranteed to be visible, then leave rather than pretending to run.
+  app.whenReady()
+    .then(startup)
+    .catch((err) => {
+      log.error('startup failed', err);
+      dialog.showErrorBox(
+        'Minarrador could not start',
+        `${err.message}\n\n${log.path ? `Details are in ${log.path}` : 'The log file was never created.'}`,
+      );
+      app.exit(1);
+    });
+
+  /** Releases everything the app holds. Runs once, on the way out. */
+  function shutdown() {
+    clearInterval(uiTimer);
+    clearInterval(ollamaTimer);
+    uiTimer = null;
+    ollamaTimer = null;
+
+    // A meeting still being processed is about to lose its pipeline. Stop the
+    // model requests rather than leaving them to be cut mid-socket, and leave
+    // the folder able to explain itself — every stage that finished has already
+    // written its artefact, so this is only ever the tail of the chain.
+    for (const [dir, abort] of state.jobs) {
+      abort.abort();
+      log.warn('quit requested while processing', dir);
+      writeResumeNote(dir, 'Minarrador quit while these notes were still being written.');
+    }
+    state.jobs.clear();
+
+    capture?.destroy();
+    tray?.destroy();
+  }
 
   app.on('before-quit', (e) => {
     // Quitting mid-meeting must not lose the audio, but it must not hang for
@@ -668,12 +924,7 @@ if (!app.requestSingleInstanceLock()) {
       finalizeRecording()
         .then((finished) => {
           if (!finished) return;
-          const resume = path.join(finished.dir, 'UNPROCESSED.txt');
-          fs.writeFileSync(
-            resume,
-            `Minarrador quit while this meeting was still recording, so the audio was saved\n` +
-              `but the notes were never generated.\n\nProduce them with:\n\n  npm run pipeline -- "${finished.dir}"\n`,
-          );
+          writeResumeNote(finished.dir, 'Minarrador quit while this meeting was still recording, so the audio was saved but the notes were never generated.');
           notify('Recording saved', 'Minarrador quit before writing the notes. Click to open the folder.', () =>
             shell.openPath(finished.dir),
           );
@@ -683,8 +934,6 @@ if (!app.requestSingleInstanceLock()) {
       return;
     }
 
-    clearInterval(uiTimer);
-    capture?.destroy();
-    tray?.destroy();
+    shutdown();
   });
 }

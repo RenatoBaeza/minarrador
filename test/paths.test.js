@@ -6,7 +6,7 @@ const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
 
-const { folderStamp, createMeetingDir, FILES } = require('../src/main/paths');
+const { folderStamp, parseFolderStamp, createMeetingDir, FILES } = require('../src/main/paths');
 
 function tmpDir(t) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'minarrador-paths-'));
@@ -23,6 +23,33 @@ test('folderStamp sorts chronologically as plain text', () => {
 test('folderStamp produces a name Windows will accept', () => {
   const stamp = folderStamp(new Date(2026, 7, 11, 14, 32, 5));
   assert.doesNotMatch(stamp, /[<>:"/\\|?*]/, 'no character Explorer rejects');
+});
+
+test('parseFolderStamp reads back what folderStamp wrote', () => {
+  for (const when of [new Date(2026, 7, 11, 14, 32, 5), new Date(2026, 0, 1, 0, 0, 0), new Date(2026, 11, 31, 23, 59, 59)]) {
+    assert.deepEqual(parseFolderStamp(folderStamp(when)), when);
+  }
+});
+
+test('parseFolderStamp tolerates the suffix a second meeting in the same second gets', () => {
+  assert.deepEqual(parseFolderStamp('2026-08-11_14-32-05-2'), new Date(2026, 7, 11, 14, 32, 5));
+});
+
+test('parseFolderStamp returns null for a name this app did not write', () => {
+  for (const name of [
+    'Screenshots',
+    '',
+    null,
+    undefined,
+    '2026-08-11',
+    '2026-08-11_14-32',
+    'meeting-2026-08-11_14-32-05',
+    // Reconstructable, but only because Date rolls the overflow into next year.
+    '2026-13-45_14-32-05',
+    '2026-08-11_25-00-00',
+  ]) {
+    assert.equal(parseFolderStamp(name), null, `should refuse ${JSON.stringify(name)}`);
+  }
 });
 
 test('createMeetingDir creates the folder it returns', (t) => {

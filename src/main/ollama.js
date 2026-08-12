@@ -18,6 +18,11 @@ class Ollama {
   }
 
   async #once(route, body, { timeoutMs, signal }) {
+    // A signal that is already aborted will never fire 'abort' again, so the
+    // listener below would not catch it and a cancelled request would run to
+    // completion anyway — for transcription, minutes of work nobody is waiting
+    // for, with the model still occupied while the next attempt queues behind it.
+    if (signal?.aborted) throw new OllamaError('Cancelled');
     const ctrl = new AbortController();
     // Tracked explicitly rather than inferred from the rejection: aborting with
     // a reason makes fetch reject with that reason, so the error arrives as a
