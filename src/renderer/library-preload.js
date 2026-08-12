@@ -65,8 +65,12 @@ const patch = (values) => {
 
 contextBridge.exposeInMainWorld('library', {
   speakers: SPEAKERS,
-  /** @param {string} query filters by title and transcript text; '' lists everything. */
-  list: (query) => ipcRenderer.invoke('library:list', String(query ?? '')),
+  /**
+   * @param {string} query filters by title and transcript text; '' lists everything
+   * @param {'all'|'needs'|'recent'} filter narrows the archive: meetings still
+   *   owed notes, or this week's. main checks the value, as it checks everything.
+   */
+  list: (query, filter) => ipcRenderer.invoke('library:list', { query: String(query ?? ''), filter }),
   read: (id) => ipcRenderer.invoke('library:read', String(id ?? '')),
   /** @returns {Promise<boolean>} false when the file is not there to open. */
   open: (id, target) =>
@@ -129,6 +133,11 @@ contextBridge.exposeInMainWorld('library', {
     /** Fetches whisper.cpp and a set of weights, for a machine that has neither. */
     installWhisper: (model) => ipcRenderer.invoke('settings:installWhisper', String(model ?? '')),
     cancelSetup: () => ipcRenderer.invoke('settings:cancelSetup'),
+    /** Opens the mic for the settings pane's level meter; stop closes it again. */
+    testMicStart: () => ipcRenderer.invoke('settings:testMic'),
+    testMicStop: () => ipcRenderer.invoke('settings:testMicStop'),
+    /** A level (≈10/s), a mic status, or the end of the test. */
+    onMicTest: (fn) => ipcRenderer.on('settings:micTest', (_e, payload) => fn(payload ?? {})),
     editQuickCopy: () => ipcRenderer.send('settings:editQuickCopy'),
     /** Opens the dictations archive window, from the settings pane. */
     openDictations: () => ipcRenderer.send('settings:openDictations'),

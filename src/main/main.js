@@ -33,7 +33,7 @@ const { WhisperServer, installRoot } = require('./whisper');
 const whisperSetup = require('./whisper-setup');
 const { DictationController, dictationEngineFor } = require('./dictation');
 const { pasteClipboardInForeground } = require('./paste');
-const { runPipeline, fmtDuration } = require('./pipeline');
+const { runPipeline, transcribeEngineFor, fmtDuration } = require('./pipeline');
 const { createMeetingDir, FILES, speakerLine, normaliseTitle } = require('./paths');
 
 const APP_ID = 'com.rntbz.minarrador';
@@ -56,6 +56,15 @@ const DISK_REFUSE_BYTES = 300 * 1024 ** 2;
 const DISK_STOP_BYTES = 150 * 1024 ** 2;
 /** How often the free space is re-read while recording. */
 const DISK_CHECK_MS = 30_000;
+/**
+ * How long the settings pane's mic test may hold the microphone open.
+ *
+ * The test is opened and closed by the pane, but the pane can be closed over
+ * an open one — and an open microphone with nobody listening to it is exactly
+ * the resource leak this cap exists to prevent. Long enough to watch a meter,
+ * short enough to be safe.
+ */
+const MIC_TEST_MAX_MS = 15_000;
 
 /**
  * When a long recording says so, and how often it repeats itself.
@@ -226,6 +235,8 @@ const state = {
   quitting: false,
   /** True while a recording is being closed — see finalizeRecording. */
   stopping: false,
+  /** True while the settings pane's mic test has the microphone open. */
+  micTesting: false,
 };
 
 let tray = null;
@@ -235,6 +246,11 @@ let whisper = null;
 let settings = null;
 let uiTimer = null;
 let ollamaTimer = null;
+/**
+ * Auto-stop for the settings pane's mic test. The microphone should not stay
+ * open because the window that asked for it was closed; the cap is the answer.
+ */
+let micTestTimer = null;
 /**
  * Throttles for the two streams that tick faster than a window wants redrawing.
  *
@@ -540,6 +556,9 @@ function toggleDictation() {
 
 function startDictation() {
   if (!dictation || dictation.active) return;
+  // A real dictation and a settings-pane test are the same worker; the test
+  // must not be holding the mic when the sentence starts.
+  stopMicTest();
   // A dictation that cannot be transcribed later is not worth starting, and
   // saying so on the way in is kinder than after a sentence of audio. This
   // only fires when there is no engine on the machine at all — an Ollama that
@@ -631,6 +650,48 @@ async function stopDictation() {
 }
 
 /**
+ * The settings pane's mic test: opens the chosen microphone and streams levels
+ * to the pane, recording nothing and transcribing nothing.
+ *
+ * It borrows the dictation worker, which already opens the mic on demand and
+ * reports an RMS level — a test is a session without the record or the
+ * transcribe. The levels ride their own channel so the test can run while a
+ * dictation's indicator is doing something else entirely.
+ *
+ * @returns {{ ok: boolean, reason?: string }}
+ */
+function startMicTest() {
+  if (state.micTesting) return { ok: false, reason: 'A microphone test is already running.' };
+  if (dictation?.active) return { ok: false, reason: 'A dictation is in progress — finish it first.' };
+  state.micTesting = true;
+  dictation?.startTest({
+    micDeviceId: settings.micDeviceId,
+    micDeviceLabel: settings.micDeviceLabel,
+  });
+  sendMicTest({ testing: true });
+  clearTimeout(micTestTimer);
+  micTestTimer = setTimeout(() => stopMicTest(), MIC_TEST_MAX_MS);
+  return { ok: true };
+}
+
+/** Closes the mic the settings pane asked to hear. */
+function stopMicTest() {
+  if (!state.micTesting) return;
+  clearTimeout(micTestTimer);
+  micTestTimer = null;
+  state.micTesting = false;
+  dictation?.stopTest();
+  sendMicTest({ testing: false, level: 0 });
+}
+
+/** A level, a mic status, or the end of the test, on its own channel. */
+function sendMicTest(payload) {
+  if (libraryWindow && !libraryWindow.isDestroyed()) {
+    libraryWindow.webContents.send('settings:micTest', payload);
+  }
+}
+
+/**
  * The meeting library: the archive of everything ever recorded, and the only
  * window in this app someone opens without a meeting in progress.
  *
@@ -684,6 +745,8 @@ function showLibraryWindow({ settings: toSettings = false } = {}) {
   });
   libraryWindow.on('closed', () => {
     libraryWindow = null;
+    // The pane that asked for the mic is gone; the test must not keep it open.
+    stopMicTest();
   });
   libraryWindow.loadFile(path.join(RENDERER, 'library.html')).catch((err) => {
     log.error('library window failed to load', err);
@@ -937,6 +1000,9 @@ function refreshTray() {
     ollamaChecking: state.ollamaChecking,
     whisper: whisper?.describe() ?? null,
     liveEngine: capture?.liveTranscriber.engine ?? settings?.liveEngine,
+    // The target folder, so a hover over the tray can name the meeting being
+    // captured rather than only count its minutes.
+    currentDir: state.phase === 'recording' && state.currentDir ? path.basename(state.currentDir) : '',
     lastDir: state.lastDir,
     retry: state.retry,
     snippets: snippetsStore.load(),
@@ -1272,8 +1338,28 @@ async function stopRecording({ reveal = true } = {}) {
 
   // The pipeline is minutes of work and the notification at the end of it is
   // the next thing anybody hears, so say the audio is safe now — for a stop
-  // from the shortcut this is the only acknowledgement there is.
-  notify('Recording saved', `${fmtDuration(finished.meta.durationSeconds)} captured. Writing the notes now…`);
+  // from the shortcut this is the only acknowledgement there is — and what
+  // happens next, since "Writing the notes now…" under-describes the run.
+  //
+  // An unreachable daemon is the one failure worth warning about *now* rather
+  // than at the end of the run: with whisper doing the transcription the run
+  // spends its whole length with Ollama still missing before the notes stage
+  // fails, and with Ollama transcribing it fails on the first request. Starting
+  // the daemon here, from the notification, means the notes are written when
+  // the run gets to them — the difference between a folder that needs a second
+  // click and a meeting that just finished. The fast path (the 60s poll already
+  // knows it is up) costs nothing; the check only runs a request when that says
+  // it is down.
+  let plan = 'Transcribing, then the notes and the PDF brief.';
+  let onClick = null;
+  if (!state.ollamaUp && !(await new Ollama(settings.ollamaHost).isUp())) {
+    plan =
+      transcribeEngineFor(settings, whisper) === 'whisper'
+        ? 'Ollama is not running, so the notes cannot be written yet. Click to start it — the transcription carries on either way.'
+        : 'Ollama is not running, so the notes cannot be written. Click to start it and generate them again.';
+    onClick = () => openOllama().catch((err) => log.error('openOllama from the stop notification failed', err));
+  }
+  notify('Recording saved', `${fmtDuration(finished.meta.durationSeconds)} captured. ${plan}`, onClick);
 
   // Opening Explorer is the "your notes are ready" signal, so it waits for the
   // whole chain — transcription, notes, and the PDF export that ends it. A run
@@ -1887,6 +1973,13 @@ if (!app.requestSingleInstanceLock()) {
     transcriptionWindow.close();
   });
 
+  // The preview's "copy so far" is the one way text leaves that window. The
+  // lines come from the page's own DOM, so this is a plain clipboard write.
+  ipcMain.on('transcript:copy', (event, text) => {
+    if (event.sender.id !== transcriptionWindow?.webContents.id) return;
+    clipboard.writeText(String(text ?? ''));
+  });
+
   // Quick copy is the only store a renderer can write to, so every channel below
   // checks the sender: the editor window, or nothing. The store normalises the
   // payload regardless — it also has to survive a hand-edited snippets.json.
@@ -1949,10 +2042,12 @@ if (!app.requestSingleInstanceLock()) {
   // hand any of them to the shell.
   const fromLibrary = (event) => event.sender.id === libraryWindow?.webContents.id;
 
-  ipcMain.handle('library:list', (event, query) => {
+  ipcMain.handle('library:list', (event, req) => {
     if (!fromLibrary(event)) return { meetings: [], activity: libraryActivity() };
     try {
-      return { meetings: library.listMeetings(settings.notesDir, { query }), activity: libraryActivity() };
+      const query = typeof req?.query === 'string' ? req.query : '';
+      const filter = typeof req?.filter === 'string' ? req.filter : 'all';
+      return { meetings: library.listMeetings(settings.notesDir, { query, filter }), activity: libraryActivity() };
     } catch (err) {
       log.error('library list failed', err);
       return { meetings: [], activity: libraryActivity() };
@@ -2122,6 +2217,19 @@ if (!app.requestSingleInstanceLock()) {
     return settingsState();
   });
 
+  // The mic test borrows the dictation worker's microphone; the pane is the
+  // only caller, and the levels come back on settings:micTest.
+  ipcMain.handle('settings:testMic', (event) => {
+    if (!fromLibrary(event)) return { ok: false, reason: '' };
+    return startMicTest();
+  });
+
+  ipcMain.handle('settings:testMicStop', (event) => {
+    if (!fromLibrary(event)) return null;
+    stopMicTest();
+    return settingsState();
+  });
+
   /**
    * Survives the machine going to sleep in the middle of a meeting.
    *
@@ -2171,6 +2279,11 @@ if (!app.requestSingleInstanceLock()) {
   async function startup() {
     log.init(app.getPath('userData'));
     log.info(`Minarrador ${app.getVersion()} starting (hidden=${startedHidden}, packaged=${app.isPackaged})`);
+
+    // A settings file that does not exist yet is a first run. Checked before
+    // the store loads — loading is also what creates the file — and the answer
+    // decides what the startup notification says.
+    const firstRun = !fs.existsSync(path.join(app.getPath('userData'), 'settings.json'));
 
     settings = settingsStore.load();
     fs.mkdirSync(settings.notesDir, { recursive: true });
@@ -2263,6 +2376,19 @@ if (!app.requestSingleInstanceLock()) {
       notify('Voice input stopped', 'That was a long one — Minarrador cut it off at the five-minute ceiling.');
       stopDictation().catch((err) => log.error('stop at the dictation cap failed', err));
     });
+    // The mic test reuses the same capture; its levels and mic status go to the
+    // settings pane, and only when a test is actually running.
+    dictation.on('level', (level) => {
+      if (state.micTesting && Number.isFinite(level)) sendMicTest({ testing: true, level });
+    });
+    dictation.on('status', (status) => {
+      if (!state.micTesting) return;
+      sendMicTest({
+        testing: true,
+        micLabel: status?.micLabel ?? '',
+        micError: status?.micError ?? status?.fatal ?? '',
+      });
+    });
 
     tray = new AppTray({
       startRecording,
@@ -2322,7 +2448,20 @@ if (!app.requestSingleInstanceLock()) {
       checkRecordingLimits();
     }, 1000);
 
-    if (!startedHidden) {
+    if (firstRun) {
+      // A tray-only app's real UI is its hotkeys, and nothing has ever told a
+      // new user about them. The welcome says both, using the *actual*
+      // registered accelerators rather than the defaults.
+      const start =
+        settings.hotkey && settings.hotkey !== 'off' ? hotkeyLabel(settings.hotkey) : 'the tray icon';
+      const dictate =
+        settings.dictateHotkey && settings.dictateHotkey !== 'off' ? hotkeyLabel(settings.dictateHotkey) : null;
+      notify(
+        'Welcome to Minarrador',
+        `Record a meeting from anywhere with ${start} — the waveform icon lives in the tray.` +
+          (dictate ? ` Press ${dictate} to speak a sentence into whatever you are typing.` : ''),
+      );
+    } else if (!startedHidden) {
       notify('Minarrador is running', 'Use the waveform icon in your system tray to start recording.');
     }
   }
@@ -2377,6 +2516,8 @@ if (!app.requestSingleInstanceLock()) {
     // already on its way out.
     dictation?.cancel();
     dictation?.destroy();
+    clearTimeout(micTestTimer);
+    micTestTimer = null;
     clearTimeout(dictateIndicatorTimer);
     dictateIndicatorTimer = null;
 

@@ -9,6 +9,7 @@
 
 const listEl = document.getElementById('list');
 const countEl = document.getElementById('count');
+const searchingEl = document.getElementById('searching');
 const readerEl = document.getElementById('reader');
 const placeholder = document.getElementById('placeholder');
 const queryEl = document.getElementById('query');
@@ -40,6 +41,14 @@ const view = {
   query: '',
   /** 'notes' | 'transcript' — sticky across meetings, the way a reader expects. */
   tab: 'notes',
+  /**
+   * The rail filter: 'all' | 'needs' | 'recent'.
+   *
+   * 'needs' is the set of meetings owed notes (everything the pipeline never
+   * finished), and 'recent' is the last week — the two filters that actually
+   * change what someone is looking for, unlike a flat list of the whole archive.
+   */
+  filter: 'all',
   /** 'reader' | 'settings' — which of the two the right-hand pane is showing. */
   mode: 'reader',
   /** settingsState() from the main process, or null before it has been asked for. */
@@ -66,6 +75,13 @@ const view = {
    * the result the same way it learns about a recording started from the tray.
    */
   recordWanted: null,
+  /**
+   * The microphone test in the settings pane: whether one is running, the last
+   * level the dictation worker reported, and the note under the meter.
+   */
+  micTest: { testing: false, level: 0, note: '' },
+  /** The meter's DOM, so a level can move the bar without re-rendering the pane. */
+  micTestEls: null,
 };
 
 let searchTimer = null;
@@ -91,11 +107,14 @@ const fmtDuration = (seconds) => {
   return `${s}s`;
 };
 
-/** mm:ss for a transcript gutter, where the numbers have to line up. */
+/** mm:ss for a transcript gutter, growing an hours field once there is one. */
 const fmtClock = (seconds) => {
   const s = Math.max(0, Math.round(seconds));
-  const m = Math.floor(s / 60);
-  return `${m}:${String(s % 60).padStart(2, '0')}`;
+  const h = Math.floor(s / 3600);
+  const m = Math.floor((s % 3600) / 60);
+  const sec = String(s % 60).padStart(2, '0');
+  if (h) return `${h}:${String(m).padStart(2, '0')}:${sec}`;
+  return `${m}:${sec}`;
 };
 
 const fmtTime = (date) => date.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
@@ -236,11 +255,24 @@ function card(meeting) {
   return row;
 }
 
+/** Which rail filter is active, so the segmented control agrees with the list. */
+function renderFilters() {
+  for (const btn of document.querySelectorAll('.filter')) {
+    const on = btn.dataset.filter === view.filter;
+    btn.classList.toggle('active', on);
+    btn.setAttribute('aria-pressed', String(on));
+  }
+}
+
 function renderList() {
   const { meetings, query } = view;
   countEl.textContent = query
     ? `${meetings.length} match${meetings.length === 1 ? '' : 'es'}`
-    : `${meetings.length} meeting${meetings.length === 1 ? '' : 's'}`;
+    : view.filter === 'needs'
+      ? `${meetings.length} meeting${meetings.length === 1 ? '' : 's'} still owed notes`
+      : view.filter === 'recent'
+        ? `${meetings.length} from this week`
+        : `${meetings.length} meeting${meetings.length === 1 ? '' : 's'}`;
 
   if (!meetings.length) {
     listEl.replaceChildren(
@@ -249,7 +281,11 @@ function renderList() {
         'rail-empty',
         query
           ? 'Nothing said in any meeting matches that.'
-          : 'No recordings yet. Start one from the tray and it will appear here when the notes are ready.',
+          : view.filter === 'needs'
+            ? 'Nothing is owed notes — every recording is written up.'
+            : view.filter === 'recent'
+              ? 'Nothing was recorded this week.'
+              : 'No recordings yet. Start one from the tray and it will appear here when the notes are ready.',
       ),
     );
     return;
@@ -294,11 +330,17 @@ function metaRow(meeting) {
  *
  * Pasting a transcript into anything else is the point of the button, and a
  * two-channel meeting pasted without its labels loses the one thing that
- * separates a transcript from a wall of sentences.
+ * separates a transcript from a wall of sentences. `withTimes` prepends each
+ * line's `[mm:ss]` — the version for quoting "the bit about pricing" rather
+ * than reproducing the meeting.
  */
-const transcriptText = (meeting) =>
+const transcriptText = (meeting, withTimes = false) =>
   meeting.transcript
-    .map((line) => (line.speaker ? `${window.library.speakers[line.speaker]}: ${line.text}` : line.text))
+    .map((line) => {
+      const who = line.speaker ? `${window.library.speakers[line.speaker]}: ` : '';
+      const at = withTimes && line.startSeconds !== null ? `[${fmtClock(line.startSeconds)}] ` : '';
+      return `${at}${who}${line.text}`;
+    })
     .join('\n\n');
 
 /** Just the checkboxes — the thing people actually paste into Slack or Jira. */
@@ -385,6 +427,13 @@ function actionBar(meeting) {
     // way at it was to open the PDF and retype it.
     copyButton('Copy action items', meeting.actionItems.length > 0, () => actionItemsMarkdown(meeting)),
     copyButton('Copy transcript', meeting.transcript.length > 0, () => transcriptText(meeting)),
+    // The quote-able version: the same words with each line's [mm:ss] in front.
+    // Only offered when the transcript actually has times to quote.
+    copyButton(
+      'Copy with timestamps',
+      meeting.transcript.some((line) => line.startSeconds !== null),
+      () => transcriptText(meeting, true),
+    ),
   );
 
   // Editing the archive sits apart from reading it, at the other end of the row.
@@ -485,6 +534,9 @@ function tabs(meeting) {
     button.addEventListener('click', () => {
       if (view.tab === id) return;
       view.tab = id;
+      // The tab someone reads in is a habit, not a decision — keep it across
+      // meetings and across launches.
+      sessionStorage.setItem('minarrador:tab', id);
       renderReader(meeting);
     });
     bar.append(button);
@@ -614,6 +666,22 @@ function notesView(meeting) {
     if (meeting.actionItems.length) {
       for (const a of meeting.actionItems) {
         const row = el('div', 'action');
+        // A meeting with a transcript can be jumped to where the action was
+        // actually said — the click is what makes the summary a map instead of
+        // a list. Rows without one stay plain text.
+        if (meeting.transcript.length) {
+          row.classList.add('linkable');
+          row.tabIndex = 0;
+          row.setAttribute('role', 'button');
+          row.setAttribute('title', 'Show where this was said in the transcript');
+          row.addEventListener('click', () => jumpToAction(meeting, a));
+          row.addEventListener('keydown', (e) => {
+            if (e.key === 'Enter' || e.key === ' ') {
+              e.preventDefault();
+              jumpToAction(meeting, a);
+            }
+          });
+        }
         row.append(el('span', 'box'));
         const task = el('span', 'task');
         task.append(highlighted(a.task, view.query));
@@ -627,6 +695,51 @@ function notesView(meeting) {
     }
   }
   return frag;
+}
+
+/**
+ * Jumps from an action item to the transcript lines that produced it.
+ *
+ * The notes model does not record which segment a task came from, so this is a
+ * best-effort match rather than a link: the owner's name, then the meaningful
+ * words of the task, scored against each line. The best match is picked out of
+ * the rendered transcript and flashed, which turns the summary from a list into
+ * a map of the meeting.
+ */
+function jumpToAction(meeting, action) {
+  if (!meeting.transcript.length) return;
+  view.tab = 'transcript';
+  renderReader(meeting);
+
+  const owner = (action.owner || '').trim().toLowerCase();
+  const words = (action.task || '')
+    .toLowerCase()
+    .split(/\W+/)
+    .filter((w) => w.length > 3);
+  const terms = [...new Set(owner ? [owner, ...words] : words)].filter(Boolean);
+  if (!terms.length) return;
+
+  const scored = meeting.transcript
+    .map((line, i) => {
+      const text = line.text.toLowerCase();
+      let score = 0;
+      for (const term of terms) {
+        if (!text.includes(term)) continue;
+        // The owner's name carries the line, so one mention of it outweighs a
+        // task word — but never lets a wrong line win.
+        score += term === owner ? 4 : 1;
+      }
+      return { i, score };
+    })
+    .filter((hit) => hit.score > 0)
+    .sort((a, b) => b.score - a.score);
+  if (!scored.length) return;
+
+  const row = readerEl.querySelectorAll('.line')[scored[0].i];
+  if (!row) return;
+  row.classList.add('jump');
+  row.scrollIntoView({ block: 'center', behavior: 'smooth' });
+  setTimeout(() => row.classList.remove('jump'), 2500);
 }
 
 function transcriptView(meeting) {
@@ -938,6 +1051,7 @@ function recordingSection(frag, s) {
       disabled: s.recording,
     }),
     micRow(s),
+    micTestRow(),
     toggleRow({
       title: 'Keep the two sources on separate channels',
       hint:
@@ -1029,6 +1143,50 @@ function micRow(s) {
         micDeviceLabel: devices.find((d) => d.id === value)?.label ?? '',
       }),
   });
+}
+
+/**
+ * The "Test microphone" row: a button that opens the chosen mic and a meter
+ * that shows what it hears, so "is it my mic or the app?" is answered without
+ * recording anything. It borrows the dictation worker, which already opens the
+ * mic on demand and reports an RMS level — a test is a session that records
+ * nothing and transcribes nothing.
+ */
+function micTestRow() {
+  const t = view.micTest;
+  const row = el('div', 'row');
+  const body = el('span', 'row-body');
+  body.append(el('span', 'row-title', 'Test microphone'));
+
+  const note = el('span', 'row-hint', t.note || 'Opens the chosen microphone and shows what it hears. Nothing is recorded.');
+  const track = el('div', 'mic-meter');
+  const bar = el('div', 'mic-meter-bar');
+  bar.style.width = `${Math.min(100, Math.round(t.level * 600))}%`;
+  track.append(bar);
+  body.append(note, track);
+
+  const button = el('button', `button${t.testing ? ' danger' : ''}`, t.testing ? 'Stop' : 'Test');
+  button.type = 'button';
+  button.addEventListener('click', async () => {
+    if (view.micTest.testing) {
+      window.library.settings.testMicStop();
+      view.micTest = { testing: false, level: 0, note: '' };
+      if (view.mode === 'settings') renderSettings();
+      return;
+    }
+    const result = await window.library.settings.testMicStart();
+    if (!result?.ok) {
+      view.micTest = { testing: false, level: 0, note: result?.reason || 'Could not open the microphone.' };
+      if (view.mode === 'settings') renderSettings();
+      return;
+    }
+    view.micTest = { testing: true, level: 0, note: '' };
+    if (view.mode === 'settings') renderSettings();
+  });
+
+  view.micTestEls = { note, bar, button };
+  row.append(body, button);
+  return row;
 }
 
 function liveSection(frag, s) {
@@ -1320,11 +1478,19 @@ function renderSettings() {
     frag.append(box);
   }
   recordingSection(frag, s);
-  voiceSection(frag, s);
-  liveSection(frag, s);
   ollamaSection(frag, s);
+  liveSection(frag, s);
+  voiceSection(frag, s);
   storageSection(frag, s);
   doc.append(frag);
+  // The whole pitch of the app, said where the privacy-sensitive settings live.
+  doc.append(
+    el(
+      'p',
+      'settings-foot',
+      'Everything Minarrador does runs on this machine — audio, transcripts and notes never leave it.',
+    ),
+  );
   readerEl.replaceChildren(doc);
 }
 
@@ -1442,19 +1608,26 @@ function renderRecordButton() {
   recordEl.title = on ? 'Stop the meeting being recorded' : 'Start recording a meeting';
 }
 
-recordEl.addEventListener('click', () => {
+/**
+ * The one action this window has, shared by the record button and its Ctrl+N:
+ * start or stop the recording, and learn the result from the rail.
+ *
+ * Nothing here waits for the answer: stopping runs the whole pipeline, and the
+ * confirmation is the folder list changing under us.
+ */
+function toggleRecord() {
   const wanted = !view.activity.recordingId;
   view.recordWanted = wanted;
   renderRecordButton();
-  // Nothing here waits for the answer: stopping runs the whole pipeline, and the
-  // confirmation is the folder list changing under us.
   window.library.record(wanted);
   clearTimeout(recordTimer);
   recordTimer = setTimeout(() => {
     view.recordWanted = null;
     renderRecordButton();
   }, RECORD_CONFIRM_MS);
-});
+}
+
+recordEl.addEventListener('click', toggleRecord);
 
 // -------------------------------------------------------------------- loading
 
@@ -1514,6 +1687,9 @@ async function select(id) {
   }
   if (view.selected !== id) return; // A faster click won.
   view.meeting = meeting;
+  // The window reopens onto the same meeting it was closed on; a recording that
+  // finished belongs at the top, so a stale id simply falls back to newest.
+  sessionStorage.setItem('minarrador:lastMeeting', id);
   if (view.mode !== 'reader') return;
   // A pipeline finishing somewhere else must not throw away a half-typed
   // title. The rail behind it is already up to date either way.
@@ -1539,13 +1715,15 @@ function openMeeting(id) {
  */
 async function refresh() {
   const seq = ++listSeq;
-  const { meetings, activity } = await window.library.list(view.query);
+  const { meetings, activity } = await window.library.list(view.query, view.filter);
   if (seq !== listSeq) return; // A later query already answered.
   view.meetings = meetings;
   view.activity = activity;
+  searchingEl.hidden = true;
   // The record button reads its state from here, so a meeting started from the
   // tray flips it without this window being told anything else.
   renderRecordButton();
+  renderFilters();
   if (view.selected && !meetings.some((m) => m.id === view.selected)) {
     // Filtered out by the current search, not gone: keep it on screen, just
     // unhighlighted in a rail that no longer lists it.
@@ -1560,6 +1738,9 @@ queryEl.addEventListener('input', () => {
   clearTimeout(searchTimer);
   searchTimer = setTimeout(() => {
     view.query = queryEl.value;
+    // A search reads every transcript on disk, so it can outlast the keystroke;
+    // say the wait is happening rather than leaving the rail to look unresponded.
+    searchingEl.hidden = false;
     refresh();
     // Re-render the open meeting so its highlights follow the query.
     if (view.selected) select(view.selected);
@@ -1599,6 +1780,33 @@ document.addEventListener('keydown', (e) => {
     queryEl.select();
     return;
   }
+  // The two things the header does, reachable without the mouse: start/stop the
+  // recording, and the settings pane that decides how the app can run.
+  if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'n') {
+    e.preventDefault();
+    toggleRecord();
+    return;
+  }
+  if ((e.ctrlKey || e.metaKey) && e.key === ',') {
+    e.preventDefault();
+    toggleSettings();
+    return;
+  }
+  if ((e.ctrlKey || e.metaKey) && e.shiftKey && e.key.toLowerCase() === 'c') {
+    // The only text boxes on this page are the search and a rename, and a box
+    // with a selection in it has its own copy to do. Otherwise this is exactly
+    // what the "Copy transcript" action button does — click it, so the "Copied"
+    // feedback comes along for free.
+    if (e.target.closest('input, textarea')) return;
+    // Starts-with: the button reads "Copied" for a second after it copies, and
+    // a repeat keystroke should still land.
+    const copy = [...readerEl.querySelectorAll('.actions .button')].find((b) => b.textContent.startsWith('Copy transcript'));
+    if (copy && !copy.disabled) {
+      e.preventDefault();
+      copy.click();
+    }
+    return;
+  }
   // Arrows walk the list unless they are being used to move a text cursor.
   if ((e.key === 'ArrowDown' || e.key === 'ArrowUp') && e.target !== queryEl) {
     e.preventDefault();
@@ -1609,7 +1817,21 @@ document.addEventListener('keydown', (e) => {
 document.getElementById('folder').addEventListener('click', () => window.library.openNotesFolder());
 document.getElementById('minimize').addEventListener('click', () => window.library.minimize());
 document.getElementById('close').addEventListener('click', () => window.library.close());
-settingsEl.addEventListener('click', () => (view.mode === 'settings' ? closeSettings() : openSettings()));
+// The rail filters narrow the whole archive down to the sets that actually
+// change what someone is looking for; the query still applies on top.
+for (const btn of document.querySelectorAll('.filter')) {
+  btn.addEventListener('click', () => {
+    if (view.filter === btn.dataset.filter) return;
+    view.filter = btn.dataset.filter;
+    refresh();
+  });
+}
+function toggleSettings() {
+  if (view.mode === 'settings') closeSettings();
+  else openSettings();
+}
+
+settingsEl.addEventListener('click', toggleSettings);
 
 // A run advancing is a number changing, not a folder changing: it updates what
 // is on screen without anything being re-read from disk.
@@ -1638,6 +1860,25 @@ window.library.settings.onChanged(async () => {
   else if (!view.selected) renderPlaceholder();
 });
 
+// A mic test reports a level roughly ten times a second; the meter moves in
+// place, and only the start and the auto-stop re-render the row.
+window.library.settings.onMicTest((p) => {
+  if (typeof p.testing === 'boolean') view.micTest.testing = p.testing;
+  if (typeof p.level === 'number') view.micTest.level = p.level;
+  if (p.micError) view.micTest.note = `The microphone could not be opened: ${p.micError}`;
+  else if (p.micLabel) view.micTest.note = `Hearing ${p.micLabel}.`;
+
+  if (p.testing === false) {
+    view.micTest = { testing: false, level: 0, note: '' };
+    if (view.mode === 'settings') renderSettings();
+    return;
+  }
+  const els = view.micTestEls;
+  if (!els || view.mode !== 'settings') return;
+  if (els.bar) els.bar.style.width = `${Math.min(100, Math.round(view.micTest.level * 600))}%`;
+  if (els.note && view.micTest.note) els.note.textContent = view.micTest.note;
+});
+
 // The tray's Settings… item, which opens this window straight onto the pane.
 window.library.onShowSettings(() => openSettings());
 
@@ -1646,8 +1887,12 @@ window.library.onShowSettings(() => openSettings());
 // onto an empty archive, and the reason it will stay empty belongs there.
 Promise.all([refresh(), window.library.settings.get()]).then(([, settings]) => {
   view.settings = settings;
-  // Open the newest meeting on launch: the window is almost always opened to
-  // read the one that just finished.
-  if (view.meetings.length) select(view.meetings[0].id);
+  // The tab is sticky across launches; the meeting is too, falling back to the
+  // newest when it is gone — the window is usually opened to read the one that
+  // just finished.
+  if (sessionStorage.getItem('minarrador:tab') === 'transcript') view.tab = 'transcript';
+  const remembered = sessionStorage.getItem('minarrador:lastMeeting');
+  const first = view.meetings.find((m) => m.id === remembered) ?? view.meetings[0];
+  if (first) select(first.id);
   else renderPlaceholder();
 });

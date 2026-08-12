@@ -96,6 +96,37 @@ test('listMeetings says why a folder has no notes in it', (t) => {
   assert.deepEqual(status, { 10: 'ready', 11: 'failed', 12: 'unprocessed', 13: 'pending' });
 });
 
+test("the 'needs' filter keeps only meetings still owed notes", (t) => {
+  const root = tmpDir(t);
+  meeting(root, '2026-08-11_10-00-00', { notes: NOTES });
+  meeting(root, '2026-08-11_11-00-00', { extra: { 'ERROR.txt': 'Ollama was down' } });
+  meeting(root, '2026-08-11_12-00-00', { extra: { 'UNPROCESSED.txt': 'quit mid-recording' } });
+  meeting(root, '2026-08-11_13-00-00', {});
+
+  const ids = listMeetings(root, { filter: 'needs' }).map((m) => m.id.slice(11, 13));
+  assert.deepEqual(ids, ['13', '12', '11'], 'ready is dropped, the rest stay, newest first');
+});
+
+test("the 'recent' filter keeps only this week's meetings", (t) => {
+  const root = tmpDir(t);
+  const fresh = new Date(Date.now() - 2 * 86_400_000).toISOString();
+  const old = new Date(Date.now() - 20 * 86_400_000).toISOString();
+  meeting(root, '2026-08-11_10-00-00', { notes: NOTES, meta: { startedAt: fresh } });
+  meeting(root, '2026-08-11_11-00-00', { notes: NOTES, meta: { startedAt: old } });
+
+  assert.deepEqual(listMeetings(root, { filter: 'recent' }).map((m) => m.id), ['2026-08-11_10-00-00']);
+  assert.equal(listMeetings(root, { filter: 'recent' }).length, 1);
+});
+
+test('the filters still compose with a query', (t) => {
+  const root = tmpDir(t);
+  meeting(root, '2026-08-11_10-00-00', { notes: NOTES, transcript: 'Say pricing to everyone.' });
+  meeting(root, '2026-08-11_11-00-00', { transcript: 'Two more engineers. Pricing is not on the table.' });
+
+  const ids = listMeetings(root, { filter: 'needs', query: 'pricing' }).map((m) => m.id);
+  assert.deepEqual(ids, ['2026-08-11_11-00-00'], 'the ready meeting matches but is filtered out');
+});
+
 test('listMeetings previews the summary, or the transcript when there is none', (t) => {
   const root = tmpDir(t);
   meeting(root, '2026-08-11_10-00-00', { notes: NOTES, transcript: 'Something else entirely.' });

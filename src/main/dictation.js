@@ -176,6 +176,9 @@ class DictationController extends EventEmitter {
         this.micError = status.micError;
         log.warn('dictation mic:', status.micError);
       }
+      // Forwarded so main can run the settings pane's mic test on the same
+      // worker — the test needs the mic's name and its failures too.
+      this.emit('status', status ?? {});
     });
 
     await this.#createWindow();
@@ -254,6 +257,32 @@ class DictationController extends EventEmitter {
       micDeviceLabel: cfg.micDeviceLabel ?? '',
     });
     log.info('dictation started');
+  }
+
+  /**
+   * Opens the microphone and streams levels, recording and transcribing nothing.
+   *
+   * The settings pane's mic test: same worker, same mic resolution, and the
+   * levels it already reports — just with `test: true` telling the renderer to
+   * keep the graph out of the record path. Distinct from {@link #start} so a
+   * test can never be mistaken for a dictation session (`this.active` stays
+   * false, and a test mic can be opened or closed at will).
+   *
+   * @param {{ micDeviceId?: string, micDeviceLabel?: string }} cfg
+   */
+  startTest(cfg = {}) {
+    if (this.active || !this.window) return;
+    this.micError = '';
+    this.window.webContents.send('dictate:start', {
+      micDeviceId: cfg.micDeviceId ?? '',
+      micDeviceLabel: cfg.micDeviceLabel ?? '',
+      test: true,
+    });
+  }
+
+  /** Closes the microphone the settings pane asked to hear. */
+  stopTest() {
+    this.window?.webContents.send('dictate:stop');
   }
 
   /** Stops the session early — a quit, a cap, a user cancel. No transcription. */

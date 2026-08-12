@@ -29,5 +29,7 @@ contextBridge.exposeInMainWorld('transcript', {
     // Only ever forward a value the main process already knows about.
     if (LANGUAGES.includes(lang)) ipcRenderer.send('transcript:setLanguage', lang);
   },
+  /** The preview's one way text leaves the window. */
+  copy: (text) => ipcRenderer.send('transcript:copy', String(text ?? '')),
   close: () => ipcRenderer.send('transcript:close'),
 });

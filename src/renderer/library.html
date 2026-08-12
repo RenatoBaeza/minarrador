@@ -32,6 +32,12 @@
             aria-label="Search meetings"
           />
         </div>
+        <div class="filters" id="filters" aria-label="Filter the list">
+          <button class="filter" data-filter="all" type="button" aria-pressed="true">All</button>
+          <button class="filter" data-filter="needs" type="button" aria-pressed="false">Needs notes</button>
+          <button class="filter" data-filter="recent" type="button" aria-pressed="false">This week</button>
+        </div>
+        <div id="searching" class="count searching" hidden>Searching…</div>
         <div id="count" class="count"></div>
         <div id="list" class="list" role="listbox" aria-label="Recorded meetings" tabindex="-1"></div>
       </aside>

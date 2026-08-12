@@ -149,10 +149,12 @@ window.dictate.onStart(async (cfg) => {
       return;
     }
   }
-  state.recording = true;
+  // A mic test (cfg.test) opens the graph for its levels alone and records
+  // nothing — the meter is the whole point, and PCM has no destination.
+  state.recording = !cfg.test;
   // The worklet is told the layout as it is built, exactly as the meeting graph
   // does, so a session cannot miss a message it was not up in time for.
-  state.worklet?.port.postMessage({ type: 'record', value: true, channels: 1 });
+  state.worklet?.port.postMessage({ type: 'record', value: !cfg.test, channels: 1 });
 });
 
 window.dictate.onStop(async () => {

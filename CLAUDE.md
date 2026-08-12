@@ -605,6 +605,11 @@ Each stage in `pipeline.js` is a standalone async function (`transcribe`, `summa
 | `dictate:level` | dictation worker → main | RMS float, for the indicator |
 | `dictate:status` | dictation worker → main | `{ micOk, micError, micLabel, fatal }` |
 | `dictate:state` | main → indicator | `{ state, text, error }` — listening / transcribing / done / error |
+| `transcript:clear` / `transcript:line` | main → transcript window | — \| `{ text, speaker }` — the live preview, line by line |
+| `transcript:state` | main → transcript window | `{ recording, label, engine }` |
+| `transcript:setLanguage` | transcript window → main | a language from the window's fixed list |
+| `transcript:copy` | transcript window → main | `string` for the clipboard — the "copy so far" button |
+| `transcript:close` | transcript window → main | — |
 | `snippets:list` | editor → main (invoke) | → `{ label, text }[]` |
 | `snippets:save` | editor → main (invoke) | `{ label, text }[]` → the list as stored |
 | `snippets:close` | editor → main | — |
@@ -614,7 +619,7 @@ Each stage in `pipeline.js` is a standalone async function (`transcribe`, `summa
 | `dictations:copy` | dictations window → main | `string` for the clipboard |
 | `dictations:close` | dictations window → main | — |
 | `dictations:changed` | main → dictations window | — (a dictation landed; re-list) |
-| `library:list` | library → main (invoke) | `query` → `{ meetings, activity }` |
+| `library:list` | library → main (invoke) | `{ query, filter }` → `{ meetings, activity }` — `filter` is `'all'` \| `'needs'` (meetings still owed notes) \| `'recent'` (this week) |
 | `library:read` | library → main (invoke) | `id` → the meeting, or `null` |
 | `library:open` | library → main (invoke) | `{ id, target }` → opened? |
 | `library:openNotesFolder` | library → main (invoke) | → opened? |
@@ -634,6 +639,9 @@ Each stage in `pipeline.js` is a standalone async function (`transcribe`, `summa
 | `settings:pullModel` | library → main (invoke) | model name → `{ ok, reason }`; only the two the settings already name |
 | `settings:installWhisper` | library → main (invoke) | GGML model key → `{ ok, reason }` |
 | `settings:cancelSetup` | library → main (invoke) | → `settingsState()`, after aborting the download in flight |
+| `settings:testMic` | library → main (invoke) | → `{ ok, reason }` — opens the mic via the dictation worker for the settings pane's meter; records nothing |
+| `settings:testMicStop` | library → main (invoke) | → `settingsState()`, after closing the test mic |
+| `settings:micTest` | main → library | `{ testing, level, micLabel, micError }` — levels (~10/s), a mic status, or the end of the test; auto-stops after `MIC_TEST_MAX_MS` |
 | `settings:editQuickCopy` | library → main | — (opens the shorthand editor) |
 | `settings:openDictations` | library → main | — (opens the dictations archive) |
 | `settings:changed` | main → library | — (a setting, a model list or Ollama changed) |

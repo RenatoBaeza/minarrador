@@ -108,7 +108,9 @@ class AppTray {
         : state === 'processing'
           ? progress || 'Processing…'
           : 'Idle';
-    this.tray.setToolTip(`Minarrador — ${headline}`);
+    // The tooltip names the meeting being captured, so a hover over the icon is
+    // the one glance that says which folder will hold the notes.
+    this.tray.setToolTip(`Minarrador — ${headline}${view.currentDir ? ` — ${view.currentDir}` : ''}`);
 
     const sources = [
       status.micOk ? 'Mic ✓' : settings.captureMic ? 'Mic ✗' : 'Mic off',

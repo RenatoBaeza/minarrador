@@ -68,6 +68,12 @@ body.error .dot {
   animation: none;
 }
 
+@media (prefers-reduced-motion: reduce) {
+  .dot {
+    animation: none;
+  }
+}
+
 .texts {
   display: flex;
   flex-direction: column;

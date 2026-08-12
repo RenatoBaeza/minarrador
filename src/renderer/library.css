@@ -10,6 +10,13 @@
   box-sizing: border-box;
 }
 
+/* Keyboard reach is worth being seen: hover was never a promise to a keyboard
+   user, and every control here is a button or a list row. */
+:focus-visible {
+  outline: 2px solid #4c6ef5;
+  outline-offset: 2px;
+}
+
 body {
   margin: 0;
   /* Both panes scroll; this is what keeps their scrollbars from being drawn in
@@ -191,6 +198,36 @@ main {
 
 .search input::placeholder {
   color: #6b7280;
+}
+
+/* The rail filters — All / Needs notes / This week. A segmented row rather than
+   a dropdown: the three views of the archive are a toggle, not a form. */
+.filters {
+  display: flex;
+  gap: 4px;
+  padding: 10px 12px 0;
+}
+
+.filter {
+  flex: 1;
+  border: 1px solid transparent;
+  border-radius: 6px;
+  background: transparent;
+  color: #9ca3af;
+  font: inherit;
+  font-size: 11.5px;
+  padding: 4px 8px;
+  cursor: default;
+}
+
+.filter:hover {
+  color: #eaeaea;
+}
+
+.filter.active {
+  background: #24242c;
+  border-color: #34343e;
+  color: #eaeaea;
 }
 
 .count {
@@ -556,6 +593,21 @@ main {
   color: #8b8b98;
 }
 
+/* An action item with a transcript behind it is a jump to the moment it was
+   said, so it earns the affordance of one. */
+.action.linkable {
+  cursor: pointer;
+}
+
+.action.linkable:hover {
+  background: #1f1f26;
+}
+
+.action.linkable:focus-visible {
+  outline-offset: -2px;
+  border-radius: 6px;
+}
+
 .none {
   color: #6b7280;
   font-style: italic;
@@ -579,6 +631,12 @@ main {
   font-size: 11.5px;
   font-variant-numeric: tabular-nums;
   color: #5b5b68;
+}
+
+/* The flash that lands an action item on the line that produced it. */
+.line.jump {
+  background: rgba(251, 191, 36, 0.12);
+  border-radius: 6px;
 }
 
 .line .said {
@@ -885,4 +943,43 @@ label.row:hover {
   font-size: 12px;
   color: #9ca3af;
   word-break: break-all;
+}
+
+/* The live meter under the mic-test row: green when something is coming in,
+   and a green that goes nowhere is the honest answer a checkbox cannot give. */
+.mic-meter {
+  margin-top: 6px;
+  max-width: 320px;
+  height: 4px;
+  border-radius: 999px;
+  background: #2c2c34;
+  overflow: hidden;
+}
+
+.mic-meter-bar {
+  height: 100%;
+  border-radius: 999px;
+  background: #4ade80;
+  transition: width 0.1s linear;
+}
+
+/* The pane's closing line: the app's whole pitch, next to where the paths are
+   chosen. */
+.settings-foot {
+  margin: 18px 0 0;
+  color: #6b7280;
+  font-size: 12.5px;
+  line-height: 1.6;
+}
+
+/* The indeterminate sweep and the meters both animate for effect; a user who
+   asked for less motion is not waiting on either of them. */
+@media (prefers-reduced-motion: reduce) {
+  .progress-track.indeterminate .progress-bar {
+    animation: none;
+  }
+  .progress-bar,
+  .mic-meter-bar {
+    transition: none;
+  }
 }

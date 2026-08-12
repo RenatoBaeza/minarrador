@@ -240,10 +240,12 @@ function findInMeeting(dir, card, query) {
  * Every meeting in the notes folder, newest first.
  *
  * @param {string} notesDir
- * @param {{ query?: string }} [options] a query filters by title and transcript
- *   text, and annotates each survivor with where it was found
+ * @param {{ query?: string, filter?: 'all'|'needs'|'recent' }} [options]
+ *   `query` filters by title and transcript text and annotates each survivor
+ *   with where it was found. `filter` narrows the whole archive instead:
+ *   'needs' keeps the meetings still owed notes, 'recent' the last week.
  */
-function listMeetings(notesDir, { query = '' } = {}) {
+function listMeetings(notesDir, { query = '', filter = 'all' } = {}) {
   let entries;
   try {
     entries = fs.readdirSync(notesDir, { withFileTypes: true });
@@ -254,6 +256,9 @@ function listMeetings(notesDir, { query = '' } = {}) {
   }
 
   const needle = String(query ?? '').trim().slice(0, MAX_QUERY);
+  const filterKind = filter === 'needs' ? 'needs' : filter === 'recent' ? 'recent' : 'all';
+  // The filter's notion of "recent" — the same window the rail's day groups use.
+  const weekAgo = new Date(Date.now() - 7 * 86_400_000).toISOString();
   const meetings = [];
   for (const entry of entries) {
     if (!entry.isDirectory()) continue;
@@ -261,6 +266,9 @@ function listMeetings(notesDir, { query = '' } = {}) {
     if (!isMeeting(dir)) continue;
 
     const card = describeMeeting(dir);
+    // The archive narrows by what the card already knows — no extra reads.
+    if (filterKind === 'needs' && card.status === 'ready') continue;
+    if (filterKind === 'recent' && card.startedAt < weekAgo) continue;
     if (needle) {
       const hit = findInMeeting(dir, card, needle);
       if (!hit) continue;

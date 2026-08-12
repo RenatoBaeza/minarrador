@@ -28,7 +28,10 @@ window.dictateIndicator.onState(({ state, text, error }) => {
 
   const shown = error || text || '';
   caption.hidden = !shown;
-  caption.textContent = shown;
+  // A live caption is a glimpse, not a final sentence: the trailing ellipsis is
+  // what keeps a half-heard fragment from reading as the finished text.
+  caption.textContent =
+    state === 'listening' && !error && shown && !/[.!?…]$/.test(shown) ? `${shown}…` : shown;
   caption.classList.toggle('error', Boolean(error));
 
   // A live caption is a glimpse, not a transcript; clear it so the pill does not

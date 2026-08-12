@@ -28,6 +28,19 @@ document.addEventListener('keydown', (e) => {
   if (e.key === 'Escape') window.transcript.close();
 });
 
+// A half-finished meeting is worth pasting into an email; the captions are all
+// on this page, so the lines come from the DOM and the clipboard does the rest.
+const copyEl = document.getElementById('copy');
+copyEl.addEventListener('click', () => {
+  const lines = [...content.querySelectorAll('p:not(.hint)')].map((p) => p.textContent).filter(Boolean);
+  if (!lines.length) return;
+  window.transcript.copy(lines.join('\n\n'));
+  copyEl.textContent = 'Copied';
+  setTimeout(() => {
+    copyEl.textContent = 'Copy so far';
+  }, 1200);
+});
+
 /** True while the view is pinned to the newest line. */
 function atBottom() {
   return content.scrollHeight - content.scrollTop - content.clientHeight < 40;

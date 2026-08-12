@@ -5,6 +5,11 @@
   box-sizing: border-box;
 }
 
+:focus-visible {
+  outline: 2px solid #4c6ef5;
+  outline-offset: 2px;
+}
+
 body {
   margin: 0;
   font-family: 'Segoe UI', system-ui, sans-serif;
@@ -96,6 +101,24 @@ select {
   border-radius: 6px;
   padding: 5px 8px;
   font: inherit;
+}
+
+/* The copy-so-far button: quiet, like the window it lives in, and it says what
+   it just did so the clipboard is not a silent guess. */
+.copy {
+  flex: none;
+  border: 1px solid #34343e;
+  border-radius: 6px;
+  background: #24242c;
+  color: #eaeaea;
+  font: inherit;
+  font-size: 12px;
+  padding: 5px 10px;
+  cursor: default;
+}
+
+.copy:hover {
+  background: #2e2e38;
 }
 
 #content {
