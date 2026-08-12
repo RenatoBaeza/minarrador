@@ -9,6 +9,26 @@ let file = null;
 /** Required lazily so this module stays importable outside Electron (tests, tools). */
 const electronPath = (name) => require('electron').app.getPath(name);
 
+/**
+ * Shortcuts the app is willing to register, and the only values `hotkey` may
+ * hold.
+ *
+ * A fixed list rather than free text for two reasons. A global shortcut is
+ * registered against the whole desktop, so a typo is not a typo — it is either
+ * nothing at all, or something the user then cannot use in any other
+ * application; and the setting is written from a renderer, which should never be
+ * able to invent one. 'off' is a value rather than an empty string because the
+ * store falls an empty string back to the default, so there would otherwise be
+ * no way to say "none".
+ */
+const HOTKEY_CHOICES = [
+  'CommandOrControl+Shift+R',
+  'CommandOrControl+Shift+M',
+  'CommandOrControl+Alt+R',
+  'Alt+Shift+R',
+  'off',
+];
+
 function defaults() {
   return {
     notesDir: path.join(electronPath('documents'), 'Minarrador'),
@@ -29,6 +49,14 @@ function defaults() {
      * own when it is not installed.
      */
     liveEngine: 'whisper',
+    /**
+     * Which engine writes the *saved* transcript, the one the notes are built
+     * from. Same two names as liveEngine and the same silent fallback, but a
+     * separate setting: the live preview trades accuracy for latency and this
+     * pass does not, so someone can perfectly well want whisper.cpp for one and
+     * the audio model for the other.
+     */
+    transcribeEngine: 'whisper',
     /** GGML weights for whisper.cpp; a bare name resolves inside its models folder. */
     whisperModel: 'ggml-base.bin',
     /** Override where whisper.cpp lives; '' discovers vendor/ or the packaged resources. */
@@ -37,11 +65,17 @@ function defaults() {
     whisperThreads: 0,
     /** Seconds of audio per transcription request. */
     chunkSeconds: 60,
+    /** Global shortcut that starts or stops a recording; 'off' registers none. */
+    hotkey: HOTKEY_CHOICES[0],
   };
 }
 
 /** Values a field is allowed to hold, beyond simply matching its default's type. */
-const ENUMS = { liveEngine: ['whisper', 'ollama'] };
+const ENUMS = {
+  liveEngine: ['whisper', 'ollama'],
+  transcribeEngine: ['whisper', 'ollama'],
+  hotkey: HOTKEY_CHOICES,
+};
 
 /** Numeric fields with a range that has to hold however the file was edited. */
 const RANGES = {
@@ -117,4 +151,4 @@ function save(patch) {
   return next;
 }
 
-module.exports = { load, save, defaults, coerce };
+module.exports = { load, save, defaults, coerce, HOTKEY_CHOICES };

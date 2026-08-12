@@ -1,9 +1,12 @@
 'use strict';
 
-// Bridge for the meeting library window. Read-only over the notes folder: the
-// page can list, open and quote meetings, and cannot write, rename or delete
-// one. Every call names a meeting by its folder name and the main process
-// resolves it — no path ever crosses this boundary in the other direction.
+// Bridge for the meeting library window. Near enough read-only over the notes
+// folder: the page can list, open and quote meetings, and cannot write, rename
+// or delete one. The two exceptions both name a meeting and nothing else —
+// `record` starts or stops one, and `reprocess` asks the main process to run
+// its own pipeline over a folder that already has audio. Every call names a
+// meeting by its folder name and the main process resolves it; no path ever
+// crosses this boundary in the other direction.
 //
 // Settings are the one thing the window changes, and they go through `settings`
 // below: a fixed vocabulary of keys, each coerced to the type the store expects,
@@ -27,7 +30,9 @@ const FIELDS = {
   liveTranscript: Boolean,
   captureMic: Boolean,
   captureSystem: Boolean,
+  hotkey: String,
   liveEngine: String,
+  transcribeEngine: String,
   whisperModel: String,
   whisperThreads: Number,
   transcribeModel: String,
@@ -55,6 +60,13 @@ contextBridge.exposeInMainWorld('library', {
   copy: (text) => ipcRenderer.send('library:copy', String(text ?? '')),
   /** Starts or stops a recording. The result arrives as an onChanged, not a return. */
   record: (on) => ipcRenderer.invoke('library:record', Boolean(on)),
+  /**
+   * Runs the transcription and notes again over a meeting that has audio.
+   *
+   * @returns {Promise<{ ok: boolean, reason?: string }>} whether the run
+   *   started — how it *ends* arrives as an onChanged, minutes later.
+   */
+  reprocess: (id) => ipcRenderer.invoke('library:reprocess', String(id ?? '')),
   /** Fires when a recording starts or a pipeline run finishes, so the list can catch up. */
   onChanged: (fn) => ipcRenderer.on('library:changed', () => fn()),
   /** The tray's Settings… item, landing in an already-open window. */

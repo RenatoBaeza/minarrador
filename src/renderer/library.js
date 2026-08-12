@@ -278,26 +278,65 @@ function tabs(meeting) {
   return bar;
 }
 
+/**
+ * The button that finishes a meeting the pipeline never did.
+ *
+ * The most likely failure in the app is Ollama not running at the moment Stop
+ * was pressed, and the audio is always kept — so this is the difference between
+ * a folder that is a dead WAV and one that is a meeting. It replaces an
+ * instruction to run `npm run pipeline`, which assumed a checkout nobody who
+ * installed the app has.
+ *
+ * The click is confirmed by the folder changing under us: main starts the run
+ * and returns immediately, and the `library:changed` that follows rebuilds this
+ * pane with the "Still working" notice in place of the button.
+ */
+function generateButton(meeting) {
+  const wrap = el('div', 'notice-actions');
+  const label = meeting.status === 'failed' ? 'Try again' : 'Generate notes';
+  const button = el('button', 'button primary', label);
+  button.type = 'button';
+  button.addEventListener('click', async () => {
+    button.disabled = true;
+    button.textContent = 'Starting…';
+    const result = await window.library.reprocess(meeting.id);
+    if (result?.ok) return;
+    button.disabled = false;
+    button.textContent = label;
+    wrap.append(el('span', 'notice-warn', result?.reason || 'Could not start that run.'));
+  });
+
+  wrap.append(button, el('span', 'notice-hint', 'Transcribes the saved audio again and rewrites the notes.'));
+  return wrap;
+}
+
 /** The "there are no notes here" explanation, phrased for why there are none. */
 function notesNotice(meeting) {
   const notice = el('div', 'notice');
   if (view.activity.processingIds.includes(meeting.id)) {
     notice.append(el('strong', '', 'Still working. '), 'Transcription and notes are running now — this page fills in when they land.');
-  } else if (meeting.id === view.activity.recordingId) {
+    return notice;
+  }
+  if (meeting.id === view.activity.recordingId) {
     notice.append(el('strong', '', 'Recording. '), 'Notes are written once you stop, from a full pass over the saved audio.');
-  } else if (meeting.status === 'failed') {
+    return notice;
+  }
+
+  if (meeting.status === 'failed') {
     notice.append(
       el('strong', '', 'The notes run failed. '),
-      'The audio is safe in this folder, and ERROR.txt says what went wrong — usually Ollama being down. Re-run it with ',
-      el('code', '', `npm run pipeline -- "${meeting.folder}"`),
+      'The audio is safe in this folder, so nothing is lost — fix what went wrong and run it again.',
     );
+    // Quoted rather than pointed at: it is one sentence, and it is almost always
+    // the reason the button below would fail too.
+    if (meeting.error) notice.append(el('div', 'notice-error', meeting.error));
   } else {
     notice.append(
       el('strong', '', 'No notes for this recording. '),
-      'The audio was saved but the pipeline never finished. Produce them with ',
-      el('code', '', `npm run pipeline -- "${meeting.folder}"`),
+      'The audio was saved but the pipeline never finished.',
     );
   }
+  if (meeting.files.audio) notice.append(generateButton(meeting));
   return notice;
 }
 
@@ -361,8 +400,27 @@ function transcriptView(meeting) {
         ? 'The recording has not been transcribed yet.'
         : 'This folder has no audio in it either.',
     );
+    // Same button as the notes tab, and the same three states it must not offer
+    // itself in: nothing to work from, a meeting still recording, and a run
+    // already under way.
+    const busy =
+      meeting.id === view.activity.recordingId || view.activity.processingIds.includes(meeting.id);
+    if (meeting.files.audio && meeting.status !== 'ready' && !busy) notice.append(generateButton(meeting));
     frag.append(notice);
     return frag;
+  }
+
+  // Lines kept from the live preview are a different thing from a transcript:
+  // rougher, untimed, and missing whatever was said while the engine was busy.
+  // Saying so is what keeps them useful rather than misleading.
+  if (meeting.transcriptSource === 'live') {
+    const notice = el('div', 'notice');
+    notice.append(
+      el('strong', '', 'Rough live transcript. '),
+      'This is what the preview heard while the meeting ran, kept because the full pass never happened. ' +
+        'Generating the notes replaces it with a careful transcription of the saved audio.',
+    );
+    frag.append(notice);
   }
 
   for (const line of meeting.transcript) {
@@ -493,7 +551,21 @@ function modelOptions(names, current, suffix = () => '') {
 
 function recordingSection(frag, s) {
   const noSource = !s.settings.captureMic && !s.settings.captureSystem;
+  const hotkeyOff = s.hotkey.value === 'off';
+  const hotkeyDefault = s.hotkey.choices.find((c) => c.value === s.defaults.hotkey);
   group(frag, 'Recording', [
+    selectRow({
+      title: 'Start and stop shortcut',
+      hint: 'Works anywhere in Windows, so a call can be recorded without hunting for the tray icon first.',
+      // A shortcut another application already holds registers as nothing at
+      // all — the one failure here that looks exactly like success.
+      alert: hotkeyOff || s.hotkey.registered ? '' : 'Another application already holds this shortcut. Pick a different one.',
+      missing: !hotkeyOff && !s.hotkey.registered,
+      options: s.hotkey.choices,
+      value: s.hotkey.value,
+      note: defaultNote(s.hotkey.value, s.defaults.hotkey, hotkeyDefault?.label ?? s.defaults.hotkey),
+      onPick: (value) => saveSetting({ hotkey: value }),
+    }),
     toggleRow({
       title: 'Suggest recording when audio is detected',
       hint: 'Minarrador watches the levels while idle and offers to start a meeting.',
@@ -583,6 +655,9 @@ function ollamaSection(frag, s) {
   const audio = new Set(audioModels);
   const missingTranscribe = !models.includes(s.settings.transcribeModel);
   const missingSummary = !models.includes(s.settings.summaryModel);
+  const whisperInstalled = Boolean(s.whisper?.available);
+  const whisperModel = s.whisper?.model ?? '';
+  const wantsWhisper = s.settings.transcribeEngine === 'whisper';
 
   group(frag, 'Transcription and notes', [
     buttonRow({
@@ -607,8 +682,25 @@ function ollamaSection(frag, s) {
       },
     }),
     selectRow({
+      title: 'Saved transcript engine',
+      hint:
+        'whisper.cpp reads an hour of audio in a few minutes on the default weights, and needs nothing ' +
+        'from Ollama — which is then only required for the notes.',
+      alert: wantsWhisper && !whisperInstalled
+        ? 'whisper.cpp is not installed — the audio model transcribes instead. Run npm run whisper:setup.'
+        : '',
+      missing: wantsWhisper && !whisperInstalled,
+      options: [
+        { value: 'whisper', label: whisperInstalled ? `whisper.cpp — ${whisperModel}` : 'whisper.cpp — not installed' },
+        { value: 'ollama', label: `Ollama — ${s.settings.transcribeModel}` },
+      ],
+      value: s.settings.transcribeEngine,
+      note: defaultNote(s.settings.transcribeEngine, s.defaults.transcribeEngine, 'whisper.cpp'),
+      onPick: (value) => saveSetting({ transcribeEngine: value }),
+    }),
+    selectRow({
       title: 'Transcription model',
-      hint: 'Reads the saved recording after a meeting, and drives the live preview when whisper.cpp is not in use.',
+      hint: 'The audio model, used for the saved transcript and the live preview whenever whisper.cpp is not.',
       alert: models.length ? '' : 'No models to choose from while Ollama is unreachable.',
       missing: missingTranscribe,
       note: defaultNote(s.settings.transcribeModel, s.defaults.transcribeModel),

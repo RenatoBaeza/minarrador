@@ -577,6 +577,41 @@ mark {
   padding: 1px 5px;
 }
 
+/* What ERROR.txt said, quoted under the explanation: one sentence, monospaced
+   because it is a machine's words rather than the app's. */
+.notice-error {
+  margin-top: 10px;
+  padding: 8px 10px;
+  border-left: 2px solid #b4525f;
+  background: #201a1c;
+  border-radius: 0 4px 4px 0;
+  color: #d1a0a7;
+  font-family: Consolas, 'Cascadia Mono', monospace;
+  font-size: 12.5px;
+  line-height: 1.5;
+  word-break: break-word;
+}
+
+/* The way out of a meeting with no notes. Inside the notice that explains why
+   there are none, because that is the sentence it answers. */
+.notice-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px;
+  margin-top: 14px;
+}
+
+.notice-hint {
+  color: #6f6f7d;
+  font-size: 12.5px;
+}
+
+.notice-warn {
+  color: #e0808f;
+  font-size: 12.5px;
+}
+
 /* ----------------------------------------------------------------- settings */
 
 /* One row per setting: what it is on the left, the control on the right, and —

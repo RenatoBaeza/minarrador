@@ -4,7 +4,7 @@
 // Tray-only app: no main window ever appears. The single hidden renderer exists
 // solely to run the Web Audio graph, which is unavailable in the main process.
 
-const { app, Notification, clipboard, dialog, shell, nativeImage, BrowserWindow, ipcMain } = require('electron');
+const { app, Notification, clipboard, dialog, globalShortcut, shell, nativeImage, BrowserWindow, ipcMain } = require('electron');
 const fs = require('node:fs');
 const path = require('node:path');
 
@@ -51,7 +51,9 @@ const LIBRARY_SETTINGS = new Set([
   'liveTranscript',
   'captureMic',
   'captureSystem',
+  'hotkey',
   'liveEngine',
+  'transcribeEngine',
   'whisperModel',
   'whisperThreads',
   'transcribeModel',
@@ -97,6 +99,15 @@ const state = {
   phase: 'idle',
   progress: '',
   currentDir: null,
+  /**
+   * Where live preview lines are written, which outlives currentDir by a beat.
+   *
+   * A segment already being transcribed when Stop is pressed comes back a
+   * second later, by which time the recording is over — and that line was said
+   * during the meeting, so it belongs in its folder. Replaced by the next
+   * recording rather than cleared, so it is never pointing at nothing.
+   */
+  liveDir: null,
   recordingStartedAt: null,
   lastDir: null,
   ollamaUp: false,
@@ -110,6 +121,18 @@ const state = {
    * @type {Map<string, AbortController>}
    */
   jobs: new Map(),
+  /** Whether the desktop actually gave us the start/stop shortcut. */
+  hotkeyRegistered: false,
+  /**
+   * The meeting the tray's Retry Notes item would run, or null.
+   *
+   * Recomputed only when the folder changes — never from refreshTray, which
+   * ticks once a second while recording and would have it walking the whole
+   * notes folder for a clock.
+   *
+   * @type {{ id: string, label: string } | null}
+   */
+  retry: null,
   /** Guards the shutdown sequence against re-entering before-quit. */
   quitting: false,
 };
@@ -315,7 +338,40 @@ function showLibraryWindow({ settings: toSettings = false } = {}) {
  * window re-reading every transcript on disk for a clock.
  */
 function notifyLibrary() {
+  // The same four moments decide which meeting the tray offers to retry, so the
+  // one walk of the folder answers both. Reading it here rather than in
+  // refreshTray is the whole point: this fires four times a meeting, that fires
+  // once a second.
+  state.retry = findRetryCandidate();
   if (libraryWindow && !libraryWindow.isDestroyed()) libraryWindow.webContents.send('library:changed');
+  refreshTray();
+}
+
+/**
+ * The newest meeting that has audio and no notes, which is what "Retry Notes"
+ * in the tray means.
+ *
+ * Anything the app is currently busy with is excluded: the folder being
+ * recorded into has no audio to work from yet, and one already in state.jobs is
+ * having its notes written right now.
+ */
+function findRetryCandidate() {
+  try {
+    const recordingId = state.phase === 'recording' && state.currentDir ? path.basename(state.currentDir) : null;
+    const busy = new Set([...state.jobs.keys()].map((dir) => path.basename(dir)));
+    const found = library
+      .listMeetings(settings.notesDir)
+      .find((m) => m.files.audio && m.status !== 'ready' && m.id !== recordingId && !busy.has(m.id));
+    if (!found) return null;
+    const at = new Date(found.startedAt);
+    const label = Number.isNaN(at.getTime())
+      ? found.id
+      : at.toLocaleString([], { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' });
+    return { id: found.id, label };
+  } catch (err) {
+    log.warn('could not look for a meeting to retry:', err.message);
+    return null;
+  }
 }
 
 /**
@@ -357,6 +413,17 @@ function settingsState() {
     },
     /** What the live preview is really using, which is not always what was asked for. */
     liveEngine: capture?.liveTranscriber.engine ?? settings.liveEngine,
+    /**
+     * The shortcut, the ones on offer, and whether the desktop actually gave us
+     * this one — a global shortcut another application already holds registers
+     * as a silent no-op, which is precisely the kind of gap this pane exists to
+     * show.
+     */
+    hotkey: {
+      value: settings.hotkey,
+      registered: state.hotkeyRegistered,
+      choices: settingsStore.HOTKEY_CHOICES.map((value) => ({ value, label: hotkeyLabel(value) })),
+    },
     notesDirExists: fs.existsSync(settings.notesDir),
     snippetCount: snippetsStore.load().length,
     /** Capture sources cannot be changed mid-meeting; the pane says so. */
@@ -370,6 +437,28 @@ function libraryActivity() {
     recordingId: state.phase === 'recording' && state.currentDir ? path.basename(state.currentDir) : null,
     processingIds: [...state.jobs.keys()].map((dir) => path.basename(dir)),
   };
+}
+
+/**
+ * Keeps the live preview on disk as it is produced.
+ *
+ * The preview used to exist only in a window, and was cleared the moment
+ * processing started — so a pipeline that then failed left the user with audio
+ * and nothing else, having thrown away text that already existed. Appended line
+ * by line rather than written at the end, because the case this is for is the
+ * one where there is no end: a crash, a power cut, a quit mid-meeting.
+ *
+ * Best-effort by design. A preview that cannot be written must never interrupt
+ * the recording, which is the artefact that actually matters.
+ */
+function appendLiveTranscript(text) {
+  const line = String(text ?? '').trim();
+  if (!state.liveDir || !line) return;
+  try {
+    fs.appendFileSync(path.join(state.liveDir, FILES.liveTranscript), `${line}\n`);
+  } catch (err) {
+    log.warn('could not append to the live transcript:', err.message);
+  }
 }
 
 /** Posts to the transcript window when one is open; a no-op otherwise. */
@@ -404,6 +493,7 @@ function refreshTray() {
     whisper: whisper?.describe() ?? null,
     liveEngine: capture?.liveTranscriber.engine ?? settings?.liveEngine,
     lastDir: state.lastDir,
+    retry: state.retry,
     snippets: snippetsStore.load(),
   });
 }
@@ -425,12 +515,54 @@ function notify(title, body, onClick) {
 
 // ------------------------------------------------------------------ recording
 
+/** An accelerator as a person would read it. 'off' is a value, not a shortcut. */
+function hotkeyLabel(accelerator) {
+  if (!accelerator || accelerator === 'off') return 'No shortcut';
+  return accelerator.replace('CommandOrControl', 'Ctrl').replace(/\+/g, ' + ');
+}
+
+/**
+ * Registers the global start/stop shortcut.
+ *
+ * The point of a global one is the first twenty seconds of a call, where
+ * finding a tray icon, right-clicking it and reading a menu is exactly the
+ * amount of friction that means the meeting goes unrecorded. Registration can
+ * fail without throwing — another application holding the same combination just
+ * gets it — so the result is kept for the settings pane to show.
+ */
+function applyHotkey() {
+  globalShortcut.unregisterAll();
+  state.hotkeyRegistered = false;
+  const accelerator = settings.hotkey;
+  if (!accelerator || accelerator === 'off') return;
+  try {
+    state.hotkeyRegistered = globalShortcut.register(accelerator, toggleRecording);
+  } catch (err) {
+    log.warn(`could not register the hotkey ${accelerator}:`, err.message);
+  }
+  log.info(
+    state.hotkeyRegistered
+      ? `hotkey ${accelerator} registered`
+      : `hotkey ${accelerator} is held by another application`,
+  );
+}
+
+/** What the shortcut does: one key for both ends of a meeting. */
+function toggleRecording() {
+  if (state.phase === 'recording') {
+    stopRecording().catch((err) => log.error('stop from the hotkey failed', err));
+  } else {
+    startRecording();
+  }
+}
+
 function startRecording() {
   if (state.phase === 'recording') return;
   try {
     fs.mkdirSync(settings.notesDir, { recursive: true });
     const dir = createMeetingDir(settings.notesDir);
     state.currentDir = dir;
+    state.liveDir = dir;
     state.recordingStartedAt = new Date();
     capture.startRecording(path.join(dir, FILES.audio));
     state.phase = 'recording';
@@ -438,6 +570,15 @@ function startRecording() {
     sendToTranscript('transcript:clear');
     refreshTray();
     notifyLibrary();
+    // A recording started from a shortcut has no other confirmation at all, and
+    // a tray icon changing colour is not one anywhere: this is the difference
+    // between knowing the meeting is being captured and hoping it is.
+    notify(
+      'Recording',
+      state.hotkeyRegistered
+        ? `Minarrador is capturing this meeting. Press ${hotkeyLabel(settings.hotkey)} again to stop.`
+        : 'Minarrador is capturing this meeting. Stop it from the tray icon.',
+    );
   } catch (err) {
     log.error('startRecording failed', err);
     dialog.showErrorBox('Minarrador', `Could not start recording:\n\n${err.message}`);
@@ -467,6 +608,8 @@ async function finalizeRecording() {
 
   if (!result || result.seconds < 1) {
     log.warn('discarding recording shorter than a second:', dir);
+    // Nothing may be written back into a folder that is about to stop existing.
+    state.liveDir = null;
     fs.rmSync(dir, { recursive: true, force: true });
     notify('Nothing recorded', 'The recording was too short to keep.');
     notifyLibrary(); // The folder the library was showing as recording is gone.
@@ -486,12 +629,25 @@ async function finalizeRecording() {
 }
 
 /**
+ * How a folder tells someone how to finish the job.
+ *
+ * Both notes used to say only `npm run pipeline -- "<dir>"`, which assumes a
+ * repository, a checkout and npm — none of which exist for anyone who installed
+ * the build. The app can now do it itself, so that is what these say first.
+ */
+const HOW_TO_FINISH =
+  'Open Minarrador (left-click the tray icon), pick this recording, and press Generate notes.\n' +
+  'From a source checkout you can also run:\n\n  npm run pipeline -- "%DIR%"\n';
+
+const howToFinish = (dir) => HOW_TO_FINISH.replace('%DIR%', dir);
+
+/**
  * Leaves a folder able to explain itself.
  *
  * A meeting folder with audio in it and no notes looks identical whether the app
  * quit mid-recording, quit mid-pipeline, or never ran the pipeline at all. This
- * is what tells the three apart, and it carries the command that finishes the
- * job — the audio is the irreplaceable part, and it is already safe on disk.
+ * is what tells the three apart, and it carries the way to finish the job — the
+ * audio is the irreplaceable part, and it is already safe on disk.
  *
  * Synchronous on purpose: both callers are on the quit path, where nothing waits
  * for a promise.
@@ -500,7 +656,7 @@ function writeResumeNote(dir, reason) {
   try {
     fs.writeFileSync(
       path.join(dir, 'UNPROCESSED.txt'),
-      `${reason}\n\nThe audio is still in ${FILES.audio}. Produce the notes with:\n\n  npm run pipeline -- "${dir}"\n`,
+      `${reason}\n\nThe audio is still in ${FILES.audio}.\n\n${howToFinish(dir)}`,
     );
   } catch (err) {
     log.warn('could not write the resume note in', dir, err.message);
@@ -516,6 +672,11 @@ function writeResumeNote(dir, reason) {
 async function stopRecording({ reveal = true } = {}) {
   const finished = await finalizeRecording();
   if (!finished) return;
+
+  // The pipeline is minutes of work and the notification at the end of it is
+  // the next thing anybody hears, so say the audio is safe now — for a stop
+  // from the shortcut this is the only acknowledgement there is.
+  notify('Recording saved', `${fmtDuration(finished.meta.durationSeconds)} captured. Writing the notes now…`);
 
   // Opening Explorer is the "your notes are ready" signal, so it waits for the
   // whole chain — transcription, notes, and the PDF export that ends it. A run
@@ -538,8 +699,17 @@ async function stopRecording({ reveal = true } = {}) {
  */
 async function processMeeting(dir, meta) {
   // The rough live preview is superseded by the proper pass that follows, so
-  // clear it — but never force a window open on someone who closed it.
+  // clear it — but never force a window open on someone who closed it. The
+  // preview's own file stays on disk until the pipeline writes a real
+  // transcript over the top of it.
   sendToTranscript('transcript:clear');
+
+  // A folder carries one explanation at a time, and both of these are now out
+  // of date. Left in place, a successful re-run would keep the meeting marked
+  // as failed in the library for ever.
+  for (const name of ['ERROR.txt', 'UNPROCESSED.txt']) {
+    fs.rmSync(path.join(dir, name), { force: true });
+  }
 
   const abort = new AbortController();
   state.jobs.set(dir, abort);
@@ -563,7 +733,9 @@ async function processMeeting(dir, meta) {
   };
 
   try {
-    const out = await runPipeline(dir, settings, { onProgress, meta, signal: abort.signal });
+    // whisper.cpp transcribes the saved audio too when it is installed, which
+    // is what leaves Ollama needed only for the notes.
+    const out = await runPipeline(dir, settings, { onProgress, meta, signal: abort.signal, whisper });
     state.lastDir = dir;
     log.info('pipeline complete:', dir);
     notify(
@@ -584,8 +756,8 @@ async function processMeeting(dir, meta) {
       fs.writeFileSync(
         path.join(dir, 'ERROR.txt'),
         `Processing failed at ${new Date().toISOString()}\n\n${err.stack ?? err.message}\n\n` +
-          `The audio is still in ${FILES.audio}. Fix the problem (usually: start Ollama, or pull the model)\n` +
-          `and re-run notes for this folder with:\n\n  npm run pipeline -- "${dir}"\n`,
+          `The audio is still in ${FILES.audio}. Fix the problem (usually: start Ollama, or pull the model),\n` +
+          `then generate the notes again.\n\n${howToFinish(dir)}`,
       );
     } catch {}
     notify('Notes failed', `${err.message.slice(0,180)} — audio was saved. Click to open the folder.`, () => shell.openPath(dir));
@@ -601,6 +773,48 @@ async function processMeeting(dir, meta) {
     notifyLibrary();
     // The transcript window stays open; closing it is the user's call.
   }
+}
+
+/**
+ * Runs the pipeline again over a meeting that already has its audio.
+ *
+ * The most likely failure in the app is Ollama not running at the moment
+ * someone hits Stop, and until this existed the only way out of it was a
+ * checkout, npm, and a command line — so for anyone who installed the build,
+ * every meeting recorded before starting the daemon was a dead folder. The
+ * chain is re-runnable and each stage overwrites its own artefact, so this is
+ * simply {@link processMeeting} again.
+ *
+ * Not awaited by its callers: a run is minutes of work, and both the tray and
+ * the library find out it finished from `library:changed` like everything else.
+ *
+ * @param {string} id meeting folder name, as the library names one
+ * @returns {{ ok: boolean, reason?: string }}
+ */
+function reprocessMeeting(id) {
+  const dir = library.meetingDir(settings.notesDir, id);
+  if (!dir) return { ok: false, reason: 'That recording is not in the meetings folder any more.' };
+  if (!fs.existsSync(path.join(dir, FILES.audio))) {
+    return { ok: false, reason: 'There is no audio in that folder to work from.' };
+  }
+  if (state.jobs.has(dir)) return { ok: false, reason: 'Those notes are already being written.' };
+  if (state.phase === 'recording' && state.currentDir === dir) {
+    return { ok: false, reason: 'That meeting is still recording.' };
+  }
+
+  // meta.json is written when the audio file closes, so it is normally there
+  // even for a meeting that never got its notes. A folder missing it still has
+  // its audio, and the pipeline fills the duration in from the WAV itself.
+  let meta;
+  try {
+    meta = JSON.parse(fs.readFileSync(path.join(dir, FILES.meta), 'utf8'));
+  } catch {
+    meta = { startedAt: fs.statSync(path.join(dir, FILES.audio)).mtime.toISOString(), durationSeconds: 0 };
+  }
+
+  log.info('generating notes again for', dir);
+  processMeeting(dir, meta).catch((err) => log.error('re-running the pipeline failed for', dir, err));
+  return { ok: true };
 }
 
 // ------------------------------------------------------------------- services
@@ -707,6 +921,7 @@ async function openOllama() {
 function applySetting(patch) {
   settings = settingsStore.save(patch);
   if ('startAtLogin' in patch) applyLoginItem();
+  if ('hotkey' in patch) applyHotkey();
   if ('captureMic' in patch || 'captureSystem' in patch) applyCaptureConfig();
   // Whisper first: which engine the live transcriber can actually use depends on
   // what the server resolved to.
@@ -778,6 +993,8 @@ function diagnostics() {
       audioModels: state.audioModels,
       whisper: whisper?.describe(),
       liveEngine: capture?.liveTranscriber.engine,
+      hotkeyRegistered: state.hotkeyRegistered,
+      retry: state.retry,
       captureStatus: capture?.status,
       levels: capture?.levels,
       settings,
@@ -922,6 +1139,15 @@ if (!app.requestSingleInstanceLock()) {
     libraryWindow.close();
   });
 
+  // Producing the notes for a meeting that has none — the way out of the app's
+  // most likely failure, and the reason the reader's "Generate notes" button
+  // exists. The id is a folder name and reprocessMeeting resolves it through
+  // library.meetingDir like every other channel here.
+  ipcMain.handle('library:reprocess', (event, id) => {
+    if (!fromLibrary(event)) return { ok: false, reason: '' };
+    return reprocessMeeting(String(id ?? ''));
+  });
+
   // Starting a meeting from the library rather than the tray. Neither call is
   // awaited: startRecording is synchronous, and stopRecording runs the whole
   // pipeline, which is minutes of work no click should hang on. The window finds
@@ -1012,7 +1238,10 @@ if (!app.requestSingleInstanceLock()) {
 
     capture = new CaptureController({ ollamaHost: settings.ollamaHost, whisper });
     capture.on('status', refreshTray);
-    capture.on('transcript', (text) => sendToTranscript('transcript:line', text));
+    capture.on('transcript', (text) => {
+      sendToTranscript('transcript:line', text);
+      appendLiveTranscript(text);
+    });
     capture.on('speech', () => {
       if (!settings.suggestOnAudio || state.phase === 'recording') return;
       notify('Sounds like a meeting', 'Minarrador heard sustained audio. Click to start recording.', startRecording);
@@ -1043,6 +1272,13 @@ if (!app.requestSingleInstanceLock()) {
       },
       openLog: () => shell.openPath(log.path),
       openOllama,
+      // The tray's way out of a meeting that lost its notes, for someone who is
+      // not going to open a window to find the same button.
+      retryNotes: () => {
+        if (!state.retry) return;
+        const { ok, reason } = reprocessMeeting(state.retry.id);
+        if (!ok) notify('Cannot generate those notes', reason);
+      },
       openLibrary: () => showLibraryWindow(),
       openSettings: () => showLibraryWindow({ settings: true }),
       toggleTranscript: toggleTranscriptWindow,
@@ -1058,7 +1294,10 @@ if (!app.requestSingleInstanceLock()) {
     await capture.init();
     applyCaptureConfig();
     applyLiveConfig();
-    refreshTray();
+    applyHotkey();
+    // Also finds the newest meeting still owed its notes, so the tray can offer
+    // to write them for a run that failed in an earlier session.
+    notifyLibrary();
 
     await refreshOllama();
     // The poll is fire-and-forget, so it swallows its own failures: an
@@ -1097,6 +1336,9 @@ if (!app.requestSingleInstanceLock()) {
     clearInterval(ollamaTimer);
     uiTimer = null;
     ollamaTimer = null;
+    // A global shortcut outlives the window that registered it, so hand it back
+    // rather than leaving the combination dead for the next application.
+    globalShortcut.unregisterAll();
 
     // A meeting still being processed is about to lose its pipeline. Stop the
     // model requests rather than leaving them to be cut mid-socket, and leave

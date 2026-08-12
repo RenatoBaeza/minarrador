@@ -6,8 +6,8 @@ Local-only meeting notes app for Windows. Records mic + system audio, transcribe
 
 - **Electron** (tray-only, no visible window) — entry point `src/main/main.js`
 - **Node.js** — all backend logic in `src/main/`
-- **Ollama** — local LLM inference for the saved transcript and summarisation
-- **whisper.cpp** — local ASR binary driving the real-time live transcript (`npm run whisper:setup`)
+- **Ollama** — local LLM inference for the notes, and for the transcript when whisper.cpp is not installed
+- **whisper.cpp** — local ASR binary; the live transcript and, by default, the saved one (`npm run whisper:setup`)
 - **electron-builder** — packaging and NSIS installer (`npm run dist`)
 - No framework, no bundler, no TypeScript — plain CommonJS throughout
 
@@ -51,9 +51,22 @@ Local-only meeting notes app for Windows. Records mic + system audio, transcribe
 No main window is shown at startup. A hidden `BrowserWindow` exists solely to run the Web Audio API (unavailable in the main process). The tray icon is the app: **left-click opens the meeting library, right-click opens the menu.** Nothing is bound to double-click — Windows sends a plain click first, so a second action there would always arrive with the library already opening. Every other window (library, live transcript, quick-copy editor) is opened on demand, frameless, dark, and single-instance.
 
 The menu is deliberately short: the quick-copy list, what is happening now,
-Start/Stop, the four things to open, and Troubleshooting. Everything that is
-*configured* rather than *done* lives in the library window — a menu is a poor
-place to be told that a model is not installed.
+Start/Stop and *Generate Notes*, the four things to open, and Troubleshooting.
+Everything that is *configured* rather than *done* lives in the library window —
+a menu is a poor place to be told that a model is not installed.
+
+**Recording is also bound to a global shortcut** (`Ctrl+Shift+R` by default,
+`applyHotkey()` in `main.js`), because the twenty seconds at the start of a call
+are exactly where finding a tray icon and reading a menu means the meeting goes
+unrecorded. The accelerator comes from `HOTKEY_CHOICES` in `settings.js` and
+never from free text: a global shortcut is claimed against the whole desktop, so
+a typo is either dead or steals a combination from another application, and the
+value is written from a renderer. `globalShortcut.register` reports a
+combination someone else already holds by returning false rather than throwing,
+so the result is kept in `state.hotkeyRegistered` for the settings pane to mark
+in red. Starting and stopping both raise a notification — a tray icon changing
+colour is not confirmation that a room is being recorded, least of all when the
+recording was started from a keyboard.
 
 ### Audio capture flow
 
@@ -85,6 +98,18 @@ a second set of handlers would write every PCM buffer to the WAV twice.
 
 Independent of the post-recording pipeline — a rough preview for the person in the
 meeting, always superseded by the full pass over the saved WAV.
+
+**It is also kept.** Every line goes to `live-transcript.txt` in the meeting
+folder as it is produced (`appendLiveTranscript` in `main.js`), which is what
+turns the worst case from "a WAV" into "a rough transcript": the preview used to
+exist only in a window and was wiped the moment processing started, so a
+pipeline that then failed threw away text that already existed. It is appended
+line by line rather than written at the end, because the case it is for is the
+one where there is no end — a crash, a power cut, a quit mid-meeting. It writes
+to `state.liveDir` rather than `state.currentDir` so the segment still decoding
+when Stop is pressed lands in the meeting it was said in. `library.js` reads it
+wherever `transcript.txt` is missing, and the reader labels those lines as the
+rough preview they are.
 
 1. `LiveTranscriber` buffers recorded PCM and cuts it into **segments at natural
    pauses** (trailing silence ≥ `silenceHoldMs`), not on a fixed clock, with a
@@ -127,14 +152,31 @@ There is no index and no database — `listMeetings()` walks the notes folder on
 every call, and a meeting is recognised by its artefacts (`audio.wav`,
 `notes.json`, `meta.json`) rather than by its name, so a folder renamed by hand
 still appears and the user's unrelated folders never do. Nothing in
-`library.js` writes, renames or deletes; re-running `npm run pipeline` over a
-folder is still how a meeting changes.
+`library.js` writes, renames or deletes — the one thing the *window* can change
+about a meeting is `library:reprocess`, and even that only asks main to run its
+own pipeline over the folder again.
 
 A card knows why it has no notes — `pending`, `unprocessed` (quit mid-run),
 `failed` (`ERROR.txt`) — and `main.js` adds what only it can know, which
 folder is recording and which are mid-pipeline, from `state.jobs`. The reader
 renders `notes.json` directly rather than re-parsing `notes.md`, since the JSON
 is the structured form the pipeline actually produced.
+
+**A meeting with no notes carries the button that writes them.** The reader's
+`notesNotice` used to print `npm run pipeline -- "<dir>"`, which assumes a
+checkout, npm and a terminal — none of which exist for anyone who installed the
+build, so the app's most likely failure (Ollama down at Stop) left a permanently
+dead folder. It now sends `library:reprocess`, and `reprocessMeeting()` in main
+re-runs `processMeeting`, which is re-runnable because every stage overwrites
+its own artefact. The same run is one click away in the tray, on the newest
+meeting still owed its notes (`state.retry`). Failures explain themselves in
+place: `readMeeting` quotes the first line of `ERROR.txt` rather than telling
+someone to go and open it.
+
+A transcript can come from either of two files. `transcriptSource()` prefers
+`transcript.txt` and falls back to `live-transcript.txt`, so a meeting whose
+pipeline never ran is still readable, searchable and quotable — labelled in the
+reader as the rough preview it is.
 
 **The id is a folder name, never a path.** Every entry point runs it through
 `meetingDir()`, which requires a bare name whose parent resolves to the notes
@@ -143,7 +185,7 @@ rather than a file. The notes folder is full of user files and the window is
 one `shell.openPath` away from all of them, so the renderer is never given the
 vocabulary to ask for one.
 
-Search reads each `transcript.txt` in full, so it is debounced in the renderer
+Search reads each transcript in full, so it is debounced in the renderer
 and its responses are sequenced — a query over a large folder can outlive the
 one typed after it, and the rail must not end up showing results for a query
 that has left the box. Previews avoid the same cost by reading only the first
@@ -153,7 +195,8 @@ The window refreshes itself on `library:changed`, which main sends at the four
 moments the folder actually changes (recording start, recording end, pipeline
 start, pipeline end) — never from `refreshTray`, which ticks once a second
 while recording and would have the window re-reading every transcript for a
-clock.
+clock. `notifyLibrary()` also re-reads `state.retry` there, for the same reason
+and on the same budget: one walk of the folder, four times a meeting.
 
 **The record button has no state of its own.** Recording lives in the main
 process, so the button reads `activity.recordingId` from the same list payload
@@ -187,7 +230,10 @@ are paths, and a page that could set one could point this app's reading and
 writing anywhere on the machine; the folder is changed through a dialog, where
 the path comes from the user. The two model names that survive are checked
 against what is actually installed, since `whisperModel` is otherwise a
-free-form string resolved inside a folder of weights.
+free-form string resolved inside a folder of weights. `hotkey` is the same
+argument in a different shape: it is checked against `HOTKEY_CHOICES` by the
+store's enum, because a global accelerator is claimed against the whole desktop
+rather than against this app.
 
 `settings:changed` is a separate signal from `library:changed` because the two
 go stale for different reasons: the folder changes four times a meeting, while
@@ -226,17 +272,35 @@ the window is never a way to discard work.
 
 ### Post-recording pipeline (`pipeline.js`)
 
-1. **Transcribe** — splits WAV into 60 s chunks, sends each to Ollama via the OpenAI-compatible `/v1/chat/completions` endpoint (audio models like `gemma4:12b`)
+1. **Transcribe** — splits the WAV into 60 s chunks and reads each one. Which
+   engine reads it is `transcribeEngineFor()`: whisper.cpp whenever it is
+   installed and `transcribeEngine` has not been moved off it, otherwise the
+   Ollama audio model over the OpenAI-compatible `/v1/chat/completions` endpoint.
+   The tail of each chunk is passed to the next as `prompt`, exactly as the live
+   preview does
 2. **Summarise** — sends full transcript (or condensed version for long meetings) to Ollama, outputs structured JSON: title, 5-bullet summary, decisions, action items
 3. **Render PDF** — asks Ollama to generate a print-ready HTML brief, converts to PDF via a headless `BrowserWindow`, deletes the intermediate HTML
 
 Each step writes its artefact immediately, so a late failure never loses earlier work.
+
+**whisper.cpp is the default for this pass too, not only for the preview.** An
+audio LLM costs a request per chunk, so an hour of meeting takes about an hour;
+whisper.cpp reads the same hour in a few minutes on `ggml-base`, and is a
+recogniser rather than a model that sometimes loops (hence `collapseRepeats`).
+There is no realtime floor here the way there is for captions, so a heavy model
+costs only wall clock. It also changes what an
+unreachable Ollama costs: `requireOllama()` is called up front *only* when
+Ollama is also the transcriber — so no hour of work is spent on a run that was
+doomed from the start — and then again before the notes, by which time
+`transcript.txt` is on disk. Ollama down is then a partial failure with a full
+transcript, and the notes are one **Generate notes** click away.
 
 ### Per-meeting output folder
 
 Each recording creates a timestamped folder (e.g. `2026-08-11_14-32-05/`) under the configured notes directory containing:
 - `audio.wav` — raw recording
 - `transcript.txt` / `transcript.json` — full transcription
+- `live-transcript.txt` — the live preview, written line by line during the meeting
 - `notes.md` / `notes.json` — structured meeting notes
 - `notes.pdf` — formatted brief
 - `meta.json` — recording metadata
@@ -244,8 +308,8 @@ Each recording creates a timestamped folder (e.g. `2026-08-11_14-32-05/`) under 
 ### Never lose the meeting
 
 The audio is the only irreplaceable artefact — notes can always be regenerated
-from it with `npm run pipeline`. Everything below exists to make sure a folder
-either holds finished notes or explains itself:
+from it, from the library, the tray, or `npm run pipeline`. Everything below
+exists to make sure a folder either holds finished notes or explains itself:
 
 - **Startup is all-or-nothing.** `whenReady` is guarded: a tray-only app that
   throws during init has nowhere to say so and would otherwise sit in Task
@@ -259,6 +323,12 @@ either holds finished notes or explains itself:
 - **Quitting mid-pipeline** aborts that run's model requests (`state.jobs` maps
   each meeting folder to its `AbortController`) and leaves the same note. Stages
   that had already finished keep their artefacts.
+- **Every live caption is on disk before it is on screen.** `live-transcript.txt`
+  is what a folder holds when none of the above got as far as a transcript.
+- **A folder that lost its notes can be finished from inside the app.** Both
+  `UNPROCESSED.txt` and `ERROR.txt` say so first and give the npm command
+  second; `processMeeting` deletes both at the start of a run, so a folder never
+  carries an explanation that has stopped being true.
 
 ### Packaging (`build` in package.json)
 
@@ -299,14 +369,14 @@ rather than next to the config.
 | `npm run dist` | Build the NSIS installer for Windows x64 |
 | `npm run icons` | Regenerate tray/app icons from source |
 | `npm run whisper:setup` | Download whisper.cpp + a GGML model into `vendor/whisper` |
-| `npm run pipeline -- "path"` | Re-run the transcribe→summarise→PDF pipeline on a folder |
+| `npm run pipeline -- "path"` | Re-run the transcribe→summarise→PDF pipeline on a folder (`--engine whisper\|ollama`, `--transcribe`, `--summary`) |
 | `npm run capture-test` | Test audio capture in isolation |
 
 ## Prerequisites
 
 - **Node.js** ≥ 18
 - **Ollama** running locally (`ollama serve`) with an audio-capable model pulled (e.g. `ollama pull gemma4:12b`)
-- **whisper.cpp** for live captions: `npm run whisper:setup` (optional — the preview falls back to Ollama without it)
+- **whisper.cpp** for the live captions *and* the saved transcript: `npm run whisper:setup` (optional — both fall back to Ollama without it)
 - Windows 10/11 — system audio capture uses Electron's `desktopCapturer` loopback
 
 ## Common patterns
@@ -325,7 +395,7 @@ rather than next to the config.
 
 ### Modifying the pipeline
 
-Each stage in `pipeline.js` is a standalone async function (`transcribe`, `summarise`, `renderPdf`). They receive the meeting directory, config, and an options bag with `{ onProgress, signal, ollama }`. Add new stages in `runPipeline()` and write outputs to the meeting folder using `FILES` constants from `paths.js`.
+Each stage in `pipeline.js` is a standalone async function (`transcribe`, `summarise`, `renderPdf`). They receive the meeting directory, config, and an options bag with `{ onProgress, signal, ollama, whisper }`. Add new stages in `runPipeline()` and write outputs to the meeting folder using `FILES` constants from `paths.js`.
 
 ### IPC channels
 
@@ -345,6 +415,7 @@ Each stage in `pipeline.js` is a standalone async function (`transcribe`, `summa
 | `library:openNotesFolder` | library → main (invoke) | → opened? |
 | `library:copy` | library → main | `string` for the clipboard |
 | `library:record` | library → main (invoke) | `boolean` — start or stop; the result arrives as `library:changed` |
+| `library:reprocess` | library → main (invoke) | `id` → `{ ok, reason }` — whether the run started; how it ends arrives as `library:changed` |
 | `library:changed` | main → library | — (the folder changed; re-list) |
 | `library:showSettings` | main → library | — (the tray's Settings… item) |
 | `library:minimize` / `library:close` | library → main | — |

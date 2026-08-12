@@ -72,6 +72,8 @@ class AppTray {
    * @param {object|null} view.whisper WhisperServer.describe(), or null
    * @param {'whisper'|'ollama'} view.liveEngine the engine actually in use
    * @param {string|null} view.lastDir most recent finished meeting folder
+   * @param {{ id: string, label: string }|null} view.retry newest meeting still
+   *   owed its notes, which the Retry item would run
    * @param {{ label: string, text: string }[]} view.snippets quick-copy shorthands
    */
   update(view) {
@@ -86,6 +88,7 @@ class AppTray {
       whisper,
       liveEngine,
       lastDir,
+      retry = null,
       snippets = [],
     } = view;
     const a = this.actions;
@@ -162,6 +165,15 @@ class AppTray {
         ? { label: 'Stop Recording', click: () => a.stopRecording() }
         // Starting a new meeting while the previous one is still processing is fine.
         : { label: 'Start Recording', click: () => a.startRecording() },
+      // A meeting whose notes never got written — almost always because Ollama
+      // was down at Stop — is one click from being finished. It sits with the
+      // recording controls rather than with the things to open because it is
+      // the same kind of item: something the app does, not somewhere to go.
+      {
+        label: retry ? `Generate Notes for ${retry.label}` : 'Generate Missing Notes',
+        enabled: Boolean(retry),
+        click: () => a.retryNotes(),
+      },
 
       { type: 'separator' },
       // Also what a left-click on the icon does; listed anyway, because a

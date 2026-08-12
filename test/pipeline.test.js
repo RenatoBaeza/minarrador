@@ -2,6 +2,9 @@
 
 const test = require('node:test');
 const assert = require('node:assert/strict');
+const fs = require('node:fs');
+const os = require('node:os');
+const path = require('node:path');
 
 const {
   extractJson,
@@ -9,7 +12,12 @@ const {
   renderMarkdown,
   fallbackHtml,
   fmtDuration,
+  transcribe,
+  transcribeEngineFor,
+  transcribeEngineLabel,
 } = require('../src/main/pipeline');
+const { buildWav } = require('../src/main/wav');
+const { FILES } = require('../src/main/paths');
 
 const META = {
   startedAt: '2026-08-11T14:32:05.000Z',
@@ -205,4 +213,120 @@ test('fallbackHtml escapes model output instead of interpolating it as markup', 
 test('fallbackHtml copes with meta from an older or partial run', () => {
   const notes = { title: 'T', summary: ['s'], decisions: [], action_items: [] };
   assert.doesNotThrow(() => fallbackHtml(notes, {}));
+});
+
+// ------------------------------------------------------------------ transcribe
+
+/** A meeting folder holding a WAV of `seconds` of audible 16 kHz mono tone. */
+function meetingWithAudio(t, seconds = 3) {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'minarrador-pipeline-'));
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+  const samples = 16000 * seconds;
+  const pcm = Buffer.alloc(samples * 2);
+  // Loud enough to clear SILENCE_RMS, or every chunk would be skipped as room tone.
+  for (let i = 0; i < samples; i++) pcm.writeInt16LE(Math.round(8000 * Math.sin(i / 8)), i * 2);
+  fs.writeFileSync(path.join(dir, FILES.audio), buildWav(pcm, 16000));
+  return dir;
+}
+
+const fakeWhisper = (available = true) => ({
+  available,
+  model: '/models/ggml-base.bin',
+  calls: [],
+  async transcribe(wav, options) {
+    this.calls.push(options);
+    return `heard ${this.calls.length}`;
+  },
+});
+
+const fakeOllama = () => ({
+  calls: [],
+  async transcribe(model, wav, options) {
+    this.calls.push({ model, ...options });
+    return 'the audio model heard this';
+  },
+});
+
+test('transcribeEngineFor prefers whisper.cpp, and only when it is really there', () => {
+  const whisper = fakeWhisper();
+  assert.equal(transcribeEngineFor({ transcribeEngine: 'whisper' }, whisper), 'whisper');
+  // Nothing installed, or the setting moved off it: the audio model does the pass.
+  assert.equal(transcribeEngineFor({ transcribeEngine: 'whisper' }, fakeWhisper(false)), 'ollama');
+  assert.equal(transcribeEngineFor({ transcribeEngine: 'whisper' }, null), 'ollama');
+  assert.equal(transcribeEngineFor({ transcribeEngine: 'ollama' }, whisper), 'ollama');
+  // An older settings.json has no such key at all; whisper is still the default.
+  assert.equal(transcribeEngineFor({}, whisper), 'whisper');
+});
+
+test('transcribeEngineLabel names what actually produced a transcript', () => {
+  assert.equal(
+    transcribeEngineLabel('whisper', { transcribeModel: 'gemma4:12b' }, fakeWhisper()),
+    'whisper.cpp (ggml-base.bin)',
+  );
+  assert.equal(transcribeEngineLabel('ollama', { transcribeModel: 'gemma4:12b' }, null), 'gemma4:12b');
+});
+
+test('transcribe sends the saved audio to whisper.cpp when it is available', async (t) => {
+  const dir = meetingWithAudio(t, 3);
+  const whisper = fakeWhisper();
+  const ollama = fakeOllama();
+
+  const out = await transcribe(dir, { transcribeEngine: 'whisper', chunkSeconds: 1 }, { whisper, ollama });
+
+  assert.equal(out.engine, 'whisper');
+  assert.equal(ollama.calls.length, 0, 'Ollama is not needed for this stage');
+  assert.equal(whisper.calls.length, out.segments.length, 'one request per chunk');
+  assert.ok(out.segments.length >= 2, 'a three-second recording at one second a chunk is several');
+  // Each chunk is handed the tail of the one before, so a sentence split across
+  // a chunk boundary keeps its context.
+  assert.equal(whisper.calls[0].prompt, '');
+  assert.equal(whisper.calls[1].prompt, 'heard 1');
+  // A chunk of the saved audio is a minute, not the few seconds a live window
+  // is, so the request may not be held to the live timeout.
+  assert.ok(whisper.calls[0].timeoutMs >= 60_000);
+
+  const written = fs.readFileSync(path.join(dir, FILES.transcript), 'utf8');
+  assert.equal(written, `${out.segments.map((s) => s.text).join('\n\n')}\n`);
+  assert.match(written, /^heard 1\n\nheard 2/);
+
+  const json = JSON.parse(fs.readFileSync(path.join(dir, FILES.transcriptJson), 'utf8'));
+  assert.equal(json.engine, 'whisper');
+  assert.equal(json.model, 'whisper.cpp (ggml-base.bin)');
+  assert.equal(json.segments.length, out.segments.length);
+});
+
+test('transcribe falls back to the Ollama audio model when whisper.cpp is not installed', async (t) => {
+  const dir = meetingWithAudio(t, 2);
+  const whisper = fakeWhisper(false);
+  const ollama = fakeOllama();
+
+  const out = await transcribe(dir, { transcribeEngine: 'whisper', transcribeModel: 'gemma4:12b', chunkSeconds: 1 }, { whisper, ollama });
+
+  assert.equal(out.engine, 'ollama');
+  assert.equal(out.engineLabel, 'gemma4:12b');
+  assert.equal(whisper.calls.length, 0);
+  assert.equal(ollama.calls.length, out.segments.length);
+  assert.equal(ollama.calls[0].model, 'gemma4:12b');
+});
+
+test('transcribe honours a setting that asks for the audio model outright', async (t) => {
+  const dir = meetingWithAudio(t, 1);
+  const whisper = fakeWhisper();
+  const ollama = fakeOllama();
+
+  await transcribe(dir, { transcribeEngine: 'ollama', transcribeModel: 'gemma4:12b', chunkSeconds: 1 }, { whisper, ollama });
+
+  assert.equal(whisper.calls.length, 0, 'an installed whisper must not override the choice');
+  assert.ok(ollama.calls.length > 0);
+});
+
+test('transcribe stops on an abort rather than working through the rest of the meeting', async (t) => {
+  const dir = meetingWithAudio(t, 3);
+  const abort = new AbortController();
+  abort.abort();
+
+  await assert.rejects(
+    () => transcribe(dir, { transcribeEngine: 'whisper', chunkSeconds: 1 }, { whisper: fakeWhisper(), ollama: fakeOllama(), signal: abort.signal }),
+    /cancelled/,
+  );
 });
