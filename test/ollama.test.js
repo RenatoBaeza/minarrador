@@ -3,8 +3,17 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const http = require('node:http');
+const path = require('node:path');
 
-const { Ollama, OllamaError, cleanTranscript, collapseRepeats } = require('../src/main/ollama');
+const {
+  Ollama,
+  OllamaError,
+  cleanTranscript,
+  collapseRepeats,
+  ollamaCandidates,
+  findOllama,
+  launchOllama,
+} = require('../src/main/ollama');
 const { buildWav } = require('../src/main/wav');
 
 /**
@@ -263,4 +272,44 @@ test('the host is normalised so a trailing slash cannot double up', async () => 
   } finally {
     await fake.close();
   }
+});
+
+// ---------------------------------------------------------- starting the daemon
+
+const LOCAL = path.join('C:', 'Users', 'someone', 'AppData', 'Local');
+const ON_PATH = path.join('C:', 'tools', 'ollama');
+
+test('ollamaCandidates prefers the tray app, then the CLI, wherever it lives', (t) => {
+  if (process.platform !== 'win32') return t.skip('the search is Windows-only');
+  const candidates = ollamaCandidates({
+    LOCALAPPDATA: LOCAL,
+    PROGRAMFILES: path.join('C:', 'Program Files'),
+    PATH: [ON_PATH, path.join('C:', 'Windows')].join(path.delimiter),
+  });
+
+  // Every GUI comes before every CLI: a machine with the CLI early in PATH and
+  // the app in its usual place should still get the app, which keeps the daemon
+  // alive after Minarrador quits.
+  const firstCli = candidates.findIndex((p) => p.endsWith('ollama.exe'));
+  const lastApp = candidates.map((p) => p.endsWith('ollama app.exe')).lastIndexOf(true);
+  assert.ok(lastApp < firstCli, 'a CLI candidate was ranked above a GUI one');
+
+  assert.equal(candidates[0], path.join(LOCAL, 'Programs', 'Ollama', 'ollama app.exe'));
+  assert.ok(candidates.includes(path.join(ON_PATH, 'ollama.exe')), 'PATH should be searched too');
+});
+
+test('ollamaCandidates survives an environment with none of the usual variables', (t) => {
+  if (process.platform !== 'win32') return t.skip('the search is Windows-only');
+  // A stripped environment is not an error, it is a machine with no Ollama on
+  // it — findOllama says so by returning null rather than by throwing here.
+  assert.deepEqual(ollamaCandidates({}), []);
+  assert.equal(findOllama({}), null);
+});
+
+test('launchOllama refuses to guess when there is nothing installed', (t) => {
+  if (process.platform !== 'win32') return t.skip('off Windows the name resolves through PATH');
+  assert.throws(
+    () => launchOllama({}),
+    (err) => err instanceof OllamaError && /not.*installed/i.test(err.message),
+  );
 });

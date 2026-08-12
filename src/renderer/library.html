@@ -10,7 +10,12 @@
     <header class="titlebar">
       <span class="brand">Minarrador</span>
       <span class="sub">Meetings</span>
+      <button id="record" class="record" type="button" title="Start recording a meeting">
+        <span class="record-glyph" aria-hidden="true">+</span>
+        <span id="record-label">New recording</span>
+      </button>
       <button id="folder" class="ghost" type="button" title="Open the notes folder">Notes folder</button>
+      <button id="settings" class="ghost" type="button" title="Settings" aria-pressed="false">Settings</button>
       <button id="minimize" class="chrome" type="button" title="Minimise" aria-label="Minimise">&#8211;</button>
       <button id="close" class="chrome danger" type="button" title="Close" aria-label="Close">&#10005;</button>
     </header>

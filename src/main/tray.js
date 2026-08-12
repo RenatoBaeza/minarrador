@@ -68,9 +68,7 @@ class AppTray {
    * @param {object} view.settings
    * @param {object} view.status capture source status
    * @param {boolean} view.ollamaUp
-   * @param {boolean} view.ollamaChecking a look-for-Ollama pass is in flight
-   * @param {string[]} view.models installed Ollama models
-   * @param {string[]} view.audioModels models that accept audio
+   * @param {boolean} view.ollamaChecking Ollama is being started or looked for
    * @param {object|null} view.whisper WhisperServer.describe(), or null
    * @param {'whisper'|'ollama'} view.liveEngine the engine actually in use
    * @param {string|null} view.lastDir most recent finished meeting folder
@@ -85,8 +83,6 @@ class AppTray {
       status,
       ollamaUp,
       ollamaChecking,
-      models,
-      audioModels,
       whisper,
       liveEngine,
       lastDir,
@@ -113,48 +109,20 @@ class AppTray {
       status.systemOk ? 'System audio ✓' : settings.captureSystem ? 'System audio ✗' : 'System audio off',
     ].join('   ');
 
-    const modelItems = (list, current, onPick, empty = 'No models found — is Ollama running?') =>
-      list.length
-        ? list.map((name) => ({ label: name, type: 'radio', checked: name === current, click: () => onPick(name) }))
-        : [{ label: empty, enabled: false }];
-
-    const whisperInstalled = Boolean(whisper?.available);
-    // The setting says what was asked for; liveEngine says what is running. They
-    // part company when whisper.cpp was picked but never installed, and the menu
-    // should show the fallback rather than quietly claim otherwise.
-    const engineItems = [
-      {
-        label: whisperInstalled
-          ? `whisper.cpp — ${whisper.model}`
-          : 'whisper.cpp — not installed (npm run whisper:setup)',
-        type: 'radio',
-        checked: settings.liveEngine === 'whisper',
-        enabled: whisperInstalled,
-        click: () => a.setSetting({ liveEngine: 'whisper' }),
-      },
-      {
-        label: `Ollama — ${settings.transcribeModel}`,
-        type: 'radio',
-        checked: settings.liveEngine === 'ollama' || !whisperInstalled,
-        click: () => a.setSetting({ liveEngine: 'ollama' }),
-      },
-      ...(settings.liveEngine === 'whisper' && !whisperInstalled
-        ? [{ type: 'separator' }, { label: 'Falling back to Ollama until whisper.cpp is set up', enabled: false }]
-        : []),
-    ];
-
     // Quick copy sits above everything, including the recording controls: it is
     // the one thing here reached mid-sentence in a meeting, and a menu item that
     // never moves is one that can be clicked without reading.
     const template = [
       { label: 'Quick copy', enabled: false },
+      // The list stays here — it is the whole point of the section — but the
+      // editor behind it lives in the library's Settings, with everything else
+      // that is configured rather than used.
       ...(snippets.length
         ? snippets.map((snippet) => ({
             label: snippetLabel(snippet),
             click: () => clipboard.writeText(snippet.text),
           }))
-        : [{ label: 'No shorthands yet', enabled: false }]),
-      { label: 'Edit quick copy…', click: () => a.editSnippets() },
+        : [{ label: 'No shorthands yet — add them in Settings', enabled: false }]),
       { type: 'separator' },
 
       { label: headline, enabled: false },
@@ -172,15 +140,16 @@ class AppTray {
       // No separate progress line: the headline above is already the progress
       // string while processing.
       // Ollama still writes the notes even when whisper.cpp handles the preview,
-      // so this stays a warning either way. The usual fix is to start the daemon
-      // and look again, which otherwise means waiting out the 60s poll.
+      // so this stays a warning either way. The fix is to start the daemon, so
+      // the menu does that rather than offering to look again and leaving the
+      // starting to the user.
       ...(!ollamaUp
         ? [
             { label: '⚠ Ollama not reachable', enabled: false },
             {
-              label: ollamaChecking ? 'Looking for Ollama…' : 'Try to find Ollama again',
+              label: ollamaChecking ? 'Starting Ollama…' : 'Open Ollama',
               enabled: !ollamaChecking,
-              click: () => a.retryOllama(),
+              click: () => a.openOllama(),
             },
           ]
         : []),
@@ -206,80 +175,11 @@ class AppTray {
         click: () => a.openLast(),
       },
       { type: 'separator' },
-      {
-        label: 'Settings',
-        submenu: [
-          {
-            label: 'Suggest recording when audio is detected',
-            type: 'checkbox',
-            checked: settings.suggestOnAudio,
-            click: (item) => a.setSetting({ suggestOnAudio: item.checked }),
-          },
-          {
-            label: 'Start Minarrador at login',
-            type: 'checkbox',
-            checked: settings.startAtLogin,
-            click: (item) => a.setSetting({ startAtLogin: item.checked }),
-          },
-          {
-            label: 'Open live transcript when recording starts',
-            type: 'checkbox',
-            checked: settings.liveTranscript,
-            click: (item) => a.setSetting({ liveTranscript: item.checked }),
-          },
-          { type: 'separator' },
-          {
-            label: 'Record microphone',
-            type: 'checkbox',
-            checked: settings.captureMic,
-            enabled: state !== 'recording',
-            click: (item) => a.setSetting({ captureMic: item.checked }),
-          },
-          {
-            label: 'Record system audio',
-            type: 'checkbox',
-            checked: settings.captureSystem,
-            enabled: state !== 'recording',
-            click: (item) => a.setSetting({ captureSystem: item.checked }),
-          },
-          { type: 'separator' },
-          { label: 'Live transcript engine', submenu: engineItems },
-          {
-            label: 'Whisper model',
-            enabled: whisperInstalled,
-            submenu: modelItems(
-              whisper?.models ?? [],
-              whisper?.model ?? '',
-              (name) => a.setSetting({ whisperModel: name }),
-              'No GGML models — run npm run whisper:setup',
-            ),
-          },
-          {
-            // Worth reaching for: the large models need more than the automatic
-            // share of the CPU to transcribe faster than the room talks, and
-            // whichever way it is set the effect lands on the next segment.
-            label: 'Whisper decode threads',
-            enabled: whisperInstalled,
-            submenu: (whisper?.threadChoices ?? [0]).map((n) => ({
-              label: n === 0 ? `Automatic (${whisper?.effectiveThreads ?? 4})` : `${n} threads`,
-              type: 'radio',
-              checked: n === (whisper?.threads ?? 0),
-              click: () => a.setSetting({ whisperThreads: n }),
-            })),
-          },
-          { type: 'separator' },
-          {
-            label: 'Transcription model',
-            submenu: modelItems(audioModels, settings.transcribeModel, (name) => a.setSetting({ transcribeModel: name })),
-          },
-          {
-            label: 'Notes model',
-            submenu: modelItems(models, settings.summaryModel, (name) => a.setSetting({ summaryModel: name })),
-          },
-          { type: 'separator' },
-          { label: 'Change Notes Folder…', click: () => a.chooseNotesFolder() },
-        ],
-      },
+      // Every setting lives in the library window now. A submenu of radio lists
+      // could never say which model is missing or which engine is silently
+      // falling back, and those are the two things worth knowing about a setup
+      // that is not working.
+      { label: 'Settings…', click: () => a.openSettings() },
       {
         label: 'Troubleshooting',
         submenu: [

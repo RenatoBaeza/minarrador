@@ -50,6 +50,11 @@ Local-only meeting notes app for Windows. Records mic + system audio, transcribe
 
 No main window is shown at startup. A hidden `BrowserWindow` exists solely to run the Web Audio API (unavailable in the main process). The tray icon is the app: **left-click opens the meeting library, right-click opens the menu.** Nothing is bound to double-click — Windows sends a plain click first, so a second action there would always arrive with the library already opening. Every other window (library, live transcript, quick-copy editor) is opened on demand, frameless, dark, and single-instance.
 
+The menu is deliberately short: the quick-copy list, what is happening now,
+Start/Stop, the four things to open, and Troubleshooting. Everything that is
+*configured* rather than *done* lives in the library window — a menu is a poor
+place to be told that a model is not installed.
+
 ### Audio capture flow
 
 1. `capture.js` (main) creates the hidden renderer and listens for IPC messages
@@ -113,7 +118,9 @@ from **Settings → Whisper decode threads**.
 The archive: a rail of every recording on the left, the notes and the full
 transcript on the right, and a search box that reads across both. Left-clicking
 the tray icon lands here, which makes it the app's front door and the only
-window opened without a meeting in progress.
+window opened without a meeting in progress — so it also carries the two things
+a front door needs: the green **+ New recording** button in the header, and the
+settings pane behind the button beside it.
 
 **The folder on disk is the source of truth, and the window only reads it.**
 There is no index and no database — `listMeetings()` walks the notes folder on
@@ -148,13 +155,62 @@ start, pipeline end) — never from `refreshTray`, which ticks once a second
 while recording and would have the window re-reading every transcript for a
 clock.
 
+**The record button has no state of its own.** Recording lives in the main
+process, so the button reads `activity.recordingId` from the same list payload
+the rail is built from — which is why a meeting started from the tray shows up
+here as a Stop button without the window being told anything special. A click
+sends `library:record` and waits for the folder list to confirm it; neither call
+is awaited in main, since stopping runs the whole pipeline and no click should
+hang on minutes of work.
+
+### Settings (the settings pane, `settings:*`)
+
+The second thing the library window is: everything the tray's Settings submenu
+used to hold, in the reading column, with the archive's rail still beside it.
+The move is not cosmetic — **a submenu could only ever show the list it had.** A
+model that was never pulled and a model that is loaded look identical as radio
+items, whisper.cpp falling back to Ollama had to be spelled out in a disabled
+label, and the difference in both cases is a whole meeting's notes. The pane
+therefore renders a value *and* whether the thing it names is installed, and
+marks the gap in red with what to do about it (`.row.missing`).
+
+`settingsState()` in `main.js` is what makes that possible: the values, the
+defaults, and the installed model lists, whisper's `describe()`, whether the
+notes folder still exists and whether Ollama answers — assembled in one place
+because the pane is only useful when it can compare the two halves.
+
+The window is still a renderer, so writing a setting is gated twice: the preload
+casts a fixed vocabulary of keys to the types the store expects, and
+`LIBRARY_SETTINGS` in main filters again on arrival. **Nothing that names a
+place is in that set.** The notes folder, the Ollama host and the whisper root
+are paths, and a page that could set one could point this app's reading and
+writing anywhere on the machine; the folder is changed through a dialog, where
+the path comes from the user. The two model names that survive are checked
+against what is actually installed, since `whisperModel` is otherwise a
+free-form string resolved inside a folder of weights.
+
+`settings:changed` is a separate signal from `library:changed` because the two
+go stale for different reasons: the folder changes four times a meeting, while
+the pane has to catch the 60s Ollama poll finding the daemon someone started a
+moment ago.
+
+**Ollama is started, not looked for.** The tray item behind an unreachable
+daemon used to say "try to find Ollama again", which asked the user to go and
+run `ollama serve` and come back — for the most common failure in the app, since
+a meeting stopped with Ollama down keeps its audio and loses its notes.
+`launchOllama()` in `ollama.js` finds the Windows install (the tray app first,
+so the daemon outlives this process; the CLI as fallback) and `openOllama()` in
+main waits for it to answer before saying anything.
+
 ### Quick copy (`snippets.js` + the editor window)
 
 The top section of the tray menu is a list of user-authored shorthands; clicking
 one puts its text on the clipboard, so a phrase typed several times a day costs
 two clicks. It sits above the recording controls deliberately — it is the one
 item here reached mid-meeting, and a row that never moves can be clicked without
-reading.
+reading. The **list** is the part that has to be there; the editor behind it is
+configuration, so it opens from the library's settings pane
+(`settings:editQuickCopy`) with everything else that is set rather than used.
 
 Stored in `snippets.json` rather than `settings.json`: the settings store coerces
 every value against a scalar default and drops the rest, which is what keeps a
@@ -258,8 +314,14 @@ rather than next to the config.
 ### Adding a new setting
 
 1. Add the default in `settings.js` → `defaults()`
-2. Wire it into the tray menu in `tray.js` (checkbox or submenu)
-3. Handle the change in `main.js` → `setSetting` callback
+2. Add the key to `LIBRARY_SETTINGS` in `main.js` and to `FIELDS` in
+   `library-preload.js` — unless it names a path or a host, which the window is
+   deliberately not given the vocabulary to set
+3. Render a row for it in `src/renderer/library.js` (`toggleRow`, `selectRow` or
+   `buttonRow`), in whichever section it belongs to, and mark it `missing` when
+   the thing it names is not installed
+4. Apply it in `main.js` → `applySetting`, the single path both the tray and the
+   pane write through
 
 ### Modifying the pipeline
 
@@ -282,8 +344,16 @@ Each stage in `pipeline.js` is a standalone async function (`transcribe`, `summa
 | `library:open` | library → main (invoke) | `{ id, target }` → opened? |
 | `library:openNotesFolder` | library → main (invoke) | → opened? |
 | `library:copy` | library → main | `string` for the clipboard |
+| `library:record` | library → main (invoke) | `boolean` — start or stop; the result arrives as `library:changed` |
 | `library:changed` | main → library | — (the folder changed; re-list) |
+| `library:showSettings` | main → library | — (the tray's Settings… item) |
 | `library:minimize` / `library:close` | library → main | — |
+| `settings:get` | library → main (invoke) | → `settingsState()` |
+| `settings:set` | library → main (invoke) | patch → `settingsState()` |
+| `settings:chooseNotesFolder` | library → main (invoke) | → `settingsState()` |
+| `settings:openOllama` | library → main (invoke) | → `settingsState()`, after the daemon answers or times out |
+| `settings:editQuickCopy` | library → main | — (opens the shorthand editor) |
+| `settings:changed` | main → library | — (a setting, a model list or Ollama changed) |
 
 ## Important notes
 

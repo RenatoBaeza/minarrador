@@ -8,6 +8,12 @@
 // gemma4:12b, which transcribes 16 kHz mono WAV accurately; the smaller e4b
 // variants return empty or garbled text, so they are a poor default.
 
+const { spawn } = require('node:child_process');
+const fs = require('node:fs');
+const path = require('node:path');
+
+const log = require('./logger');
+
 const DEFAULT_HOST = 'http://127.0.0.1:11434';
 
 class OllamaError extends Error {}
@@ -205,6 +211,88 @@ class Ollama {
   }
 }
 
+// ------------------------------------------------------------ starting Ollama
+//
+// Everything above assumes a daemon is already listening. It usually is — the
+// Windows installer registers Ollama as a login item — but the one failure this
+// app actually hits is hitting Stop with nothing on the other end, which costs
+// the notes for that meeting. Starting it is a click's worth of work, so the app
+// offers the click rather than a sentence about `ollama serve`.
+
+const isFile = (file) => {
+  try {
+    return fs.statSync(file).isFile();
+  } catch {
+    return false;
+  }
+};
+
+/**
+ * Places a Windows install of Ollama might be, GUI first.
+ *
+ * "ollama app.exe" is the tray application: it starts the daemon and then keeps
+ * it alive after this process is gone, which is what "open Ollama" means to the
+ * person clicking it. "ollama.exe serve" is the same daemon without a minder,
+ * so it is the fallback rather than the first pick.
+ *
+ * PATH is searched after the known install roots because the installer adds its
+ * own directory to it anyway — it only adds anything for a copy unpacked
+ * somewhere unusual.
+ *
+ * @param {NodeJS.ProcessEnv} [env]
+ */
+function ollamaCandidates(env = process.env) {
+  const roots = [
+    env.LOCALAPPDATA && path.join(env.LOCALAPPDATA, 'Programs', 'Ollama'),
+    env.PROGRAMFILES && path.join(env.PROGRAMFILES, 'Ollama'),
+    env.ProgramW6432 && path.join(env.ProgramW6432, 'Ollama'),
+    ...String(env.PATH ?? '').split(path.delimiter),
+  ].filter(Boolean);
+  // Every GUI before any CLI, rather than both per directory: a machine with the
+  // CLI early in PATH and the app in its usual place should still get the app.
+  return [
+    ...roots.map((dir) => path.join(dir, 'ollama app.exe')),
+    ...roots.map((dir) => path.join(dir, 'ollama.exe')),
+  ];
+}
+
+/**
+ * The Ollama executable on this machine, or null when there is none.
+ *
+ * Off Windows the name is enough — spawn resolves it through PATH — and this app
+ * only ships for Windows anyway, so the search above is not worth generalising.
+ *
+ * @returns {string|null}
+ */
+function findOllama(env = process.env) {
+  if (process.platform !== 'win32') return 'ollama';
+  return ollamaCandidates(env).find(isFile) ?? null;
+}
+
+/**
+ * Starts Ollama and leaves it running.
+ *
+ * Detached and unref'd on purpose: the daemon has to outlive whichever menu
+ * click asked for it, and a meeting recorded after Minarrador quits still wants
+ * something to transcribe it.
+ *
+ * @returns {string} the executable that was launched
+ * @throws {OllamaError} when Ollama is not installed
+ */
+function launchOllama(env = process.env) {
+  const exe = findOllama(env);
+  if (!exe) {
+    throw new OllamaError('Ollama does not appear to be installed. Get it from https://ollama.com/download');
+  }
+  const cli = path.basename(exe).toLowerCase() !== 'ollama app.exe';
+  const child = spawn(exe, cli ? ['serve'] : [], { detached: true, windowsHide: true, stdio: 'ignore' });
+  // A spawn failure arrives asynchronously, long after this returns; without a
+  // listener it would surface as an uncaught exception in the main process.
+  child.once('error', (err) => log.warn('could not start Ollama:', err.message));
+  child.unref();
+  return exe;
+}
+
 /** Duration of a 16-bit PCM WAV buffer, read straight from the header. */
 function estimateWavSeconds(buf) {
   try {
@@ -258,4 +346,13 @@ function cleanTranscript(raw) {
   return collapseRepeats(t);
 }
 
-module.exports = { Ollama, OllamaError, cleanTranscript, collapseRepeats, DEFAULT_HOST };
+module.exports = {
+  Ollama,
+  OllamaError,
+  cleanTranscript,
+  collapseRepeats,
+  ollamaCandidates,
+  findOllama,
+  launchOllama,
+  DEFAULT_HOST,
+};

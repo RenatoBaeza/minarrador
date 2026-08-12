@@ -93,6 +93,63 @@ body {
   color: #eaeaea;
 }
 
+.ghost[aria-pressed='true'] {
+  background: #2e2e38;
+  border-color: #45454f;
+  color: #eaeaea;
+}
+
+/* The one thing this window does rather than reads, so it is the one control
+   that looks like a button in the plain sense: wide, green, and to the left of
+   the quiet ghost buttons it must not be mistaken for. */
+.record {
+  -webkit-app-region: no-drag;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  flex: none;
+  min-width: 178px;
+  padding: 8px 18px;
+  border: 0;
+  border-radius: 7px;
+  background: #16a34a;
+  color: #fff;
+  font: inherit;
+  font-size: 13px;
+  font-weight: 600;
+  line-height: 1;
+  cursor: default;
+}
+
+.record:hover:not(:disabled) {
+  background: #22c55e;
+}
+
+.record:disabled {
+  opacity: 0.55;
+}
+
+.record-glyph {
+  font-size: 15px;
+  font-weight: 700;
+  line-height: 1;
+}
+
+/* Stopping is the same button, because there is only ever one meeting and the
+   thing to do with it is the opposite of what was last done. */
+.record.stop {
+  background: #e11d48;
+}
+
+.record.stop:hover:not(:disabled) {
+  background: #f43f5e;
+}
+
+.record.stop .record-glyph {
+  font-size: 11px;
+}
+
 main {
   flex: 1;
   display: flex;
@@ -518,4 +575,144 @@ mark {
   background: #24242c;
   border-radius: 4px;
   padding: 1px 5px;
+}
+
+/* ----------------------------------------------------------------- settings */
+
+/* One row per setting: what it is on the left, the control on the right, and —
+   when the value points at something that is not installed — a red line under
+   it saying so. A tray submenu could only ever show the list it had; this pane
+   exists to show what is missing from it. */
+
+.settings-lead {
+  margin: 0 0 6px;
+  color: #8b8b98;
+  line-height: 1.65;
+  font-size: 13px;
+}
+
+.rows {
+  border: 1px solid #2c2c34;
+  border-radius: 8px;
+  background: #1b1b21;
+  overflow: hidden;
+}
+
+.row {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  padding: 12px 14px;
+  border-top: 1px solid #24242c;
+}
+
+.row:first-child {
+  border-top: 0;
+}
+
+.row-body {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+
+.row-title {
+  font-size: 13.5px;
+  line-height: 1.35;
+}
+
+.row-hint {
+  color: #6b7280;
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.row-hint code {
+  font-family: Consolas, 'Cascadia Mono', monospace;
+  font-size: 11.5px;
+  background: #24242c;
+  border-radius: 4px;
+  padding: 1px 5px;
+}
+
+/* The red mark. Reserved for a setting whose value is not there to be used —
+   a model that was never pulled, a folder that has gone — never for one that is
+   merely off. */
+.row-alert {
+  color: #fb7185;
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.row-ok {
+  color: #4ade80;
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.row.missing {
+  background: rgba(225, 29, 72, 0.06);
+}
+
+.control {
+  flex: none;
+  width: 240px;
+  max-width: 45%;
+  background: #24242c;
+  color: #eaeaea;
+  border: 1px solid #34343e;
+  border-radius: 6px;
+  padding: 6px 8px;
+  font: inherit;
+  font-size: 12.5px;
+  cursor: default;
+}
+
+.control:focus {
+  outline: none;
+  border-color: #4c6ef5;
+}
+
+.control:disabled {
+  opacity: 0.45;
+}
+
+.row.missing .control {
+  border-color: #e11d48;
+}
+
+/* Native checkbox, sized up and given the app's blue: a hand-rolled switch here
+   would only reinvent focus and keyboard behaviour that already works. */
+.switch {
+  flex: none;
+  width: 17px;
+  height: 17px;
+  accent-color: #3b5bdb;
+  cursor: default;
+}
+
+.switch:disabled {
+  opacity: 0.45;
+}
+
+/* A whole row that is clickable, so the label and its hint toggle the box. */
+label.row {
+  cursor: default;
+}
+
+label.row:hover {
+  background: #1f1f26;
+}
+
+.settings .actions {
+  margin: 0;
+}
+
+.value {
+  font-family: Consolas, 'Cascadia Mono', monospace;
+  font-size: 12px;
+  color: #9ca3af;
+  word-break: break-all;
 }

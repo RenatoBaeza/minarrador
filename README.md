@@ -48,7 +48,7 @@ For fewer mistakes in the preview, use `--model large-v3-turbo-q5_0`. It is `lar
 
 It is also far slower than `base`, and on the CPU build that matters more than the accuracy does. Measured on a 24-thread i9 against the same 8.7 s of speech: `base` decodes at about 20x realtime, this model at 1.2x. Above 1x it keeps up, but a caption lands a few seconds after the speaker stops rather than about one, and a long stretch with no pause in it can lose words from the preview. Two things buy that back — **Settings → Whisper decode threads** (about 1.8x with all 24) and a `--variant cublas-*` GPU build. On a 4-core laptop this model is below realtime whatever you do, so stay on `base` or `small` there. The saved transcript is unaffected either way: that is a separate pass over the recorded audio once you stop.
 
-Models accumulate rather than replace, so running setup again for a second model leaves the first in place. Pick between them in the tray under **Settings → Whisper model**. Skip this step and the live preview falls back to your Ollama audio model, which works but lags noticeably — an audio LLM costs about a second per request no matter how short the clip.
+Models accumulate rather than replace, so running setup again for a second model leaves the first in place. Pick between them in **Settings → Whisper model**, in the meetings window. Skip this step and the live preview falls back to your Ollama audio model, which works but lags noticeably — an audio LLM costs about a second per request no matter how short the clip.
 
 ### Ollama model
 
@@ -58,7 +58,7 @@ You need at least one model that supports audio input. The default is **gemma4:1
 ollama pull gemma4:12b
 ```
 
-> **Tip:** You can use different models for transcription and summarisation. Pick them from the tray menu under **Settings → Transcription model / Notes model**. Any model Ollama reports as audio-capable will appear in the transcription list.
+> **Tip:** You can use different models for transcription and summarisation. Pick them in **Settings → Transcription model / Notes model**, in the meetings window. Any model Ollama reports as audio-capable will appear in the transcription list.
 
 ## Installation
 
@@ -108,8 +108,9 @@ Ollama runs a local HTTP server on `127.0.0.1:11434`. If a firewall prompt appea
 
 ### Starting & stopping
 
-- **Right-click** the waveform icon in the system tray
-- Click **Start Recording** to begin, **Stop Recording** to finish
+- **Left-click** the waveform icon in the system tray to open the meetings
+  window, then hit the green **+ New recording**. The same button stops it.
+- Or **right-click** the icon and use **Start Recording** / **Stop Recording**
 - When processing completes, you'll get a notification — click it to open the PDF
 
 ### Your meetings
@@ -136,7 +137,7 @@ The top of the tray menu holds your shorthands — snippets of text you paste
 often. Click one and it goes straight to the clipboard, so it's two clicks from
 anywhere: tray icon, then the shorthand.
 
-Add and edit them with **Edit quick copy…**, which opens a small window: give
+The list stays in the tray; you edit it from **Settings → Quick copy → Edit quick copy…**, which opens a small window: give
 each one an optional name (that's the label the tray shows — without one, it
 shows the start of the text) and the text to copy. **Save**, or `Ctrl+S`, and it
 appears in the menu straight away. Everything lives in `snippets.json` next to
@@ -156,7 +157,7 @@ Each recording creates a timestamped folder (e.g. `2026-08-11_14-32-05/`) in you
 | `notes.pdf`       | Formatted one-page brief                                         |
 | `meta.json`       | Recording metadata (timestamps, duration, sources, models used)  |
 
-By default, notes are saved to `Documents\Minarrador`. Change this from the tray menu: **Settings → Change Notes Folder…**
+By default, notes are saved to `Documents\Minarrador`. Change this in **Settings → Meetings folder → Change…**
 
 ### Auto-detect meetings
 
@@ -172,12 +173,21 @@ npm run pipeline -- "C:\Users\you\Documents\Minarrador\2026-08-11_14-32-05"
 
 ### Settings
 
-All settings are accessible from the tray menu under **Settings**:
+Settings live in the meetings window: open it with a left-click on the tray icon
+and hit **Settings** in the header, or go straight there with **Settings…** in
+the tray menu.
+
+Anything set to something that is not on the machine — a model that was never
+pulled, whisper.cpp with no weights, a meetings folder that has been moved — is
+**marked in red**, with what to do about it. That is the point of the pane: a
+model name in a settings file says nothing about whether it is installed, and
+the difference is a meeting's notes.
 
 | Setting                    | Default                | Description                                 |
 | -------------------------- | ---------------------- | ------------------------------------------- |
 | Suggest recording on audio | ✓                      | Notify when sustained speech is detected    |
 | Start at login             | ✓                      | Launch minimised to tray on Windows startup |
+| Open the live transcript   | ✓                      | Shows the preview window when a recording starts |
 | Record microphone          | ✓                      | Capture mic input                           |
 | Record system audio        | ✓                      | Capture system audio (calls, videos, etc.)  |
 | Live transcript engine     | whisper.cpp            | What produces the live preview; falls back to Ollama when whisper.cpp is not installed |
@@ -185,20 +195,21 @@ All settings are accessible from the tray menu under **Settings**:
 | Whisper decode threads     | Automatic              | Automatic is half the logical cores, capped at 8; raise it if a large model cannot keep up |
 | Transcription model        | `gemma4:12b`           | Audio-capable model used for the saved transcript |
 | Notes model                | `gemma4:12b`           | Model used for summarisation and PDF layout |
-| Notes folder               | `Documents\Minarrador` | Where meeting folders are created           |
+| Meetings folder            | `Documents\Minarrador` | Where meeting folders are created           |
+| Quick copy                 | —                      | Opens the shorthand editor; the list itself stays in the tray menu |
 
 ## Troubleshooting
 
 | Problem                                 | Solution                                                                                   |
 | --------------------------------------- | ------------------------------------------------------------------------------------------ |
-| **"Ollama not reachable"** in tray menu | Start Ollama with `ollama serve`, or check it's on `http://127.0.0.1:11434`                |
+| **"Ollama not reachable"** in tray menu | Click **Open Ollama** — in the tray menu, or in **Settings**. It starts the daemon and waits for it |
 | **No audio-capable models found**       | Pull one: `ollama pull gemma4:12b`                                                         |
-| **whisper.cpp greyed out in the menu**  | Run `npm run whisper:setup`; the tray shows the path it looked in                          |
+| **whisper.cpp marked red in Settings**  | Run `npm run whisper:setup`; the live preview falls back to Ollama until it is installed   |
 | **Live captions lag far behind**        | You are on the Ollama fallback, or a large whisper model — try `--model base` or `tiny`    |
 | **Mic not detected**                    | Check Windows mic permissions (see [Permissions](#permissions) above)                      |
 | **System audio not working**            | Try **Troubleshooting → Restart Audio Capture** from the tray menu                         |
 | **Processing failed notification**      | Open the meeting folder — `ERROR.txt` has details. Usually: start Ollama or pull the model |
-| **App doesn't appear at login**         | Re-enable via **Settings → Start at login** in the tray menu                               |
+| **App doesn't appear at login**         | Re-enable via **Settings → Start Minarrador at login**                                     |
 
 ### Log file
 

@@ -14,7 +14,7 @@ const snippetsStore = require('./snippets');
 const library = require('./library');
 const { CaptureController } = require('./capture');
 const { AppTray } = require('./tray');
-const { Ollama } = require('./ollama');
+const { Ollama, findOllama, launchOllama } = require('./ollama');
 const { WhisperServer } = require('./whisper');
 const { runPipeline, fmtDuration } = require('./pipeline');
 const { createMeetingDir, FILES } = require('./paths');
@@ -23,6 +23,40 @@ const APP_ID = 'com.rntbz.minarrador';
 
 /** How often to look for the Ollama daemon while idle. */
 const OLLAMA_POLL_MS = 60_000;
+
+/**
+ * How long to keep looking after starting Ollama ourselves, and how often.
+ *
+ * A cold start is the service coming up, not a model loading, so it is seconds
+ * rather than minutes — but the first run after an update can be slower, and
+ * giving up early would report a failure that did not happen.
+ */
+const OLLAMA_START_TIMEOUT_MS = 30_000;
+const OLLAMA_START_STEP_MS = 1500;
+
+const delay = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
+/**
+ * Settings the library window is allowed to change.
+ *
+ * Everything else in the store names a place — the notes folder, the Ollama
+ * host, the whisper install root — and a renderer that could set one of those
+ * could point this app's reading and writing anywhere on the machine. The folder
+ * is changed through a dialog instead, where the path comes from the user rather
+ * than from the page.
+ */
+const LIBRARY_SETTINGS = new Set([
+  'suggestOnAudio',
+  'startAtLogin',
+  'liveTranscript',
+  'captureMic',
+  'captureSystem',
+  'liveEngine',
+  'whisperModel',
+  'whisperThreads',
+  'transcribeModel',
+  'summaryModel',
+]);
 
 /**
  * A main-process fault is the one failure this app has no way to show.
@@ -219,13 +253,23 @@ function showSnippetsWindow() {
  * the size, and hence single-instance like the rest: a second copy would be a
  * second reader over the same folders with nothing to gain from the split.
  *
- * Read-only. Everything it shows comes out of library.js, which never writes.
+ * Read-only over the notes folder: everything it shows comes out of library.js,
+ * which never writes. Settings are the exception, and they go through the same
+ * store the tray used to write — see the `settings:*` channels below.
+ *
+ * @param {{ settings?: boolean }} [options] `settings` opens on the settings
+ *   pane rather than the archive, which is how the tray's Settings… item lands.
  */
-function showLibraryWindow() {
+function showLibraryWindow({ settings: toSettings = false } = {}) {
+  const showSettings = (win) => {
+    if (toSettings) win.webContents.send('library:showSettings');
+  };
+
   if (libraryWindow && !libraryWindow.isDestroyed()) {
     if (libraryWindow.isMinimized()) libraryWindow.restore();
     libraryWindow.show();
     libraryWindow.focus();
+    showSettings(libraryWindow);
     return libraryWindow;
   }
 
@@ -248,6 +292,11 @@ function showLibraryWindow() {
   });
 
   libraryWindow.once('ready-to-show', () => libraryWindow?.show());
+  // The page has to exist before it can be told which pane to open on, so a
+  // freshly built window waits for its script rather than sending into nothing.
+  libraryWindow.webContents.once('did-finish-load', () => {
+    if (libraryWindow && !libraryWindow.isDestroyed()) showSettings(libraryWindow);
+  });
   libraryWindow.on('closed', () => {
     libraryWindow = null;
   });
@@ -267,6 +316,52 @@ function showLibraryWindow() {
  */
 function notifyLibrary() {
   if (libraryWindow && !libraryWindow.isDestroyed()) libraryWindow.webContents.send('library:changed');
+}
+
+/**
+ * Tells an open library that a setting, a model list or the Ollama daemon
+ * changed under it.
+ *
+ * Separate from {@link notifyLibrary} because the two go stale for different
+ * reasons and at wildly different rates: the folder changes four times a
+ * meeting, while the settings pane has to catch an Ollama poll finding the
+ * daemon sixty seconds after someone clicked Open Ollama.
+ */
+function notifySettings() {
+  if (libraryWindow && !libraryWindow.isDestroyed()) libraryWindow.webContents.send('settings:changed');
+}
+
+/**
+ * Everything the settings pane renders: the values themselves, the defaults to
+ * fall back to, and what is actually installed to back them.
+ *
+ * The last part is the point. A model name in settings.json says nothing about
+ * whether it is pulled, and the tray's radio lists could only ever show what was
+ * there — the pane needs both so it can mark a setting pointing at something
+ * missing rather than letting it look configured.
+ */
+function settingsState() {
+  return {
+    settings,
+    defaults: settingsStore.defaults(),
+    models: state.models,
+    audioModels: state.audioModels,
+    whisper: whisper?.describe() ?? null,
+    ollama: {
+      host: settings.ollamaHost,
+      up: state.ollamaUp,
+      checking: state.ollamaChecking,
+      // Whether there is anything to start, which is the difference between
+      // "click here" and "install it first".
+      installed: Boolean(findOllama()),
+    },
+    /** What the live preview is really using, which is not always what was asked for. */
+    liveEngine: capture?.liveTranscriber.engine ?? settings.liveEngine,
+    notesDirExists: fs.existsSync(settings.notesDir),
+    snippetCount: snippetsStore.load().length,
+    /** Capture sources cannot be changed mid-meeting; the pane says so. */
+    recording: state.phase === 'recording',
+  };
 }
 
 /** What the library shows on folders the app is still busy with. */
@@ -306,8 +401,6 @@ function refreshTray() {
     status: capture?.status ?? {},
     ollamaUp: state.ollamaUp,
     ollamaChecking: state.ollamaChecking,
-    models: state.models,
-    audioModels: state.audioModels,
     whisper: whisper?.describe() ?? null,
     liveEngine: capture?.liveTranscriber.engine ?? settings?.liveEngine,
     lastDir: state.lastDir,
@@ -414,7 +507,13 @@ function writeResumeNote(dir, reason) {
   }
 }
 
-async function stopRecording() {
+/**
+ * @param {{ reveal?: boolean }} [options] `reveal` opens the finished folder in
+ *   Explorer. On by default for the tray, where there is nowhere else to land;
+ *   off when the library stopped the recording, since that window is already
+ *   showing the meeting and will fill in the notes on its own.
+ */
+async function stopRecording({ reveal = true } = {}) {
   const finished = await finalizeRecording();
   if (!finished) return;
 
@@ -423,7 +522,7 @@ async function stopRecording() {
   // that failed leaves a half-written folder with no brief in it; that case gets
   // the failure notification, not a folder popped open as though it were done.
   const out = await processMeeting(finished.dir, finished.meta);
-  if (!out) return;
+  if (!out || !reveal) return;
 
   const err = await shell.openPath(finished.dir);
   if (err) log.warn('could not open the notes folder:', err);
@@ -545,32 +644,96 @@ async function refreshOllama() {
   // A model swap above changes what the live preview should be asking for.
   applyLiveConfig();
   refreshTray();
+  if (changed || state.models.length) notifySettings();
 }
 
 /**
- * The manual version of the poll, behind "Try to find Ollama again".
+ * Starts Ollama and waits for it to answer.
  *
- * Someone who has just run `ollama serve` should not have to wait out the rest
- * of the 60s interval to see the app notice. Clicking the item closes the menu,
- * so the answer comes back as a notification rather than a menu label.
+ * This used to be "try to find Ollama again", which asked the user to go and
+ * start a daemon themselves and then come back — for the single most common
+ * failure in the app, since a meeting stopped with Ollama down loses its notes.
+ * The daemon is a local executable this process can perfectly well launch, so it
+ * launches it and then waits, rather than waiting out the 60s poll.
+ *
+ * Safe to call when Ollama is already up: it becomes a refresh.
  */
-async function retryOllama() {
+async function openOllama() {
   if (state.ollamaChecking) return;
   state.ollamaChecking = true;
   refreshTray();
+  notifySettings();
+
+  let launched = null;
   try {
-    await refreshOllama();
+    if (!state.ollamaUp) launched = launchOllama();
+    if (launched) log.info('starting Ollama:', launched);
+
+    const deadline = Date.now() + OLLAMA_START_TIMEOUT_MS;
+    // Always one pass, so a call with Ollama already up still refreshes the
+    // model lists rather than sleeping and reporting stale ones.
+    for (;;) {
+      await refreshOllama();
+      if (state.ollamaUp || !launched || Date.now() >= deadline) break;
+      await delay(OLLAMA_START_STEP_MS);
+    }
   } catch (err) {
-    log.error('manual Ollama check failed', err);
+    log.error('could not start Ollama', err);
+    notify('Could not start Ollama', err.message);
+    return;
   } finally {
     state.ollamaChecking = false;
     refreshTray();
+    notifySettings();
   }
+
   if (state.ollamaUp) {
-    notify('Ollama found', `${state.models.length} model(s) available at ${settings.ollamaHost}.`);
+    notify('Ollama is running', `${state.models.length} model(s) available at ${settings.ollamaHost}.`);
   } else {
-    notify('Still no Ollama', `Nothing answered at ${settings.ollamaHost}. Start it with "ollama serve", then try again.`);
+    notify(
+      'Ollama did not answer',
+      `${path.basename(launched ?? 'ollama')} was started but nothing is listening at ${settings.ollamaHost} yet.`,
+    );
   }
+}
+
+/**
+ * Writes a settings change and applies whatever it touches.
+ *
+ * The single path for both surfaces that can change one — the tray, and the
+ * library's settings pane — so a setting cannot end up saved but not applied
+ * depending on where it was clicked.
+ */
+function applySetting(patch) {
+  settings = settingsStore.save(patch);
+  if ('startAtLogin' in patch) applyLoginItem();
+  if ('captureMic' in patch || 'captureSystem' in patch) applyCaptureConfig();
+  // Whisper first: which engine the live transcriber can actually use depends on
+  // what the server resolved to.
+  if ('whisperModel' in patch || 'whisperRoot' in patch || 'whisperThreads' in patch) applyWhisperConfig();
+  if ('liveTranscript' in patch || 'transcribeModel' in patch || 'liveEngine' in patch || 'whisperModel' in patch) {
+    applyLiveConfig();
+  }
+  refreshTray();
+  notifySettings();
+  return settings;
+}
+
+/** Asks for a new notes folder. Everything that reads one is pointed at it. */
+async function chooseNotesFolder() {
+  const res = await dialog.showOpenDialog({
+    title: 'Choose where meetings are saved',
+    defaultPath: settings.notesDir,
+    properties: ['openDirectory', 'createDirectory'],
+  });
+  if (res.canceled || !res.filePaths[0]) return false;
+  settings = settingsStore.save({ notesDir: res.filePaths[0] });
+  fs.mkdirSync(settings.notesDir, { recursive: true });
+  refreshTray();
+  notifySettings();
+  // An open library is now looking at the wrong folder entirely.
+  notifyLibrary();
+  return true;
 }
 
 function applyLoginItem() {
@@ -689,6 +852,8 @@ if (!app.requestSingleInstanceLock()) {
     // The menu is rebuilt from the store, so a save is what makes a new
     // shorthand clickable — no restart, no reopening the menu twice.
     refreshTray();
+    // The settings pane counts them, and the editor is opened from it.
+    notifySettings();
     log.info(`quick copy: ${saved.length} shorthand(s) saved`);
     return saved;
   });
@@ -757,6 +922,66 @@ if (!app.requestSingleInstanceLock()) {
     libraryWindow.close();
   });
 
+  // Starting a meeting from the library rather than the tray. Neither call is
+  // awaited: startRecording is synchronous, and stopRecording runs the whole
+  // pipeline, which is minutes of work no click should hang on. The window finds
+  // out what happened from library:changed, the same way it finds out about a
+  // recording started from the tray.
+  ipcMain.handle('library:record', (event, on) => {
+    if (!fromLibrary(event)) return false;
+    if (on) {
+      startRecording();
+    } else {
+      stopRecording({ reveal: false }).catch((err) => log.error('stop from the library failed', err));
+    }
+    return true;
+  });
+
+  // Settings. The library is the only surface that changes one now, and it is
+  // still a renderer: the patch is filtered to the keys below, and the two that
+  // name something on disk are checked against what is actually installed.
+  ipcMain.handle('settings:get', (event) => (fromLibrary(event) ? settingsState() : null));
+
+  ipcMain.handle('settings:set', (event, patch) => {
+    if (!fromLibrary(event)) return null;
+    const clean = {};
+    for (const [key, value] of Object.entries(patch ?? {})) {
+      if (LIBRARY_SETTINGS.has(key)) clean[key] = value;
+    }
+    // settings.js checks the type of a model name, not whether it exists — and
+    // whisperModel is resolved against a folder of weights, so a name from a
+    // page is the one string here that reaches the filesystem. Both are picked
+    // from a list the window was given, so anything else is not a setting.
+    if ('whisperModel' in clean && !(whisper?.models ?? []).includes(clean.whisperModel)) delete clean.whisperModel;
+    if ('transcribeModel' in clean && !state.models.includes(clean.transcribeModel)) delete clean.transcribeModel;
+    if ('summaryModel' in clean && !state.models.includes(clean.summaryModel)) delete clean.summaryModel;
+
+    if (Object.keys(clean).length) {
+      applySetting(clean);
+      log.info('settings changed:', Object.keys(clean).join(', '));
+    }
+    return settingsState();
+  });
+
+  ipcMain.handle('settings:chooseNotesFolder', async (event) => {
+    if (!fromLibrary(event)) return null;
+    await chooseNotesFolder();
+    return settingsState();
+  });
+
+  ipcMain.handle('settings:openOllama', async (event) => {
+    if (!fromLibrary(event)) return null;
+    await openOllama();
+    return settingsState();
+  });
+
+  // Quick copy is edited from here, but the list itself stays in the tray: the
+  // editor is configuration, the list is the thing used mid-meeting.
+  ipcMain.on('settings:editQuickCopy', (event) => {
+    if (!fromLibrary(event)) return;
+    showSnippetsWindow();
+  });
+
   /**
    * Brings the app up. Everything here has to succeed for there to be a tray
    * icon at all, which is why the caller treats a throw as fatal — see below.
@@ -817,39 +1042,14 @@ if (!app.requestSingleInstanceLock()) {
         shell.openPath(fs.existsSync(pdf) ? pdf : state.lastDir);
       },
       openLog: () => shell.openPath(log.path),
-      retryOllama,
-      openLibrary: showLibraryWindow,
+      openOllama,
+      openLibrary: () => showLibraryWindow(),
+      openSettings: () => showLibraryWindow({ settings: true }),
       toggleTranscript: toggleTranscriptWindow,
-      editSnippets: showSnippetsWindow,
       diagnostics,
       restartCapture: () => {
         capture.setActive(false);
         setTimeout(applyCaptureConfig, 600);
-      },
-      chooseNotesFolder: async () => {
-        const res = await dialog.showOpenDialog({
-          title: 'Choose where meetings are saved',
-          defaultPath: settings.notesDir,
-          properties: ['openDirectory', 'createDirectory'],
-        });
-        if (res.canceled || !res.filePaths[0]) return;
-        settings = settingsStore.save({ notesDir: res.filePaths[0] });
-        fs.mkdirSync(settings.notesDir, { recursive: true });
-        refreshTray();
-        // An open library is now looking at the wrong folder entirely.
-        notifyLibrary();
-      },
-      setSetting: (patch) => {
-        settings = settingsStore.save(patch);
-        if ('startAtLogin' in patch) applyLoginItem();
-        if ('captureMic' in patch || 'captureSystem' in patch) applyCaptureConfig();
-        // Whisper first: which engine the live transcriber can actually use
-        // depends on what the server resolved to.
-        if ('whisperModel' in patch || 'whisperRoot' in patch || 'whisperThreads' in patch) applyWhisperConfig();
-        if ('liveTranscript' in patch || 'transcribeModel' in patch || 'liveEngine' in patch || 'whisperModel' in patch) {
-          applyLiveConfig();
-        }
-        refreshTray();
       },
       // before-quit owns the shutdown sequence, including its re-entrancy guard.
       quit: () => app.quit(),

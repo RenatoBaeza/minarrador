@@ -12,23 +12,49 @@ const countEl = document.getElementById('count');
 const readerEl = document.getElementById('reader');
 const placeholder = document.getElementById('placeholder');
 const queryEl = document.getElementById('query');
+const recordEl = document.getElementById('record');
+const recordLabelEl = document.getElementById('record-label');
+const recordGlyphEl = recordEl.querySelector('.record-glyph');
+const settingsEl = document.getElementById('settings');
 
 /** Keystrokes settle before the main process reads every transcript on disk. */
 const SEARCH_DEBOUNCE_MS = 180;
+
+/**
+ * How long the record button waits for the folder list to confirm a click.
+ *
+ * Stopping runs a whole pipeline, but the confirmation comes from the audio file
+ * closing, which is quick. This is only the backstop for the cases that produce
+ * no change at all — a recording too short to keep, a start that failed.
+ */
+const RECORD_CONFIRM_MS = 10_000;
 
 const view = {
   /** Cards currently in the rail, newest first. */
   meetings: [],
   /** Folder name of the open meeting, or null. */
   selected: null,
+  /** The meeting the reader is showing, kept so settings can be closed back onto it. */
+  meeting: null,
   /** The query the rail was built from, reused to highlight the reader. */
   query: '',
   /** 'notes' | 'transcript' — sticky across meetings, the way a reader expects. */
   tab: 'notes',
+  /** 'reader' | 'settings' — which of the two the right-hand pane is showing. */
+  mode: 'reader',
+  /** settingsState() from the main process, or null before it has been asked for. */
+  settings: null,
   activity: { recordingId: null, processingIds: [] },
+  /**
+   * What the last record click asked for, until the rail confirms it happened.
+   * Recording is started and stopped in the main process, so this window learns
+   * the result the same way it learns about a recording started from the tray.
+   */
+  recordWanted: null,
 };
 
 let searchTimer = null;
+let recordTimer = null;
 /**
  * Sequence number for list requests.
  *
@@ -151,7 +177,7 @@ function card(meeting) {
     row.append(preview);
   }
 
-  row.addEventListener('click', () => select(meeting.id));
+  row.addEventListener('click', () => openMeeting(meeting.id));
   return row;
 }
 
@@ -362,8 +388,378 @@ function renderReader(meeting) {
   readerEl.replaceChildren(doc);
 }
 
+// --------------------------------------------------------------- the settings
+
+// Everything the tray's Settings submenu used to hold, plus the one thing a
+// submenu could not show: whether the value a setting names is actually there.
+// A model that was never pulled and a model that is running look identical in a
+// radio list, and the difference is the whole meeting's notes — so a setting
+// pointing at something missing is marked, in red, with what to do about it.
+
+/** A row that is a checkbox: the whole label toggles it. */
+function toggleRow({ title, hint, alert: alertText, key, checked, disabled }) {
+  const row = el('label', `row${alertText ? ' missing' : ''}`);
+  const body = el('span', 'row-body');
+  body.append(el('span', 'row-title', title));
+  if (hint) body.append(el('span', 'row-hint', hint));
+  if (alertText) body.append(el('span', 'row-alert', alertText));
+
+  const box = el('input', 'switch');
+  box.type = 'checkbox';
+  box.checked = Boolean(checked);
+  box.disabled = Boolean(disabled);
+  box.addEventListener('change', () => saveSetting({ [key]: box.checked }));
+
+  row.append(body, box);
+  return row;
+}
+
+/**
+ * A row that is a dropdown.
+ *
+ * `missing` is the red state: the value in settings.json is not among the
+ * options, because whatever it names is not installed any more. The value stays
+ * selected rather than being silently swapped for the first thing in the list —
+ * the app already does that for models when it can, and where it cannot, saying
+ * so is more useful than pretending.
+ */
+function selectRow({ title, hint, alert: alertText, note, ok, options, value, missing, disabled, onPick }) {
+  const row = el('div', `row${missing ? ' missing' : ''}`);
+  const body = el('span', 'row-body');
+  body.append(el('span', 'row-title', title));
+  if (hint) body.append(el('span', 'row-hint', hint));
+  if (alertText) body.append(el('span', missing ? 'row-alert' : 'row-hint', alertText));
+  if (note) body.append(el('span', 'row-hint', note));
+  if (ok) body.append(el('span', 'row-ok', ok));
+
+  const picker = el('select', 'control');
+  picker.disabled = Boolean(disabled) || options.length === 0;
+  for (const option of options) {
+    const node = el('option', '', option.label);
+    node.value = option.value;
+    node.selected = option.value === value;
+    picker.append(node);
+  }
+  picker.addEventListener('change', () => onPick(picker.value));
+
+  row.append(body, picker);
+  return row;
+}
+
+/** A row whose control is a button: a folder to pick, an app to start, a list to edit. */
+function buttonRow({ title, hint, alert: alertText, ok, value, missing, label, primary, disabled, onClick }) {
+  const row = el('div', `row${missing ? ' missing' : ''}`);
+  const body = el('span', 'row-body');
+  body.append(el('span', 'row-title', title));
+  if (value) body.append(el('span', 'value', value));
+  if (hint) body.append(el('span', 'row-hint', hint));
+  if (alertText) body.append(el('span', missing ? 'row-alert' : 'row-hint', alertText));
+  if (ok) body.append(el('span', 'row-ok', ok));
+
+  const button = el('button', `button${primary ? ' primary' : ''}`, label);
+  button.type = 'button';
+  button.disabled = Boolean(disabled);
+  button.addEventListener('click', () => onClick(button));
+
+  row.append(body, button);
+  return row;
+}
+
+const group = (frag, heading, rows) => {
+  frag.append(el('h2', '', heading));
+  const box = el('div', 'rows');
+  box.append(...rows);
+  frag.append(box);
+};
+
+/**
+ * "Default: x", but only once the value has been moved off it.
+ *
+ * A pane that reprinted the default beside every row would be noise; the useful
+ * moment is the one where a setting is no longer what the app shipped with, and
+ * the person reading it wants to know what it used to be.
+ */
+const defaultNote = (value, fallback, label = fallback) =>
+  fallback === undefined || value === fallback ? '' : `Default: ${label}`;
+
+/** Options for a model dropdown, keeping a value that is no longer installed. */
+function modelOptions(names, current, suffix = () => '') {
+  const options = names.map((name) => ({ value: name, label: `${name}${suffix(name)}` }));
+  if (current && !names.includes(current)) {
+    options.unshift({ value: current, label: `${current} — not installed` });
+  }
+  return options;
+}
+
+function recordingSection(frag, s) {
+  const noSource = !s.settings.captureMic && !s.settings.captureSystem;
+  group(frag, 'Recording', [
+    toggleRow({
+      title: 'Suggest recording when audio is detected',
+      hint: 'Minarrador watches the levels while idle and offers to start a meeting.',
+      key: 'suggestOnAudio',
+      checked: s.settings.suggestOnAudio,
+    }),
+    toggleRow({
+      title: 'Start Minarrador at login',
+      hint: 'Starts hidden, in the tray.',
+      key: 'startAtLogin',
+      checked: s.settings.startAtLogin,
+    }),
+    toggleRow({
+      title: 'Open the live transcript when recording starts',
+      hint: 'A rough preview while the meeting runs. The saved transcript is a separate, fuller pass.',
+      key: 'liveTranscript',
+      checked: s.settings.liveTranscript,
+    }),
+    toggleRow({
+      title: 'Record the microphone',
+      hint: s.recording ? 'Cannot be changed while a meeting is recording.' : 'Your side of the conversation.',
+      alert: noSource ? 'Both sources are off — a recording would capture nothing.' : '',
+      key: 'captureMic',
+      checked: s.settings.captureMic,
+      disabled: s.recording,
+    }),
+    toggleRow({
+      title: 'Record system audio',
+      hint: s.recording ? 'Cannot be changed while a meeting is recording.' : 'Everyone else, as your speakers hear them.',
+      alert: noSource ? 'Both sources are off — a recording would capture nothing.' : '',
+      key: 'captureSystem',
+      checked: s.settings.captureSystem,
+      disabled: s.recording,
+    }),
+  ]);
+}
+
+function liveSection(frag, s) {
+  const whisper = s.whisper;
+  const installed = Boolean(whisper?.available);
+  const wantsWhisper = s.settings.liveEngine === 'whisper';
+  const models = whisper?.models ?? [];
+  const model = whisper?.model ?? '';
+
+  group(frag, 'Live transcript', [
+    selectRow({
+      title: 'Engine',
+      hint: 'whisper.cpp is a local speech recogniser and runs several times faster than the audio model.',
+      alert: wantsWhisper && !installed ? 'whisper.cpp is not installed — falling back to Ollama. Run npm run whisper:setup.' : '',
+      missing: wantsWhisper && !installed,
+      options: [
+        { value: 'whisper', label: installed ? `whisper.cpp — ${model}` : 'whisper.cpp — not installed' },
+        { value: 'ollama', label: `Ollama — ${s.settings.transcribeModel}` },
+      ],
+      value: s.settings.liveEngine,
+      note: defaultNote(s.settings.liveEngine, s.defaults.liveEngine, 'whisper.cpp'),
+      onPick: (value) => saveSetting({ liveEngine: value }),
+    }),
+    selectRow({
+      title: 'Whisper model',
+      hint: 'Bigger weights are more accurate and slower. Captions trail further behind as they grow.',
+      alert: installed ? '' : 'No GGML models — run npm run whisper:setup to fetch one.',
+      note: defaultNote(model, s.defaults.whisperModel),
+      missing: !installed,
+      options: modelOptions(models, model),
+      value: model,
+      disabled: !installed,
+      onPick: (value) => saveSetting({ whisperModel: value }),
+    }),
+    selectRow({
+      title: 'Whisper decode threads',
+      hint: 'The large models need more than the automatic share to keep up with the room. Applies to the next segment.',
+      note: defaultNote(whisper?.threads ?? 0, s.defaults.whisperThreads, 'automatic'),
+      options: (whisper?.threadChoices ?? [0]).map((n) => ({
+        value: String(n),
+        label: n === 0 ? `Automatic (${whisper?.effectiveThreads ?? 4})` : `${n} threads`,
+      })),
+      value: String(whisper?.threads ?? 0),
+      disabled: !installed,
+      onPick: (value) => saveSetting({ whisperThreads: Number(value) }),
+    }),
+  ]);
+}
+
+function ollamaSection(frag, s) {
+  const { models, audioModels, ollama } = s;
+  const audio = new Set(audioModels);
+  const missingTranscribe = !models.includes(s.settings.transcribeModel);
+  const missingSummary = !models.includes(s.settings.summaryModel);
+
+  group(frag, 'Transcription and notes', [
+    buttonRow({
+      title: 'Ollama',
+      value: ollama.host,
+      hint: 'Writes the saved transcript and the notes. Nothing is sent anywhere else.',
+      alert: ollama.up
+        ? ''
+        : ollama.installed
+          ? 'Not running. A meeting stopped now would keep its audio but get no notes.'
+          : 'Not installed on this machine. Get it from https://ollama.com/download, then pull a model.',
+      ok: ollama.up ? `Running · ${models.length} model${models.length === 1 ? '' : 's'} installed` : '',
+      missing: !ollama.up,
+      label: ollama.checking ? 'Starting…' : 'Open Ollama',
+      primary: !ollama.up,
+      disabled: ollama.up || ollama.checking || !ollama.installed,
+      onClick: async () => {
+        // The main process starts the daemon and waits for it to answer, which
+        // takes seconds; the pane redraws from settings:changed either way.
+        view.settings = await window.library.settings.openOllama();
+        if (view.mode === 'settings') renderSettings();
+      },
+    }),
+    selectRow({
+      title: 'Transcription model',
+      hint: 'Reads the saved recording after a meeting, and drives the live preview when whisper.cpp is not in use.',
+      alert: models.length ? '' : 'No models to choose from while Ollama is unreachable.',
+      missing: missingTranscribe,
+      note: defaultNote(s.settings.transcribeModel, s.defaults.transcribeModel),
+      options: modelOptions(models, s.settings.transcribeModel, (name) => (audio.has(name) ? ' · audio' : '')),
+      value: s.settings.transcribeModel,
+      disabled: !models.length,
+      onPick: (value) => saveSetting({ transcribeModel: value }),
+    }),
+    selectRow({
+      title: 'Notes model',
+      hint: 'Turns the transcript into the summary, decisions and action items.',
+      alert: models.length ? '' : 'No models to choose from while Ollama is unreachable.',
+      missing: missingSummary,
+      note: defaultNote(s.settings.summaryModel, s.defaults.summaryModel),
+      options: modelOptions(models, s.settings.summaryModel),
+      value: s.settings.summaryModel,
+      disabled: !models.length,
+      onPick: (value) => saveSetting({ summaryModel: value }),
+    }),
+  ]);
+}
+
+function storageSection(frag, s) {
+  group(frag, 'Storage and shorthands', [
+    buttonRow({
+      title: 'Meetings folder',
+      value: s.settings.notesDir,
+      hint: 'One folder per recording: the audio, the transcript, the notes and the PDF brief.',
+      alert: s.notesDirExists ? '' : 'This folder does not exist any more. Pick another, or the library stays empty.',
+      missing: !s.notesDirExists,
+      label: 'Change…',
+      onClick: async () => {
+        view.settings = await window.library.settings.chooseNotesFolder();
+        if (view.mode === 'settings') renderSettings();
+      },
+    }),
+    buttonRow({
+      title: 'Quick copy',
+      hint: s.snippetCount
+        ? `${s.snippetCount} shorthand${s.snippetCount === 1 ? '' : 's'} at the top of the tray menu, one click to the clipboard.`
+        : 'Phrases you type all day, one click from the tray menu to the clipboard.',
+      alert: s.snippetCount ? '' : 'Nothing saved yet — the tray section is empty until you add one.',
+      label: 'Edit quick copy…',
+      onClick: () => window.library.settings.editQuickCopy(),
+    }),
+  ]);
+}
+
+function renderSettings() {
+  const s = view.settings;
+  const doc = el('div', 'doc settings');
+  doc.append(el('h1', '', 'Settings'));
+  if (!s) {
+    doc.append(el('p', 'settings-lead', 'Reading the settings…'));
+    readerEl.replaceChildren(doc);
+    return;
+  }
+
+  doc.append(
+    el(
+      'p',
+      'settings-lead',
+      'Everything Minarrador uses runs on this machine. Anything marked in red is set to something that is not there.',
+    ),
+  );
+
+  const frag = document.createDocumentFragment();
+  recordingSection(frag, s);
+  liveSection(frag, s);
+  ollamaSection(frag, s);
+  storageSection(frag, s);
+  doc.append(frag);
+  readerEl.replaceChildren(doc);
+}
+
+/** Writes one setting and redraws from the state the main process wrote. */
+async function saveSetting(patch) {
+  view.settings = await window.library.settings.set(patch);
+  if (view.mode === 'settings') renderSettings();
+}
+
+async function openSettings() {
+  view.mode = 'settings';
+  settingsEl.setAttribute('aria-pressed', 'true');
+  renderSettings(); // whatever was last read, so the pane is never blank
+  view.settings = await window.library.settings.get();
+  if (view.mode === 'settings') renderSettings();
+}
+
+/** Back to the archive, onto whichever meeting was open before. */
+function closeSettings() {
+  view.mode = 'reader';
+  settingsEl.setAttribute('aria-pressed', 'false');
+  if (view.meeting) renderReader(view.meeting);
+  else readerEl.replaceChildren(placeholder);
+}
+
+// ------------------------------------------------------------------ recording
+
+/**
+ * The record button, which is the only thing in this window that acts on the
+ * world rather than reading it.
+ *
+ * Its state comes from the rail — `activity.recordingId` is the folder the main
+ * process is recording into — so a meeting started from the tray shows up here
+ * as a Stop button without this window being told anything special.
+ */
+function renderRecordButton() {
+  const on = Boolean(view.activity.recordingId);
+  const pending = view.recordWanted !== null && view.recordWanted !== on;
+  if (!pending) {
+    view.recordWanted = null;
+    clearTimeout(recordTimer);
+  }
+
+  recordEl.classList.toggle('stop', on);
+  recordEl.disabled = pending;
+  recordGlyphEl.textContent = on ? '■' : '+';
+  recordLabelEl.textContent = pending
+    ? view.recordWanted
+      ? 'Starting…'
+      : 'Stopping…'
+    : on
+      ? 'Stop recording'
+      : 'New recording';
+  recordEl.title = on ? 'Stop the meeting being recorded' : 'Start recording a meeting';
+}
+
+recordEl.addEventListener('click', () => {
+  const wanted = !view.activity.recordingId;
+  view.recordWanted = wanted;
+  renderRecordButton();
+  // Nothing here waits for the answer: stopping runs the whole pipeline, and the
+  // confirmation is the folder list changing under us.
+  window.library.record(wanted);
+  clearTimeout(recordTimer);
+  recordTimer = setTimeout(() => {
+    view.recordWanted = null;
+    renderRecordButton();
+  }, RECORD_CONFIRM_MS);
+});
+
 // -------------------------------------------------------------------- loading
 
+/**
+ * Reads a meeting into the reader, if the reader is what is on screen.
+ *
+ * Also called from the refresh path, where the settings pane may well be open —
+ * hence the checks: a pipeline finishing must not throw someone out of the
+ * setting they were changing.
+ */
 async function select(id) {
   view.selected = id;
   for (const row of listEl.querySelectorAll('.card')) {
@@ -377,13 +773,25 @@ async function select(id) {
   // while the window sat there. Fall back to a fresh list rather than a blank.
   if (!meeting) {
     view.selected = null;
-    readerEl.replaceChildren(placeholder);
+    view.meeting = null;
+    if (view.mode === 'reader') readerEl.replaceChildren(placeholder);
     await refresh();
     return;
   }
   if (view.selected !== id) return; // A faster click won.
+  view.meeting = meeting;
+  if (view.mode !== 'reader') return;
   readerEl.scrollTop = 0;
   renderReader(meeting);
+}
+
+/** A click in the rail. The archive is what the rail is for, so it takes the pane back. */
+function openMeeting(id) {
+  if (view.mode === 'settings') {
+    view.mode = 'reader';
+    settingsEl.setAttribute('aria-pressed', 'false');
+  }
+  select(id);
 }
 
 /**
@@ -398,6 +806,9 @@ async function refresh() {
   if (seq !== listSeq) return; // A later query already answered.
   view.meetings = meetings;
   view.activity = activity;
+  // The record button reads its state from here, so a meeting started from the
+  // tray flips it without this window being told anything else.
+  renderRecordButton();
   if (view.selected && !meetings.some((m) => m.id === view.selected)) {
     // Filtered out by the current search, not gone: keep it on screen, just
     // unhighlighted in a rail that no longer lists it.
@@ -424,14 +835,18 @@ function step(delta) {
   if (!ids.length) return;
   const next = ids[Math.min(ids.length - 1, Math.max(0, ids.indexOf(view.selected) + delta))];
   if (next === view.selected) return;
-  select(next);
+  openMeeting(next);
   listEl.querySelector('.card.selected')?.scrollIntoView({ block: 'nearest' });
 }
 
 document.addEventListener('keydown', (e) => {
   if (e.key === 'Escape') {
-    // Escape clears a search before it closes the window: the first press is
-    // almost always "show me everything again".
+    // Escape backs out one layer at a time — the settings pane, then a search,
+    // then the window itself. Closing outright would be the wrong guess twice.
+    if (view.mode === 'settings') {
+      closeSettings();
+      return;
+    }
     if (queryEl.value) {
       queryEl.value = '';
       view.query = '';
@@ -457,13 +872,32 @@ document.addEventListener('keydown', (e) => {
 document.getElementById('folder').addEventListener('click', () => window.library.openNotesFolder());
 document.getElementById('minimize').addEventListener('click', () => window.library.minimize());
 document.getElementById('close').addEventListener('click', () => window.library.close());
+settingsEl.addEventListener('click', () => (view.mode === 'settings' ? closeSettings() : openSettings()));
 
 // A recording that just finished belongs at the top of the list without anyone
 // having to reopen the window.
-window.library.onChanged(() => {
-  refresh();
+window.library.onChanged(async () => {
+  await refresh();
   if (view.selected) select(view.selected);
+  // Starting or stopping a meeting also decides whether the capture sources can
+  // be changed, which only the settings pane shows.
+  if (view.mode === 'settings') {
+    view.settings = await window.library.settings.get();
+    if (view.mode === 'settings') renderSettings();
+  }
 });
+
+// A model list arriving, or Ollama coming up sixty seconds after someone
+// started it, is the whole reason this pane can be trusted to say what is
+// missing — so it redraws rather than waiting to be reopened.
+window.library.settings.onChanged(async () => {
+  if (view.mode !== 'settings') return;
+  view.settings = await window.library.settings.get();
+  if (view.mode === 'settings') renderSettings();
+});
+
+// The tray's Settings… item, which opens this window straight onto the pane.
+window.library.onShowSettings(() => openSettings());
 
 refresh().then(() => {
   // Open the newest meeting on launch: the window is almost always opened to
