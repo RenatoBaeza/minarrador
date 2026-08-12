@@ -19,13 +19,14 @@ function tmpDir(t) {
  * Writes a meeting folder. Only the artefacts named actually appear, so a test
  * can build the half-finished folders the library has to explain.
  */
-function meeting(root, id, { notes, meta, transcript, transcriptJson, audio = true, extra = {} } = {}) {
+function meeting(root, id, { notes, meta, transcript, liveTranscript, transcriptJson, audio = true, extra = {} } = {}) {
   const dir = path.join(root, id);
   fs.mkdirSync(dir, { recursive: true });
   if (audio) fs.writeFileSync(path.join(dir, FILES.audio), 'RIFF');
   if (notes) fs.writeFileSync(path.join(dir, FILES.notesJson), JSON.stringify(notes));
   if (meta) fs.writeFileSync(path.join(dir, FILES.meta), JSON.stringify(meta));
   if (transcript !== undefined) fs.writeFileSync(path.join(dir, FILES.transcript), transcript);
+  if (liveTranscript !== undefined) fs.writeFileSync(path.join(dir, FILES.liveTranscript), liveTranscript);
   if (transcriptJson) fs.writeFileSync(path.join(dir, FILES.transcriptJson), JSON.stringify(transcriptJson));
   for (const [name, body] of Object.entries(extra)) fs.writeFileSync(path.join(dir, name), body);
   return dir;
@@ -153,6 +154,81 @@ test('readMeeting falls back to paragraphs when there is no segment file', (t) =
     { startSeconds: null, text: 'One.' },
     { startSeconds: null, text: 'Two.' },
   ]);
+});
+
+// The live preview is the only text a meeting whose pipeline never ran has, so
+// everything that reads a transcript has to find it — otherwise keeping it on
+// disk would change nothing the user can see.
+
+test('readMeeting falls back to the live transcript, one caption per line', (t) => {
+  const root = tmpDir(t);
+  meeting(root, '2026-08-11_10-00-00', {
+    liveTranscript: 'So where did we land on pricing?\nWe did not.\n\n',
+    extra: { 'UNPROCESSED.txt': 'quit mid-recording' },
+  });
+
+  const detail = readMeeting(root, '2026-08-11_10-00-00');
+  assert.equal(detail.transcriptSource, 'live');
+  assert.deepEqual(detail.transcript, [
+    { startSeconds: null, text: 'So where did we land on pricing?' },
+    { startSeconds: null, text: 'We did not.' },
+  ]);
+});
+
+test('the pipeline transcript wins over the live one wherever both exist', (t) => {
+  const root = tmpDir(t);
+  meeting(root, '2026-08-11_10-00-00', {
+    notes: NOTES,
+    transcript: 'The careful pass.',
+    liveTranscript: 'The rough one.',
+  });
+
+  const detail = readMeeting(root, '2026-08-11_10-00-00');
+  assert.equal(detail.transcriptSource, 'pipeline');
+  assert.deepEqual(detail.transcript, [{ startSeconds: null, text: 'The careful pass.' }]);
+  assert.equal(
+    openTarget(root, '2026-08-11_10-00-00', 'transcript'),
+    path.join(root, '2026-08-11_10-00-00', FILES.transcript),
+  );
+});
+
+test('a live transcript is searched and previewed like any other', (t) => {
+  const root = tmpDir(t);
+  meeting(root, '2026-08-11_10-00-00', { liveTranscript: 'We should revisit pricing next week.' });
+
+  const [card] = listMeetings(root);
+  assert.equal(card.preview, 'We should revisit pricing next week.');
+  assert.equal(card.files.transcript, true);
+  assert.equal(card.transcriptSource, 'live');
+
+  const hits = listMeetings(root, { query: 'pricing' });
+  assert.deepEqual(hits.map((m) => m.id), ['2026-08-11_10-00-00']);
+  assert.equal(
+    openTarget(root, '2026-08-11_10-00-00', 'transcript'),
+    path.join(root, '2026-08-11_10-00-00', FILES.liveTranscript),
+  );
+});
+
+test('readMeeting quotes the sentence in ERROR.txt, not the stack under it', (t) => {
+  const root = tmpDir(t);
+  meeting(root, '2026-08-11_10-00-00', {
+    extra: {
+      'ERROR.txt':
+        'Processing failed at 2026-08-11T11:00:00.000Z\n\n' +
+        'Error: Ollama is not reachable at http://127.0.0.1:11434\n' +
+        '    at runPipeline (/app/src/main/pipeline.js:1:1)\n',
+    },
+  });
+
+  const detail = readMeeting(root, '2026-08-11_10-00-00');
+  assert.equal(detail.status, 'failed');
+  assert.equal(detail.error, 'Ollama is not reachable at http://127.0.0.1:11434');
+});
+
+test('readMeeting carries no error line for a meeting that did not fail', (t) => {
+  const root = tmpDir(t);
+  meeting(root, '2026-08-11_10-00-00', { notes: NOTES });
+  assert.equal(readMeeting(root, '2026-08-11_10-00-00').error, '');
 });
 
 test('readMeeting hands the reader the structured notes', (t) => {

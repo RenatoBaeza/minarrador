@@ -8,6 +8,9 @@ Features and fixes ranked by impact per unit of work, from a read of `src/main/`
 
 ## Tier 1 — these break the app's promise
 
+**All four are implemented.** Each item keeps its original argument below, with
+what shipped noted underneath it.
+
 ### 1. There is no way to re-run notes from inside the app
 
 `main.js:488`, `renderer/library.js:266,272` and every `UNPROCESSED.txt` tell the
@@ -22,6 +25,14 @@ Add a `library:reprocess` IPC channel plus a **Generate notes** button on the
 reader's `notesNotice`, and a "Retry notes…" item in the tray. Highest
 impact/effort ratio in this document.
 
+> **Done.** `library:reprocess` → `reprocessMeeting()` in `main.js`, a
+> **Generate notes** / **Try again** button in the reader's notice, and
+> *Generate Notes for …* in the tray on the newest meeting still owed them
+> (`state.retry`). The reader now quotes the first line of `ERROR.txt` instead
+> of pointing at the file, `processMeeting` clears `ERROR.txt`/`UNPROCESSED.txt`
+> at the start of a run so a folder never carries a stale explanation, and both
+> notes lead with the in-app route rather than the npm command.
+
 ### 2. Use whisper.cpp for the saved transcript, not just the live preview
 
 `pipeline.js:38` transcribes exclusively via `ollama.transcribe` — 60 chunked
@@ -35,6 +46,13 @@ transcribes in ~8 minutes instead of ~an hour, with better accuracy — and **th
 pipeline then only needs Ollama for the summary step**, which pairs with item 1
 to make Ollama-down a partial failure instead of a total one.
 
+> **Done.** `transcribeEngineFor()` picks the engine, `runPipeline` takes a
+> `whisper` option, and the Ollama reachability check moved: up front only when
+> Ollama is also the transcriber, then again before the notes — so a daemon that
+> is down now costs the notes and not the transcript. A `transcribeEngine`
+> setting (**Settings → Saved transcript engine**) can force either engine, and
+> `npm run pipeline` takes `--engine`.
+
 ### 3. The live transcript is thrown away
 
 `LiveTranscriber` emits text straight to the transcript window (`main.js:790`)
@@ -45,6 +63,12 @@ and the user is left with audio only.
 Appending each line to `live-transcript.txt` in the meeting folder is ~10 lines
 and changes the worst case from "a WAV" to "a rough transcript".
 
+> **Done.** `appendLiveTranscript()` writes each line as it is produced, into
+> `state.liveDir` so the segment still decoding when Stop is pressed lands in
+> the right meeting. `library.js` reads it wherever `transcript.txt` is missing
+> — list, preview, search, reader and *Open transcript* — and the reader labels
+> those lines as the rough preview they are.
+
 ### 4. No global hotkey, and no confirmation that recording started
 
 No `globalShortcut` anywhere in the repo. Starting a recording during the first
@@ -54,6 +78,12 @@ feedback is a small icon colour change.
 
 A `Ctrl+Shift+R` toggle plus a start toast is a couple of hours and changes how
 the app feels more than anything else here.
+
+> **Done.** `applyHotkey()` registers a toggle from `HOTKEY_CHOICES` (default
+> `Ctrl+Shift+R`, or `off`), chosen in **Settings → Start and stop shortcut**,
+> which marks the row red when another application already holds the
+> combination — `globalShortcut.register` reports that by returning false rather
+> than throwing. Both ends of a recording now notify.
 
 ---
 
@@ -125,6 +155,9 @@ need to ride along on `library:changed`.
 
 ## Suggested starting point
 
-Items **1 + 3** together are roughly an afternoon and eliminate the "lost
-meeting" class of failure entirely. Item **2** is the next-largest win and is
-mostly wiring code that already exists.
+Tier 1 is done: the "lost meeting" class of failure is gone — a folder now
+either holds finished notes, or holds the audio, a rough transcript and a button
+that finishes the job.
+
+Next is item **5** (two-channel recording), which is the largest single jump
+left in notes quality and the largest job in this document.

@@ -3,7 +3,7 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
 
-const { coerce } = require('../src/main/settings');
+const { coerce, HOTKEY_CHOICES } = require('../src/main/settings');
 
 /** The shape defaults() produces, without needing Electron's path lookups. */
 const BASE = Object.freeze({
@@ -17,10 +17,12 @@ const BASE = Object.freeze({
   startAtLogin: true,
   liveTranscript: true,
   liveEngine: 'whisper',
+  transcribeEngine: 'whisper',
   whisperModel: 'ggml-base.bin',
   whisperRoot: '',
   whisperThreads: 0,
   chunkSeconds: 60,
+  hotkey: 'CommandOrControl+Shift+R',
 });
 
 test('coerce returns the defaults when there is nothing stored', () => {
@@ -100,6 +102,24 @@ test('coerce keeps liveEngine to the engines that exist', () => {
   // A typo here would otherwise reach a switch that silently picks a branch.
   assert.equal(coerce({ liveEngine: 'whispr' }, BASE).liveEngine, 'whisper');
   assert.equal(coerce({ liveEngine: 42 }, BASE).liveEngine, 'whisper');
+});
+
+test('coerce keeps transcribeEngine to the engines that exist', () => {
+  assert.equal(coerce({ transcribeEngine: 'ollama' }, BASE).transcribeEngine, 'ollama');
+  assert.equal(coerce({ transcribeEngine: 'whisper.cpp' }, BASE).transcribeEngine, 'whisper');
+});
+
+test('coerce accepts only shortcuts the app is willing to register', () => {
+  for (const choice of HOTKEY_CHOICES) {
+    assert.equal(coerce({ hotkey: choice }, BASE).hotkey, choice);
+  }
+  // A global shortcut is claimed against the whole desktop, so a made-up one is
+  // either dead or steals a combination from another application.
+  assert.equal(coerce({ hotkey: 'Ctrl+Shift+R' }, BASE).hotkey, BASE.hotkey);
+  assert.equal(coerce({ hotkey: '' }, BASE).hotkey, BASE.hotkey);
+  assert.equal(coerce({ hotkey: false }, BASE).hotkey, BASE.hotkey);
+  // 'off' is a value rather than an empty string precisely so it survives this.
+  assert.equal(coerce({ hotkey: 'off' }, BASE).hotkey, 'off');
 });
 
 test('coerce clamps whisperThreads to something a machine can run', () => {

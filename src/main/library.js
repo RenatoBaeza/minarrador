@@ -20,6 +20,8 @@ const PREVIEW_BYTES = 4096;
 const SNIPPET_PAD = 70;
 /** Longest query worth honouring; past this it is a paste, not a search. */
 const MAX_QUERY = 120;
+/** How much of ERROR.txt the reader quotes before it stops being a sentence. */
+const ERROR_CHARS = 400;
 
 const readJson = (file) => {
   try {
@@ -90,6 +92,24 @@ function meetingDir(notesDir, id) {
 }
 
 /**
+ * The best transcript a folder holds, and which one it is.
+ *
+ * transcript.txt is the pipeline's careful pass and always wins. The live
+ * preview is the fallback, and it is the reason a meeting whose pipeline never
+ * ran is still readable at all — it was written line by line while the meeting
+ * happened, so it exists exactly in the case where nothing else does.
+ *
+ * @returns {{ file: string, source: 'pipeline'|'live'|'none' }}
+ */
+function transcriptSource(dir) {
+  const full = path.join(dir, FILES.transcript);
+  if (fs.existsSync(full)) return { file: full, source: 'pipeline' };
+  const live = path.join(dir, FILES.liveTranscript);
+  if (fs.existsSync(live)) return { file: live, source: 'live' };
+  return { file: '', source: 'none' };
+}
+
+/**
  * Whether a folder in the notes directory is a meeting at all.
  *
  * The notes folder belongs to the user, who may well keep other things in it.
@@ -129,10 +149,9 @@ function describeMeeting(dir) {
     }
   }
 
-  const transcriptFile = path.join(dir, FILES.transcript);
-  const hasTranscript = has(FILES.transcript);
+  const transcript = transcriptSource(dir);
   const summary = Array.isArray(notes?.summary) ? notes.summary.filter((s) => typeof s === 'string') : [];
-  const preview = clip(summary[0] ?? (hasTranscript ? head(transcriptFile) : ''));
+  const preview = clip(summary[0] ?? (transcript.file ? head(transcript.file) : ''));
 
   const failed = has('ERROR.txt');
   const status = notes ? 'ready' : failed ? 'failed' : has('UNPROCESSED.txt') ? 'unprocessed' : 'pending';
@@ -146,9 +165,11 @@ function describeMeeting(dir) {
     preview,
     decisions: Array.isArray(notes?.decisions) ? notes.decisions.length : 0,
     actionItems: Array.isArray(notes?.action_items) ? notes.action_items.length : 0,
+    /** 'pipeline' | 'live' | 'none' — a rough transcript is worth labelling as one. */
+    transcriptSource: transcript.source,
     files: {
       audio: has(FILES.audio),
-      transcript: hasTranscript,
+      transcript: transcript.source !== 'none',
       notes: has(FILES.notes),
       pdf: has(FILES.pdf),
     },
@@ -166,7 +187,7 @@ function describeMeeting(dir) {
  */
 function findInMeeting(dir, card, query) {
   const needle = query.toLowerCase();
-  const transcript = card.files.transcript ? readText(path.join(dir, FILES.transcript)) : '';
+  const transcript = readText(transcriptSource(dir).file);
   const haystacks = [
     { text: transcript, quote: true },
     { text: card.title, quote: false },
@@ -239,11 +260,15 @@ function listMeetings(notesDir, { query = '' } = {}) {
  * Splits a transcript into the lines the reader shows.
  *
  * transcript.json carries the chunk boundaries the pipeline used, which is what
- * gives each line a timestamp. Without it — a folder from an older version, or
- * one where only the .txt survived — paragraphs stand in, untimed.
+ * gives each line a timestamp. Without it — a folder from an older version, one
+ * where only the .txt survived, or one where the pipeline never ran and the live
+ * preview is all there is — the file's own line breaks stand in, untimed.
+ *
+ * @param {'pipeline'|'live'|'none'} source which file is being read; the live
+ *   preview writes one caption per line, the pipeline one paragraph per chunk
  */
-function transcriptLines(dir) {
-  const parsed = readJson(path.join(dir, FILES.transcriptJson));
+function transcriptLines(dir, file, source) {
+  const parsed = source === 'pipeline' ? readJson(path.join(dir, FILES.transcriptJson)) : null;
   const segments = Array.isArray(parsed?.segments) ? parsed.segments : null;
   if (segments) {
     return segments
@@ -254,11 +279,26 @@ function transcriptLines(dir) {
       }));
   }
 
-  return readText(path.join(dir, FILES.transcript))
-    .split(/\n{2,}/)
+  return readText(file)
+    .split(source === 'live' ? /\n+/ : /\n{2,}/)
     .map((block) => block.trim())
     .filter(Boolean)
     .map((text) => ({ startSeconds: null, text }));
+}
+
+/**
+ * The one sentence in ERROR.txt worth putting in the reader.
+ *
+ * The file is written as "Processing failed at <when>", a blank line, then the
+ * stack. The first line of that stack is what went wrong; the frames under it
+ * belong in the file rather than in a window someone is reading notes in.
+ */
+function errorSummary(dir) {
+  const raw = head(path.join(dir, 'ERROR.txt'), PREVIEW_BYTES);
+  if (!raw.trim()) return '';
+  const body = raw.split(/\n\s*\n/).slice(1).join('\n').trim() || raw;
+  const first = body.split('\n').find((line) => line.trim()) ?? '';
+  return clip(first.trim().replace(/^Error:\s*/, ''), ERROR_CHARS);
 }
 
 /**
@@ -277,6 +317,7 @@ function readMeeting(notesDir, id) {
   const card = describeMeeting(dir);
   const notes = readJson(path.join(dir, FILES.notesJson)) ?? {};
   const meta = readJson(path.join(dir, FILES.meta)) ?? {};
+  const transcript = transcriptSource(dir);
 
   const decisions = (Array.isArray(notes.decisions) ? notes.decisions : [])
     .map((d) => ({ decision: String(d?.decision ?? ''), context: String(d?.context ?? '') }))
@@ -290,7 +331,12 @@ function readMeeting(notesDir, id) {
     summary: (Array.isArray(notes.summary) ? notes.summary : []).filter((s) => typeof s === 'string' && s.trim()),
     decisions,
     actionItems,
-    transcript: transcriptLines(dir),
+    transcript: transcriptLines(dir, transcript.file, transcript.source),
+    // What went wrong, quoted rather than pointed at: "ERROR.txt says why" asks
+    // someone to leave the window to read one sentence, and that sentence is
+    // almost always the reason the Generate notes button beneath it will fail
+    // too — usually Ollama being down.
+    error: card.status === 'failed' ? errorSummary(dir) : '',
     sources: {
       mic: Boolean(meta.sources?.mic),
       system: Boolean(meta.sources?.system),
@@ -299,19 +345,25 @@ function readMeeting(notesDir, id) {
       transcribe: String(meta.models?.transcribe ?? ''),
       summary: String(meta.models?.summary ?? ''),
     },
-    // Only ever shown, never joined onto: the window opens files by asking for
-    // a named target, so it has no use for a path of its own.
-    folder: dir,
+    // No folder path. The reader used to print one, in the instruction to run
+    // `npm run pipeline` by hand that the Generate notes button replaced — and
+    // the window opens files by naming a target, so it has no other use for one.
   };
 }
 
-/** Files the window is allowed to hand to the shell, by name. */
+/**
+ * Files the window is allowed to hand to the shell, by name.
+ *
+ * `transcript` is a list because a meeting can hold either of two, and the
+ * reader offers the same button for both — the pipeline's pass when it exists,
+ * the live preview when it is all there is.
+ */
 const OPEN_TARGETS = {
-  folder: '',
-  pdf: FILES.pdf,
-  notes: FILES.notes,
-  transcript: FILES.transcript,
-  audio: FILES.audio,
+  folder: [],
+  pdf: [FILES.pdf],
+  notes: [FILES.notes],
+  transcript: [FILES.transcript, FILES.liveTranscript],
+  audio: [FILES.audio],
 };
 
 /**
@@ -326,8 +378,17 @@ function openTarget(notesDir, id, target) {
   // hasOwn, not `in`: every object inherits a 'constructor', and looking one up
   // would hand path.join a function instead of a file name.
   if (!dir || typeof target !== 'string' || !Object.hasOwn(OPEN_TARGETS, target)) return null;
-  const file = OPEN_TARGETS[target] ? path.join(dir, OPEN_TARGETS[target]) : dir;
-  return fs.existsSync(file) ? file : null;
+  const names = OPEN_TARGETS[target];
+  if (!names.length) return fs.existsSync(dir) ? dir : null;
+  return names.map((name) => path.join(dir, name)).find((file) => fs.existsSync(file)) ?? null;
 }
 
-module.exports = { listMeetings, readMeeting, describeMeeting, meetingDir, openTarget, OPEN_TARGETS };
+module.exports = {
+  listMeetings,
+  readMeeting,
+  describeMeeting,
+  meetingDir,
+  openTarget,
+  transcriptSource,
+  OPEN_TARGETS,
+};

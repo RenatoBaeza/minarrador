@@ -45,6 +45,16 @@ const FILES = {
   audio: 'audio.wav',
   transcript: 'transcript.txt',
   transcriptJson: 'transcript.json',
+  /**
+   * The live preview, kept as it is produced.
+   *
+   * Rough by construction and always superseded by `transcript`, which is a
+   * separate careful pass over the saved WAV — but it is written line by line
+   * during the meeting, so it is the one piece of text that survives a pipeline
+   * that never ran. That turns the worst case from "a WAV" into "a rough
+   * transcript", which is why it is a first-class artefact rather than a log.
+   */
+  liveTranscript: 'live-transcript.txt',
   notes: 'notes.md',
   notesJson: 'notes.json',
   html: 'notes.html',

@@ -20,27 +20,75 @@ const SILENCE_RMS = 0.004;
 /** Above this many characters we summarise in passes instead of one shot. */
 const CONDENSE_THRESHOLD = 48000;
 const CONDENSE_BLOCK = 40000;
+/** How much of the previous chunk whisper is given as decoder context. */
+const PROMPT_CHARS = 300;
 
 // ------------------------------------------------------------------ transcribe
 
-async function transcribe(dir, config, { onProgress, signal, ollama }) {
+/**
+ * Which engine transcribes the saved recording.
+ *
+ * whisper.cpp whenever it is installed and the setting has not been moved off
+ * it. The difference is not marginal: an audio LLM costs roughly a request per
+ * chunk with a model of its own to keep loaded, so an hour of meeting takes
+ * about an hour, while whisper.cpp reads the same hour in a few minutes on
+ * ggml-base — and it is a purpose-built recogniser rather than a model that
+ * occasionally falls into a repetition loop (hence collapseRepeats).
+ *
+ * It also decides how much of the app an unreachable Ollama takes down. With
+ * whisper doing this pass, the daemon is only needed to write the notes — so a
+ * meeting stopped with Ollama down keeps a full transcript, and the notes can be
+ * generated later from the library.
+ */
+function transcribeEngineFor(config, whisper) {
+  return config.transcribeEngine !== 'ollama' && whisper?.available ? 'whisper' : 'ollama';
+}
+
+/** What produced a transcript, as it is recorded in meta.json and the footer. */
+function transcribeEngineLabel(engine, config, whisper) {
+  return engine === 'whisper' ? `whisper.cpp (${path.basename(whisper.model)})` : config.transcribeModel;
+}
+
+/**
+ * How long to allow one whisper request over a chunk of the saved audio.
+ *
+ * The live preview's minute is sized for a few seconds of speech; a chunk here
+ * is a minute of it, and a large model on a modest machine can run slower than
+ * realtime. Scale with the audio rather than letting a slow decode look like a
+ * hung server.
+ */
+const whisperTimeoutMs = (seconds) => Math.max(60_000, Math.round(seconds * 15_000));
+
+/**
+ * @param {object} deps
+ * @param {import('./whisper').WhisperServer} [deps.whisper] when installed and
+ *   configured, this transcribes instead of the Ollama audio model
+ */
+async function transcribe(dir, config, { onProgress, signal, ollama, whisper = null }) {
   const audioPath = path.join(dir, FILES.audio);
   const { pcm, sampleRate, seconds } = readWav(audioPath);
 
+  const engine = transcribeEngineFor(config, whisper);
+  const engineLabel = transcribeEngineLabel(engine, config, whisper);
   const chunks = splitIntoChunks(pcm, sampleRate, config.chunkSeconds ?? 60);
   const segments = [];
+  /** Tail of the last chunk, so a sentence split across two keeps its context. */
+  let tail = '';
 
   for (let i = 0; i < chunks.length; i++) {
     if (signal?.aborted) throw new Error('cancelled');
     const c = chunks[i];
+    const chunkSeconds = c.endSeconds - c.startSeconds;
     let text = '';
     if (rms(c.pcm) >= SILENCE_RMS) {
-      text = await ollama.transcribe(config.transcribeModel, buildWav(c.pcm, sampleRate), {
-        signal,
-        seconds: c.endSeconds - c.startSeconds,
-      });
+      const wav = buildWav(c.pcm, sampleRate);
+      text =
+        engine === 'whisper'
+          ? await whisper.transcribe(wav, { prompt: tail, signal, timeoutMs: whisperTimeoutMs(chunkSeconds) })
+          : await ollama.transcribe(config.transcribeModel, wav, { signal, seconds: chunkSeconds });
+      if (text) tail = text.slice(-PROMPT_CHARS);
     }
-    onProgress?.({ phase: 'transcribing', done: i, total: chunks.length, text });
+    onProgress?.({ phase: 'transcribing', done: i, total: chunks.length, text, engine });
     segments.push({
       index: i,
       startSeconds: Math.round(c.startSeconds * 10) / 10,
@@ -48,7 +96,7 @@ async function transcribe(dir, config, { onProgress, signal, ollama }) {
       text,
     });
   }
-  onProgress?.({ phase: 'transcribing', done: chunks.length, total: chunks.length });
+  onProgress?.({ phase: 'transcribing', done: chunks.length, total: chunks.length, engine });
 
   const transcript = segments
     .map((s) => s.text.trim())
@@ -58,9 +106,13 @@ async function transcribe(dir, config, { onProgress, signal, ollama }) {
   fs.writeFileSync(path.join(dir, FILES.transcript), transcript ? `${transcript}\n` : '');
   fs.writeFileSync(
     path.join(dir, FILES.transcriptJson),
-    JSON.stringify({ model: config.transcribeModel, sampleRate, durationSeconds: Math.round(seconds), segments }, null, 2),
+    JSON.stringify(
+      { model: engineLabel, engine, sampleRate, durationSeconds: Math.round(seconds), segments },
+      null,
+      2,
+    ),
   );
-  return { transcript, segments, durationSeconds: seconds };
+  return { transcript, segments, durationSeconds: seconds, engine, engineLabel };
 }
 
 // ------------------------------------------------------------------- summarise
@@ -259,7 +311,7 @@ function renderMarkdown(notes, meta) {
   L.push('');
 
   const models = modelsOf(meta);
-  L.push('---', '', `<sub>Transcribed with \`${models.transcribe}\` and summarised with \`${models.summary}\` locally via Ollama. Nothing left this machine.</sub>`, '');
+  L.push('---', '', `<sub>Transcribed with \`${models.transcribe}\` and summarised with \`${models.summary}\`, locally. Nothing left this machine.</sub>`, '');
   return L.join('\n');
 }
 
@@ -398,22 +450,42 @@ function fallbackHtml(notes, meta) {
     </tbody>
   </table>
 
-  <footer>Transcribed and summarised locally with Ollama (${esc(modelsOf(meta).transcribe)} / ${esc(modelsOf(meta).summary)}). Nothing left this machine.</footer>
+  <footer>Transcribed and summarised on this machine (${esc(modelsOf(meta).transcribe)} / ${esc(modelsOf(meta).summary)}). Nothing left it.</footer>
 </body>
 </html>`;
 }
 
 // ----------------------------------------------------------------- entry point
 
+/** Fails a run before, or between, the stages that cannot proceed without Ollama. */
+async function requireOllama(ollama, config, what) {
+  if (await ollama.isUp()) return;
+  throw new Error(
+    `Ollama is not reachable at ${config.ollamaHost}, so Minarrador cannot ${what}. ` +
+      'Start it from Settings → Open Ollama, then generate the notes for this recording again.',
+  );
+}
+
 /**
  * Runs the full post-recording chain over a meeting folder that already
  * contains audio.wav.
+ *
+ * @param {{ whisper?: import('./whisper').WhisperServer }} [options] `whisper`
+ *   offers the local recogniser for the transcription stage; without it the
+ *   Ollama audio model does that pass too.
  */
-async function runPipeline(dir, config, { onProgress, signal, meta: metaIn } = {}) {
+async function runPipeline(dir, config, { onProgress, signal, meta: metaIn, whisper = null } = {}) {
   const ollama = new Ollama(config.ollamaHost);
-  if (!(await ollama.isUp())) {
-    throw new Error(`Ollama is not reachable at ${config.ollamaHost}. Start it with "ollama serve" and re-run notes for this folder.`);
-  }
+  const engine = transcribeEngineFor(config, whisper);
+
+  // Ollama writes the notes whichever engine reads the audio, so an unreachable
+  // daemon fails the run in the end either way — but where it fails decides what
+  // survives. Checked up front only when Ollama is also the transcriber, so an
+  // hour of transcription is never spent on a run that was doomed at the start;
+  // checked again after it, because whisper.cpp can take that hour and the
+  // daemon may have gone away during it. In between, transcript.txt is already
+  // on disk.
+  if (engine === 'ollama') await requireOllama(ollama, config, 'transcribe this recording');
 
   const meta = {
     version: 1,
@@ -421,11 +493,13 @@ async function runPipeline(dir, config, { onProgress, signal, meta: metaIn } = {
     durationSeconds: 0,
     sources: {},
     ...(metaIn ?? {}),
-    models: { transcribe: config.transcribeModel, summary: config.summaryModel },
+    models: { transcribe: transcribeEngineLabel(engine, config, whisper), summary: config.summaryModel },
   };
 
-  const { transcript, durationSeconds } = await transcribe(dir, config, { onProgress, signal, ollama });
+  const { transcript, durationSeconds } = await transcribe(dir, config, { onProgress, signal, ollama, whisper });
   meta.durationSeconds = meta.durationSeconds || durationSeconds;
+
+  await requireOllama(ollama, config, 'write the notes');
 
   const notes = await summarise(dir, config, { onProgress, signal, ollama, transcript });
   fs.writeFileSync(path.join(dir, FILES.notes), renderMarkdown(notes, meta));
@@ -440,4 +514,16 @@ async function runPipeline(dir, config, { onProgress, signal, meta: metaIn } = {
   return { dir, notes, pdfPath, transcriptLength: transcript.length };
 }
 
-module.exports = { runPipeline, transcribe, summarise, renderPdf, renderMarkdown, extractJson, normaliseNotes, fmtDuration, fallbackHtml };
+module.exports = {
+  runPipeline,
+  transcribe,
+  transcribeEngineFor,
+  transcribeEngineLabel,
+  summarise,
+  renderPdf,
+  renderMarkdown,
+  extractJson,
+  normaliseNotes,
+  fmtDuration,
+  fallbackHtml,
+};
