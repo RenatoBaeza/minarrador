@@ -44,6 +44,9 @@ const FIELDS = {
   maxRecordingMinutes: Number,
   preventSleep: Boolean,
   hotkey: String,
+  dictateHotkey: String,
+  dictateEngine: String,
+  dictateAutoPaste: Boolean,
   liveEngine: String,
   transcribeEngine: String,
   whisperModel: String,
@@ -127,6 +130,8 @@ contextBridge.exposeInMainWorld('library', {
     installWhisper: (model) => ipcRenderer.invoke('settings:installWhisper', String(model ?? '')),
     cancelSetup: () => ipcRenderer.invoke('settings:cancelSetup'),
     editQuickCopy: () => ipcRenderer.send('settings:editQuickCopy'),
+    /** Opens the dictations archive window, from the settings pane. */
+    openDictations: () => ipcRenderer.send('settings:openDictations'),
     /** A setting changed elsewhere, or an Ollama poll found (or lost) the daemon. */
     onChanged: (fn) => ipcRenderer.on('settings:changed', () => fn()),
   },

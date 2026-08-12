@@ -1243,6 +1243,56 @@ function storageSection(frag, s) {
   ]);
 }
 
+function voiceSection(frag, s) {
+  const dh = s.dictateHotkey ?? { value: 'off', registered: false, choices: [] };
+  const whisperInstalled = Boolean(s.whisper?.available);
+  group(frag, 'Voice input', [
+    selectRow({
+      title: 'Dictate shortcut',
+      hint:
+        'Press it to start the microphone, press it again to stop, transcribe and paste. ' +
+        'Works anywhere in Windows, like the recording shortcut.',
+      alert:
+        dh.value === 'off' || dh.registered ? '' : 'Another application already holds this shortcut. Pick a different one.',
+      missing: dh.value !== 'off' && !dh.registered,
+      options: dh.choices,
+      value: dh.value,
+      onPick: (value) => saveSetting({ dictateHotkey: value }),
+    }),
+    selectRow({
+      title: 'Transcribe with',
+      hint:
+        'Which engine writes the dictated text. The Ollama audio model is the careful pass — the sentence as it was ' +
+        'said; whisper.cpp is the fast one.',
+      alert: !whisperInstalled && s.settings.dictateEngine === 'whisper'
+        ? 'whisper.cpp is not installed — the audio model will be used instead.'
+        : '',
+      missing: !whisperInstalled && s.settings.dictateEngine === 'whisper',
+      options: [
+        { value: 'ollama', label: `Ollama — ${s.settings.transcribeModel}` },
+        { value: 'whisper', label: whisperInstalled ? `whisper.cpp — ${s.whisper.model}` : 'whisper.cpp — not installed' },
+      ],
+      value: s.settings.dictateEngine,
+      note: defaultNote(s.settings.dictateEngine, s.defaults.dictateEngine, 'Ollama'),
+      onPick: (value) => saveSetting({ dictateEngine: value }),
+    }),
+    toggleRow({
+      title: 'Paste where you were typing',
+      hint:
+        'Types the text into the window that had the cursor, using Windows itself. The clipboard always gets ' +
+        'a copy too, and nothing is ever sent anywhere else.',
+      key: 'dictateAutoPaste',
+      checked: s.settings.dictateAutoPaste,
+    }),
+    buttonRow({
+      title: 'Dictation history',
+      hint: 'Everything you dictated, editable and copyable, kept on this machine.',
+      label: 'Open dictations…',
+      onClick: () => window.library.settings.openDictations(),
+    }),
+  ]);
+}
+
 function renderSettings() {
   const s = view.settings;
   const doc = el('div', 'doc settings');
@@ -1270,6 +1320,7 @@ function renderSettings() {
     frag.append(box);
   }
   recordingSection(frag, s);
+  voiceSection(frag, s);
   liveSection(frag, s);
   ollamaSection(frag, s);
   storageSection(frag, s);

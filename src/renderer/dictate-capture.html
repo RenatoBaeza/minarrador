@@ -1,0 +1,13 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self'" />
+    <title>Minarrador dictation</title>
+  </head>
+  <body>
+    <!-- Hidden worker window: owns the mic-only graph for the dictation hotkey.
+         It is never shown, so it deliberately has no markup of its own. -->
+    <script src="dictate-capture.js"></script>
+  </body>
+</html>

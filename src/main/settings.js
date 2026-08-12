@@ -29,6 +29,24 @@ const HOTKEY_CHOICES = [
   'off',
 ];
 
+/**
+ * Shortcuts the voice-input hotkey may hold, and the only values `dictateHotkey`
+ * may take.
+ *
+ * A separate list from {@link HOTKEY_CHOICES} so the two never collide — the
+ * dictation hotkey is not the same kind of gesture as start/stop, and the
+ * choices are deliberately disjoint. `Super` is the Windows key, which
+ * globalShortcut registers wherever Windows has not reserved the combination
+ * itself; Win+Shift+X is free on a stock Windows install.
+ */
+const DICTATE_HOTKEY_CHOICES = [
+  'Super+Shift+X',
+  'Super+Shift+W',
+  'CommandOrControl+Alt+W',
+  'CommandOrControl+Shift+H',
+  'off',
+];
+
 function defaults() {
   return {
     notesDir: path.join(electronPath('documents'), 'Minarrador'),
@@ -104,6 +122,21 @@ function defaults() {
     chunkSeconds: 60,
     /** Global shortcut that starts or stops a recording; 'off' registers none. */
     hotkey: HOTKEY_CHOICES[0],
+    /**
+     * Global shortcut that starts a voice capture and stops it again; 'off'
+     * registers none. Distinct from `hotkey` because it is a different gesture
+     * — a sentence, not a meeting — and the two must never be the same key.
+     */
+    dictateHotkey: DICTATE_HOTKEY_CHOICES[0],
+    /**
+     * Which engine writes the *finished* dictated text. Defaults to the Ollama
+     * audio model: a dictated sentence is exactly the "write it down as I said
+     * it" case, and the audio model is the careful pass. whisper.cpp is the
+     * faster alternative for anyone who prefers it.
+     */
+    dictateEngine: 'ollama',
+    /** Type the finished dictation into the window that had the cursor. */
+    dictateAutoPaste: true,
   };
 }
 
@@ -112,6 +145,8 @@ const ENUMS = {
   liveEngine: ['whisper', 'ollama'],
   transcribeEngine: ['whisper', 'ollama'],
   hotkey: HOTKEY_CHOICES,
+  dictateHotkey: DICTATE_HOTKEY_CHOICES,
+  dictateEngine: ['whisper', 'ollama'],
 };
 
 /** Numeric fields with a range that has to hold however the file was edited. */
@@ -192,4 +227,4 @@ function save(patch) {
   return next;
 }
 
-module.exports = { load, save, defaults, coerce, HOTKEY_CHOICES };
+module.exports = { load, save, defaults, coerce, HOTKEY_CHOICES, DICTATE_HOTKEY_CHOICES };

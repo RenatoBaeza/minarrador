@@ -1,6 +1,6 @@
 # Minarrador
 
-Local-only meeting notes app for Windows. Records mic + system audio, transcribes and summarises with Ollama — nothing leaves the machine.
+Local-only meeting notes app for Windows. Records mic + system audio, transcribes and summarises with Ollama, and can dictate a spoken sentence straight into whatever you're typing — nothing leaves the machine.
 
 ## Tech stack
 
@@ -8,6 +8,7 @@ Local-only meeting notes app for Windows. Records mic + system audio, transcribe
 - **Node.js** — all backend logic in `src/main/`
 - **Ollama** — local LLM inference for the notes, and for the transcript when whisper.cpp is not installed
 - **whisper.cpp** — local ASR binary; the live transcript and, by default, the saved one (`npm run whisper:setup`)
+- **PowerShell** — the `powershell.exe` built into Windows, used for the one-way paste of dictated text into the foreground application
 - **electron-builder** — packaging and NSIS installer (`npm run dist`)
 - No framework, no bundler, no TypeScript — plain CommonJS throughout
 
@@ -31,15 +32,21 @@ Local-only meeting notes app for Windows. Records mic + system audio, transcribe
 │   │   ├── library.js     # Read-only view over the notes folder (list, read, search)
 │   │   ├── settings.js    # JSON settings store (%APPDATA%/Minarrador)
 │   │   ├── snippets.js    # Quick-copy shorthand store (%APPDATA%/Minarrador)
+│   │   ├── dictations.js  # Dictation archive store (%APPDATA%/Minarrador)
+│   │   ├── dictation.js   # Voice-input controller (mic capture + transcription)
+│   │   ├── paste.js       # OS-level Ctrl+V via built-in PowerShell
 │   │   └── logger.js      # File logger
-│   └── renderer/      # Hidden renderer for Web Audio capture
+│   └── renderer/      # Hidden renderers for Web Audio capture
 │       ├── capture.html   # Minimal page loaded by the hidden window
 │       ├── capture.js     # Web Audio graph (mic + system loopback)
 │       ├── pcm-worklet.js # AudioWorklet that ships PCM to main
 │       ├── preload.js     # contextBridge exposing IPC to renderer
 │       ├── transcript.*   # Live transcript window (page, styles, view, preload)
 │       ├── library.*      # Meeting library window (page, styles, view, preload)
-│       └── snippets.*     # Quick-copy editor window (page, styles, view, preload)
+│       ├── snippets.*     # Quick-copy editor window (page, styles, view, preload)
+│       ├── dictate-capture.*   # Mic-only worker behind the dictation hotkey
+│       ├── dictate-indicator.* # Floating "listening" pill (page, styles, view, preload)
+│       └── dictations.*        # Dictation history window (page, styles, view, preload)
 ├── vendor/whisper/    # whisper.cpp binaries + GGML models (gitignored, see setup)
 ├── dist/              # Build output (gitignored)
 └── package.json
@@ -49,7 +56,7 @@ Local-only meeting notes app for Windows. Records mic + system audio, transcribe
 
 ### Tray-only app
 
-No main window is shown at startup. A hidden `BrowserWindow` exists solely to run the Web Audio API (unavailable in the main process). The tray icon is the app: **left-click opens the meeting library, right-click opens the menu.** Nothing is bound to double-click — Windows sends a plain click first, so a second action there would always arrive with the library already opening. Every other window (library, live transcript, quick-copy editor) is opened on demand, frameless, dark, and single-instance.
+No main window is shown at startup. A hidden `BrowserWindow` exists solely to run the Web Audio API (unavailable in the main process). The tray icon is the app: **left-click opens the meeting library, right-click opens the menu.** Nothing is bound to double-click — Windows sends a plain click first, so a second action there would always arrive with the library already opening. Every other window (library, live transcript, quick-copy editor, dictations archive) is opened on demand, frameless, dark, and single-instance.
 
 The menu is deliberately short: the quick-copy list, what is happening now,
 Start/Stop and *Generate Notes*, the four things to open, and Troubleshooting.
@@ -68,6 +75,17 @@ so the result is kept in `state.hotkeyRegistered` for the settings pane to mark
 in red. Starting and stopping both raise a notification — a tray icon changing
 colour is not confirmation that a room is being recorded, least of all when the
 recording was started from a keyboard.
+
+**The dictation hotkey is a second, independent global shortcut**
+(`Win+Shift+X` by default, `applyDictateHotkey()` in `main.js`): press it, say a
+sentence, press it again, and the transcribed text is pasted where you were
+typing. It is deliberately separate from the meeting hotkey — `globalShortcut`
+is unregistered one accelerator at a time rather than `unregisterAll`, which
+would take the meeting shortcut with it — and its choices come from
+`DICTATE_HOTKEY_CHOICES` in `settings.js` for the same reason as the meeting
+one: a global accelerator is claimed against the whole desktop, never from free
+text. Registration failure is kept in `state.dictateHotkeyRegistered` for the
+settings pane to mark in red. See *Voice input* below.
 
 ### Audio capture flow
 
@@ -346,10 +364,62 @@ shape. `normalize()` is the single gate — it runs on both the file and the IPC
 payload, keeps only `{ label, text }`, and drops any entry with an empty body
 since that could only ever be a dead menu row.
 
-The editor (`src/renderer/snippets.*`) is the only renderer in the app that
-writes anything, so all three IPC channels check `event.sender.id` against the
-editor window. Saving refreshes the tray immediately, and closing saves first —
-the window is never a way to discard work.
+The editor (`src/renderer/snippets.*`) is one of only two renderers in the app
+that write anything (the other is the dictations archive); all of its IPC
+channels check `event.sender.id` against the editor window. Saving refreshes the
+tray immediately, and closing saves first — the window is never a way to discard
+work.
+
+### Voice input (`dictation.js`, `dictations.js`, `paste.js`)
+
+The dictation hotkey is the app's second capture path: press it, say a sentence,
+press it again, and the finished text is pasted into whatever had the cursor,
+copied to the clipboard, and filed in the dictation archive. Same gesture as the
+meeting recorder, for the length of a sentence rather than a meeting — and
+deliberately separate from it.
+
+**A second worker, not a second graph.** `DictationController` owns its own
+hidden renderer (`dictate-capture.*`) that opens the microphone alone, keeps the
+audio in memory, and joins the same media-permission allow-list as the meeting
+worker (`registerMediaClient` in `capture.js`). The two never share a window or a
+stream, so a dictation can run in the middle of a recorded meeting without
+either disturbing the other. The renderer reuses `pcm-worklet.js`, feeding the
+mic onto channel 0 of the worklet's two-channel merger and leaving channel 1
+silent — the mono sum then reads as the mic at full gain rather than doubled.
+
+**Press-to-start, press-to-stop.** Electron's `globalShortcut` fires on key-down
+only, and the app ships no native keyboard hooks, so the feature is a toggle
+rather than hold-to-talk: the press opens the mic, the next press stops it. The
+tray's **Voice input** section exposes the same toggle and the hotkey's name.
+
+**The finished text comes from a careful pass; the live caption is a preview.**
+While the mic is open, the controller's own `LiveTranscriber` (whisper.cpp when
+installed, the audio model otherwise) feeds captions to a small always-on-top
+pill (`dictate-indicator.*`). The pill is `focusable: false` — a window that
+could take the cursor would move the very target the text is about to be pasted
+into. On stop the clip is trimmed of room tone (`trimSilence`, a 50 ms windowed
+RMS gate) and transcribed by the engine `dictationEngineFor()` resolves from the
+`dictateEngine` setting — the Ollama audio model by default, since "write it down
+as I said it" is exactly the careful case, with a silent fall back to whisper.cpp
+whenever the chosen engine cannot run. The saved-pass engine and the live-pass
+one are separate settings, exactly as they are for meetings.
+
+**The paste is Windows doing the typing.** Electron cannot type into another
+application's window, so `paste.js` writes the text to the clipboard and then
+spawns the PowerShell built into Windows to `SendKeys` Ctrl+V into the foreground
+window — best-effort by design, because an elevated (admin) window will not
+accept it, and the clipboard always holds the text either way. The paste runs
+before the confirmation notification, so a paste that did not land is reported in
+the same breath. `dictateAutoPaste` turns it off.
+
+**Nothing said is lost.** Every successful dictation is added to the archive
+(`dictations.js` → `dictations.json`, newest first) which the **Dictations…**
+window (`src/renderer/dictations.*`) browses, edits and deletes — sender-checked
+like the quick-copy editor, rows saving on blur, closing saves first. A
+transcription that fails keeps the trimmed audio as a WAV under
+`userData/dictation-errors`, so a machine that comes back can still finish the
+job, and a session nobody stops hits `MAX_SECONDS` (five minutes) and is ended
+with a notification.
 
 ### Post-recording pipeline (`pipeline.js`)
 
@@ -475,7 +545,7 @@ rather than next to the config.
 
 - **`'use strict'`** at the top of every file
 - **CommonJS** (`require` / `module.exports`) — no ES modules
-- **No external runtime dependencies** — only Electron APIs, Node built-ins, and two local HTTP APIs (Ollama, whisper-server). whisper.cpp is a downloaded binary, not an npm package
+- **No external runtime dependencies** — only Electron APIs, Node built-ins, two local HTTP APIs (Ollama, whisper-server), and the `powershell.exe` that ships with Windows, used for the dictation paste. whisper.cpp is a downloaded binary, not an npm package
 - **Network access lives in `ollama.js`, `whisper.js` and `whisper-setup.js`** — eslint blocks bare `fetch` elsewhere in `src/main/`. The first two only ever reach a daemon on this machine; `whisper-setup.js` is the sole outbound path, and it fetches whisper.cpp and nothing else
 - **Renderer files are linted by naming convention**, not by a list: `*preload.js` gets the preload environment, `*worklet.js` the audio-thread one, and everything else under `src/renderer/` is a browser page with no Node. A new window needs no eslint change — and a page reaches its bridge through `window.<name>`, never as a bare global
 - **Dev dependencies only**: `electron`, `electron-builder`
@@ -529,9 +599,21 @@ Each stage in `pipeline.js` is a standalone async function (`transcribe`, `summa
 | `capture:level` | renderer → main | `{ mixed, mic, system }` RMS floats |
 | `capture:status` | renderer → main | `{ micOk, systemOk, micError, systemError, micLabel }` |
 | `capture:devices` | renderer → main | `{ id, label }[]` — the audio inputs on this machine |
+| `dictate:start` | main → dictation worker | `{ micDeviceId, micDeviceLabel }` — open the mic and record |
+| `dictate:stop` | main → dictation worker | — (close the mic; main waits for the worklet's flush) |
+| `dictate:pcm` | dictation worker → main | `ArrayBuffer` (16 kHz mono PCM) |
+| `dictate:level` | dictation worker → main | RMS float, for the indicator |
+| `dictate:status` | dictation worker → main | `{ micOk, micError, micLabel, fatal }` |
+| `dictate:state` | main → indicator | `{ state, text, error }` — listening / transcribing / done / error |
 | `snippets:list` | editor → main (invoke) | → `{ label, text }[]` |
 | `snippets:save` | editor → main (invoke) | `{ label, text }[]` → the list as stored |
 | `snippets:close` | editor → main | — |
+| `dictations:list` | dictations window → main (invoke) | → `{ id, text, createdAt }[]`, newest first |
+| `dictations:update` | dictations window → main (invoke) | `{ id, text }` → the list, or `null` if the id is gone |
+| `dictations:remove` | dictations window → main (invoke) | `id` → the list, or `null` |
+| `dictations:copy` | dictations window → main | `string` for the clipboard |
+| `dictations:close` | dictations window → main | — |
+| `dictations:changed` | main → dictations window | — (a dictation landed; re-list) |
 | `library:list` | library → main (invoke) | `query` → `{ meetings, activity }` |
 | `library:read` | library → main (invoke) | `id` → the meeting, or `null` |
 | `library:open` | library → main (invoke) | `{ id, target }` → opened? |
@@ -553,6 +635,7 @@ Each stage in `pipeline.js` is a standalone async function (`transcribe`, `summa
 | `settings:installWhisper` | library → main (invoke) | GGML model key → `{ ok, reason }` |
 | `settings:cancelSetup` | library → main (invoke) | → `settingsState()`, after aborting the download in flight |
 | `settings:editQuickCopy` | library → main | — (opens the shorthand editor) |
+| `settings:openDictations` | library → main | — (opens the dictations archive) |
 | `settings:changed` | main → library | — (a setting, a model list or Ollama changed) |
 
 ## Important notes
@@ -568,3 +651,9 @@ Each stage in `pipeline.js` is a standalone async function (`transcribe`, `summa
 - `cleanWhisperText` in `whisper.js` strips whisper's bracketed annotations and the phrases it invents on near-silence (`"you"`, `"Thanks for watching"`), which is the usual source of phantom captions during a pause.
 - `src/main/whisper-setup.js` is the only code in the repo that makes a non-localhost request. It runs from **Settings → Install whisper.cpp** or from `npm run whisper:setup`, never on its own, and it downloads two files: a release binary and a set of weights.
 - Pipeline retries transient Ollama failures (3 attempts with backoff) so a model swap mid-run doesn't kill a long transcription.
+- The dictation paste is the one place the app touches another application's
+  window, and it does it with a *fixed* PowerShell command (SendKeys Ctrl+V) that
+  contains no user input — nothing is ever interpolated into the shell.
+- A dictation whose transcription fails keeps the trimmed clip as a WAV under
+  `%APPDATA%\Minarrador\dictation-errors`, so the words' audio survives even
+  when the text could not be produced.

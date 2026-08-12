@@ -1,6 +1,6 @@
 # Minarrador
 
-Local-only meeting notes for Windows. Records mic + system audio, transcribes and summarises with [Ollama](https://ollama.com) — nothing leaves your machine.
+Local-only meeting notes for Windows. Records mic + system audio, transcribes and summarises with [Ollama](https://ollama.com), and can dictate a spoken sentence straight into whatever you're typing — nothing leaves your machine.
 
 ---
 
@@ -19,6 +19,8 @@ While you record, a **live transcript** window shows what is being said, a secon
 If something goes wrong after a meeting — the usual culprit is Ollama not running when you hit Stop — **the audio is always kept and the notes can be written later**: open the recording in the meetings window and press **Generate notes**, or use **Generate Notes for …** in the tray menu.
 
 The app also listens for sustained audio in the background and can suggest starting a recording when it sounds like a meeting is happening.
+
+**Voice input** is the same speech-to-text machinery for a different job: press **`Win+Shift+X`** anywhere, say what you want to type, and press it again. Minarrador transcribes it locally, pastes it into the window that had the cursor, copies it to your clipboard, and files it in the **Dictations** history. It is a toggle — press the key once to start, again to stop — because Electron's global shortcuts only fire when a key goes down, and the app deliberately ships no keyboard drivers.
 
 ## Prerequisites
 
@@ -151,6 +153,25 @@ shows the start of the text) and the text to copy. **Save**, or `Ctrl+S`, and it
 appears in the menu straight away. Everything lives in `snippets.json` next to
 your settings.
 
+### Voice input (dictation)
+
+Press **`Win+Shift+X`** anywhere in Windows to open the microphone, say what you
+want to type, and press it again to stop. Minarrador then:
+
+- transcribes it locally — the Ollama audio model by default, whisper.cpp if you
+  switch the engine,
+- pastes it into the window that had the cursor (Windows itself does the typing;
+  the clipboard always gets a copy too),
+- saves it to the **Dictations** archive, where every entry can be edited,
+  copied or deleted.
+
+A small floating pill shows that the mic is live and captions what it hears.
+When it cannot paste — usually because the other window is running elevated —
+you still get the confirmation notification and the text stays on your
+clipboard. The shortcut, the engine and the auto-paste are all under
+**Settings → Voice input**; the history is also one click away from the tray via
+**Dictations…**. Everything lives locally in `dictations.json`.
+
 ### Meeting output
 
 Each recording creates a timestamped folder (e.g. `2026-08-11_14-32-05/`) in your notes directory containing:
@@ -207,6 +228,9 @@ the difference is a meeting's notes.
 | Setting                    | Default                | Description                                 |
 | -------------------------- | ---------------------- | ------------------------------------------- |
 | Start and stop shortcut    | `Ctrl+Shift+R`         | Global shortcut that toggles recording; marked red if another app already holds it |
+| Dictate shortcut           | `Win+Shift+X`          | Global shortcut that starts/stops a voice capture; marked red if another app already holds it |
+| Transcribe with (voice)    | Ollama                 | Engine for the finished dictated text — whisper.cpp is the faster alternative |
+| Paste where you were typing | ✓                     | Types the dictated text into the foreground window via Windows' built-in PowerShell; the clipboard always gets a copy |
 | Suggest recording on audio | ✓                      | Notify when sustained speech is detected    |
 | Start at login             | ✓                      | Launch minimised to tray on Windows startup |
 | Open the live transcript   | ✓                      | Shows the preview window when a recording starts |
@@ -232,6 +256,7 @@ the difference is a meeting's notes.
 | **Mic not detected**                    | Check Windows mic permissions (see [Permissions](#permissions) above)                      |
 | **System audio not working**            | Try **Troubleshooting → Restart Audio Capture** from the tray menu                         |
 | **Processing failed notification**      | Open the recording in the meetings window: it says what failed, and **Generate notes** re-runs it once you have fixed it |
+| **Dictation didn't paste**              | The text is always on your clipboard — paste it with Ctrl+V. An elevated (admin) window will not accept simulated keystrokes, which is the one case this cannot get around |
 | **App doesn't appear at login**         | Re-enable via **Settings → Start Minarrador at login**                                     |
 
 ### Log file
@@ -260,6 +285,7 @@ Minarrador is **completely local**:
 - The PDF renderer blocks all network requests — even model-generated HTML cannot phone home
 - No analytics, no crash reporting, no accounts
 - The running app makes zero network requests beyond `127.0.0.1` (Ollama, and the whisper.cpp server it starts itself)
+- The dictation auto-paste simulates Ctrl+V through the PowerShell built into Windows — the text never leaves your clipboard and the foreground app, and nothing is sent anywhere
 - `npm run whisper:setup` is the one command that downloads anything, and only whisper.cpp itself
 
 ## License

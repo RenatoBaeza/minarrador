@@ -75,6 +75,8 @@ class AppTray {
    * @param {{ id: string, label: string }|null} view.retry newest meeting still
    *   owed its notes, which the Retry item would run
    * @param {{ label: string, text: string }[]} view.snippets quick-copy shorthands
+   * @param {{ active: boolean, transcribing: boolean, hotkey: string }} view.dictation
+   *   voice-input state for the section below the recording controls
    */
   update(view) {
     const {
@@ -90,6 +92,7 @@ class AppTray {
       lastDir,
       retry = null,
       snippets = [],
+      dictation = { active: false, transcribing: false, hotkey: '' },
     } = view;
     const a = this.actions;
 
@@ -174,6 +177,24 @@ class AppTray {
         enabled: Boolean(retry),
         click: () => a.retryNotes(),
       },
+
+      { type: 'separator' },
+      // Voice input is the other thing this app can do, and it is reached
+      // mid-sentence: a global shortcut, or this. The hotkey name rides along
+      // so the menu doubles as a reminder of it.
+      { label: 'Voice input', enabled: false },
+      dictation.active || dictation.transcribing
+        ? {
+            label: dictation.transcribing
+              ? 'Voice input — transcribing…'
+              : 'Voice input — recording. Press again to stop',
+            click: () => a.toggleDictation(),
+          }
+        : {
+            label: dictation.hotkey ? `Dictate (${dictation.hotkey})` : 'Dictate',
+            click: () => a.toggleDictation(),
+          },
+      { label: 'Dictations…', click: () => a.openDictations() },
 
       { type: 'separator' },
       // Also what a left-click on the icon does; listed anyway, because a

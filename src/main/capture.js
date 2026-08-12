@@ -766,4 +766,16 @@ function isMediaClient(frame) {
   }
 }
 
-module.exports = { CaptureController, SpeechDetector, SilenceDetector, LiveTranscriber };
+/**
+ * Lets a window's renderer open the microphone or screen audio.
+ *
+ * The permission handlers installed by {@link CaptureController.installMediaHandlers}
+ * only ever allow a webContents whose id is in the allow-list. The meeting
+ * capture worker is registered by the controller itself; the dictation worker
+ * joins through these so it can open the mic without the two graphs sharing a
+ * window.
+ */
+const registerMediaClient = (id) => mediaClients.add(id);
+const unregisterMediaClient = (id) => mediaClients.delete(id);
+
+module.exports = { CaptureController, SpeechDetector, SilenceDetector, LiveTranscriber, registerMediaClient, unregisterMediaClient };

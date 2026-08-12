@@ -1,0 +1,34 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta http-equiv="Content-Security-Policy"
+      content="default-src 'none'; script-src 'self'; style-src 'self'" />
+    <title>Dictations</title>
+    <link rel="stylesheet" href="dictations.css" />
+  </head>
+  <body>
+    <header>
+      <span class="title">Dictations</span>
+      <span id="status" class="status">Ready</span>
+      <button id="close" class="close" type="button" title="Close" aria-label="Close">&#10005;</button>
+    </header>
+
+    <div class="controls">
+      <span class="controls-hint">Everything you dictated with the voice-input hotkey, kept on this machine.</span>
+    </div>
+
+    <div id="list" class="list"></div>
+
+    <p id="empty" class="empty">
+      Nothing here yet. Press the voice-input shortcut, say what you want to type, and press it again —
+      the text lands here as well as in your clipboard.
+    </p>
+
+    <footer>
+      <span class="foot-hint">Edits save when you leave a box · Esc closes</span>
+    </footer>
+
+    <script src="dictations.js"></script>
+  </body>
+</html>

@@ -1,0 +1,23 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta http-equiv="Content-Security-Policy"
+      content="default-src 'none'; script-src 'self'; style-src 'self'" />
+    <title>Dictation</title>
+    <link rel="stylesheet" href="dictate-indicator.css" />
+  </head>
+  <body>
+    <!-- A pill that floats above everything while a dictation is in flight. It
+         is focusable:false in the main process, so it never takes the cursor
+         away from the box the text is destined for. -->
+    <div class="pill">
+      <span id="dot" class="dot" aria-hidden="true"></span>
+      <div class="texts">
+        <span id="label" class="label">Listening</span>
+        <span id="caption" class="caption" hidden></span>
+      </div>
+    </div>
+    <script src="dictate-indicator.js"></script>
+  </body>
+</html>

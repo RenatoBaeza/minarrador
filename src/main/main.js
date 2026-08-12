@@ -12,6 +12,7 @@ const {
   globalShortcut,
   powerMonitor,
   powerSaveBlocker,
+  screen,
   shell,
   nativeImage,
   BrowserWindow,
@@ -23,12 +24,15 @@ const path = require('node:path');
 const log = require('./logger');
 const settingsStore = require('./settings');
 const snippetsStore = require('./snippets');
+const dictationsStore = require('./dictations');
 const library = require('./library');
 const { CaptureController } = require('./capture');
 const { AppTray } = require('./tray');
 const { Ollama, findOllama, launchOllama } = require('./ollama');
 const { WhisperServer, installRoot } = require('./whisper');
 const whisperSetup = require('./whisper-setup');
+const { DictationController, dictationEngineFor } = require('./dictation');
+const { pasteClipboardInForeground } = require('./paste');
 const { runPipeline, fmtDuration } = require('./pipeline');
 const { createMeetingDir, FILES, speakerLine, normaliseTitle } = require('./paths');
 
@@ -109,6 +113,9 @@ const LIBRARY_SETTINGS = new Set([
   'maxRecordingMinutes',
   'preventSleep',
   'hotkey',
+  'dictateHotkey',
+  'dictateEngine',
+  'dictateAutoPaste',
   'liveEngine',
   'transcribeEngine',
   'whisperModel',
@@ -201,6 +208,10 @@ const state = {
   setup: null,
   /** Whether the desktop actually gave us the start/stop shortcut. */
   hotkeyRegistered: false,
+  /** Whether the desktop actually gave us the voice-input shortcut. */
+  dictateHotkeyRegistered: false,
+  /** The accelerator that was actually registered, so a change can release it. */
+  dictateHotkeyAcc: null,
   /**
    * The meeting the tray's Retry Notes item would run, or null.
    *
@@ -219,6 +230,7 @@ const state = {
 
 let tray = null;
 let capture = null;
+let dictation = null;
 let whisper = null;
 let settings = null;
 let uiTimer = null;
@@ -235,6 +247,10 @@ let lastSetupAt = 0;
 let transcriptionWindow = null;
 let snippetsWindow = null;
 let libraryWindow = null;
+let dictationsWindow = null;
+let dictateIndicator = null;
+/** When the "Pasted" pill last got told to leave, so a second dictation can bring it back. */
+let dictateIndicatorTimer = null;
 
 // ------------------------------------------------------------------------ UI
 
@@ -355,6 +371,263 @@ function showSnippetsWindow() {
     log.error('quick copy window failed to load', err);
   });
   return snippetsWindow;
+}
+
+/**
+ * The dictations archive: everything the voice-input hotkey has transcribed.
+ *
+ * Frameless and single-instance like every other window here — two copies of an
+ * editor over one file means whichever is saved last wins, silently.
+ */
+function showDictationsWindow() {
+  if (dictationsWindow && !dictationsWindow.isDestroyed()) {
+    if (dictationsWindow.isMinimized()) dictationsWindow.restore();
+    dictationsWindow.show();
+    dictationsWindow.focus();
+    return dictationsWindow;
+  }
+
+  dictationsWindow = new BrowserWindow({
+    width: 560,
+    height: 640,
+    minWidth: 420,
+    minHeight: 320,
+    show: false,
+    frame: false,
+    title: 'Dictations',
+    backgroundColor: '#16161a',
+    icon: appIcon(),
+    webPreferences: {
+      preload: path.join(RENDERER, 'dictations-preload.js'),
+      contextIsolation: true,
+      nodeIntegration: false,
+      sandbox: true,
+    },
+  });
+
+  dictationsWindow.once('ready-to-show', () => dictationsWindow?.show());
+  dictationsWindow.on('closed', () => {
+    dictationsWindow = null;
+  });
+  dictationsWindow.loadFile(path.join(RENDERER, 'dictations.html')).catch((err) => {
+    log.error('dictations window failed to load', err);
+  });
+  return dictationsWindow;
+}
+
+/**
+ * Tells an open dictations window that the list changed, so it re-reads the
+ * store. A dictation landing mid-edit leaves the row alone — the window skips
+ * a refresh while it has unsaved text.
+ */
+function notifyDictations() {
+  if (dictationsWindow && !dictationsWindow.isDestroyed()) {
+    dictationsWindow.webContents.send('dictations:changed');
+  }
+}
+
+// ------------------------------------------------------------------ voice input
+//
+// The dictation hotkey: press to start the microphone, press again to stop,
+// transcribe locally, paste where you were typing, and copy it anyway. The
+// controller owns the audio and the text comes back here for everything that
+// touches the outside world — the clipboard, the paste, the archive, the
+// indicator.
+
+/**
+ * The floating pill that says a dictation is in flight.
+ *
+ * `focusable: false` is the whole point: the window it floats over is the one
+ * the finished text is about to be pasted into, and a window that could take
+ * the cursor would move the target. It is positioned over the primary display's
+ * work area, out of the way of whatever is being read.
+ */
+function showDictateIndicator() {
+  if (dictateIndicator && !dictateIndicator.isDestroyed()) {
+    dictateIndicator.show();
+    return dictateIndicator;
+  }
+
+  const width = 380;
+  const height = 64;
+  const wa = screen.getPrimaryDisplay().workArea;
+  dictateIndicator = new BrowserWindow({
+    width,
+    height,
+    x: Math.round(wa.x + (wa.width - width) / 2),
+    y: Math.round(wa.y + wa.height - height - 48),
+    show: false,
+    frame: false,
+    resizable: false,
+    movable: false,
+    alwaysOnTop: true,
+    skipTaskbar: true,
+    focusable: false,
+    backgroundColor: '#16161a',
+    webPreferences: {
+      preload: path.join(RENDERER, 'dictate-indicator-preload.js'),
+      contextIsolation: true,
+      nodeIntegration: false,
+      sandbox: true,
+    },
+  });
+  dictateIndicator.on('closed', () => {
+    dictateIndicator = null;
+  });
+  dictateIndicator.loadFile(path.join(RENDERER, 'dictate-indicator.html')).catch((err) => {
+    log.error('dictate indicator failed to load', err);
+  });
+  dictateIndicator.once('ready-to-show', () => dictateIndicator?.show());
+  return dictateIndicator;
+}
+
+/** Sends state to the indicator if it is up; a no-op otherwise. */
+function sendToDictate(payload) {
+  if (dictateIndicator && !dictateIndicator.isDestroyed()) {
+    dictateIndicator.webContents.send('dictate:state', payload);
+  }
+}
+
+/** The indicator leaves by itself a few seconds after it has said "Pasted". */
+function scheduleIndicatorHide() {
+  clearTimeout(dictateIndicatorTimer);
+  dictateIndicatorTimer = setTimeout(() => {
+    dictateIndicatorTimer = null;
+    if (dictateIndicator && !dictateIndicator.isDestroyed()) dictateIndicator.hide();
+  }, 4000);
+}
+
+/**
+ * Registers the voice-input global shortcut.
+ *
+ * Separate from {@link applyHotkey}: the two accelerators are different
+ * gestures and must be unregistered independently — an unregisterAll here would
+ * take the meeting shortcut with it. Registration fails silently when another
+ * application holds the combination, so the result is kept for the settings
+ * pane, exactly as the meeting hotkey's is.
+ */
+function applyDictateHotkey() {
+  // Release the combination that is actually registered, not the one being set
+  // now — applySetting has already written the new value by the time this runs.
+  if (state.dictateHotkeyRegistered && state.dictateHotkeyAcc) {
+    globalShortcut.unregister(state.dictateHotkeyAcc);
+  }
+  state.dictateHotkeyRegistered = false;
+  state.dictateHotkeyAcc = null;
+  const accelerator = settings.dictateHotkey;
+  if (!accelerator || accelerator === 'off') return;
+  try {
+    state.dictateHotkeyRegistered = globalShortcut.register(accelerator, toggleDictation);
+    if (state.dictateHotkeyRegistered) state.dictateHotkeyAcc = accelerator;
+  } catch (err) {
+    log.warn(`could not register the dictate hotkey ${accelerator}:`, err.message);
+  }
+  log.info(
+    state.dictateHotkeyRegistered
+      ? `dictate hotkey ${accelerator} registered`
+      : `dictate hotkey ${accelerator} is held by another application`,
+  );
+}
+
+/** One key for both ends of a dictation, exactly as for a meeting. */
+function toggleDictation() {
+  if (dictation?.active) {
+    stopDictation().catch((err) => log.error('stop from the dictate hotkey failed', err));
+  } else {
+    startDictation();
+  }
+}
+
+function startDictation() {
+  if (!dictation || dictation.active) return;
+  // A dictation that cannot be transcribed later is not worth starting, and
+  // saying so on the way in is kinder than after a sentence of audio. This
+  // only fires when there is no engine on the machine at all — an Ollama that
+  // is merely down can be started, and the stop path keeps the clip if it is not.
+  if (!whisper?.available && !findOllama()) {
+    notify('Voice input is not ready', 'Neither Ollama nor whisper.cpp is installed, so nothing could transcribe it.');
+    return;
+  }
+  dictation.start({
+    micDeviceId: settings.micDeviceId,
+    micDeviceLabel: settings.micDeviceLabel,
+    transcribeModel: settings.transcribeModel,
+    liveEngine: settings.liveEngine,
+  });
+  showDictateIndicator();
+  sendToDictate({ state: 'listening' });
+  refreshTray();
+}
+
+/**
+ * Closes the mic, transcribes what was said, and hands the text to the world.
+ *
+ * This is the whole feature: the paste and the clipboard and the archive all
+ * fan out from the single string that comes back here.
+ */
+async function stopDictation() {
+  if (!dictation?.active) return;
+  sendToDictate({ state: 'transcribing' });
+  refreshTray();
+
+  const engine = dictationEngineFor(settings, whisper, state.ollamaUp);
+  const model = engine === 'whisper' ? '' : settings.transcribeModel;
+  let result;
+  try {
+    result = await dictation.stop({ engine, model });
+  } catch (err) {
+    log.error('dictation stop failed', err);
+    sendToDictate({ state: 'error', error: err.message });
+    notify('Voice input failed', err.message);
+    scheduleIndicatorHide();
+    refreshTray();
+    return;
+  }
+
+  refreshTray();
+
+  if (!result.text) {
+    if (result.error) {
+      // The words are gone but the audio is not — the clip was kept, so the
+      // failure is fixable rather than final.
+      const body = result.saved
+        ? `Could not transcribe: ${result.error}. The audio is kept — open it to check.`
+        : `Could not transcribe: ${result.error}.`;
+      notify('Voice input failed', body, result.saved ? () => shell.openPath(path.dirname(result.saved)) : undefined);
+      sendToDictate({ state: 'error', error: result.error });
+    } else {
+      notify('Nothing heard', 'No speech was captured. Press the voice-input shortcut and try again.');
+      sendToDictate({ state: 'error', error: 'Nothing was heard' });
+    }
+    scheduleIndicatorHide();
+    return;
+  }
+
+  // The clipboard always gets the text, whatever happens with the paste.
+  clipboard.writeText(result.text);
+
+  // Copying to the clipboard alone would be the fallback the paste is meant to
+  // avoid, so the paste runs first and its failure is reported in the same
+  // notification that confirms the text.
+  let pasted = false;
+  if (settings.dictateAutoPaste) {
+    pasted = await pasteClipboardInForeground();
+    if (!pasted) log.warn('the auto-paste did not land (elevated window?) — the clipboard still holds the text');
+  }
+
+  // The archive is the history the user asked for; the paste is transient.
+  dictationsStore.add(result.text);
+  notifyDictations();
+
+  const preview = result.text.length > 90 ? `${result.text.slice(0, 90)}…` : result.text;
+  notify(
+    pasted ? 'Dictated and pasted' : settings.dictateAutoPaste ? 'Dictated — copied to clipboard' : 'Dictated',
+    `${preview}${settings.dictateAutoPaste && !pasted ? ' (could not paste here; the text is on your clipboard)' : ''}`,
+    () => showDictationsWindow(),
+  );
+  sendToDictate({ state: 'done' });
+  scheduleIndicatorHide();
+  log.info('dictation finished:', result.seconds.toFixed(1), 's');
 }
 
 /**
@@ -552,6 +825,16 @@ function settingsState() {
       registered: state.hotkeyRegistered,
       choices: settingsStore.HOTKEY_CHOICES.map((value) => ({ value, label: hotkeyLabel(value) })),
     },
+    dictateHotkey: {
+      value: settings.dictateHotkey,
+      registered: state.dictateHotkeyRegistered,
+      choices: settingsStore.DICTATE_HOTKEY_CHOICES.map((value) => ({ value, label: hotkeyLabel(value) })),
+    },
+    /** What the voice-input controller is doing, for the tray and the settings pane. */
+    dictation: {
+      active: Boolean(dictation?.active),
+      transcribing: Boolean(dictation?.transcribing),
+    },
     notesDirExists: fs.existsSync(settings.notesDir),
     snippetCount: snippetsStore.load().length,
     /** Capture sources cannot be changed mid-meeting; the pane says so. */
@@ -657,6 +940,11 @@ function refreshTray() {
     lastDir: state.lastDir,
     retry: state.retry,
     snippets: snippetsStore.load(),
+    dictation: {
+      active: Boolean(dictation?.active),
+      transcribing: Boolean(dictation?.transcribing),
+      hotkey: settings.dictateHotkey === 'off' ? '' : hotkeyLabel(settings.dictateHotkey),
+    },
   });
 }
 
@@ -680,7 +968,7 @@ function notify(title, body, onClick) {
 /** An accelerator as a person would read it. 'off' is a value, not a shortcut. */
 function hotkeyLabel(accelerator) {
   if (!accelerator || accelerator === 'off') return 'No shortcut';
-  return accelerator.replace('CommandOrControl', 'Ctrl').replace(/\+/g, ' + ');
+  return accelerator.replace('CommandOrControl', 'Ctrl').replace('Super', 'Win').replace(/\+/g, ' + ');
 }
 
 /**
@@ -1436,6 +1724,7 @@ function applySetting(patch) {
   settings = settingsStore.save(patch);
   if ('startAtLogin' in patch) applyLoginItem();
   if ('hotkey' in patch) applyHotkey();
+  if ('dictateHotkey' in patch) applyDictateHotkey();
   if ('preventSleep' in patch) applySleepBlocker();
   if ('silenceStopMinutes' in patch) capture?.silence.configure({ minutes: settings.silenceStopMinutes });
   // A different microphone means a different stream, which means the graph is
@@ -1529,6 +1818,8 @@ function diagnostics() {
       whisper: whisper?.describe(),
       liveEngine: capture?.liveTranscriber.engine,
       hotkeyRegistered: state.hotkeyRegistered,
+      dictateActive: Boolean(dictation?.active),
+      dictateHotkeyRegistered: state.dictateHotkeyRegistered,
       retry: state.retry,
       captureStatus: capture?.status,
       // Which microphones exist and which one is open — the first thing to ask
@@ -1619,6 +1910,36 @@ if (!app.requestSingleInstanceLock()) {
   ipcMain.on('snippets:close', (event) => {
     if (event.sender.id !== snippetsWindow?.webContents.id) return;
     snippetsWindow.close();
+  });
+
+  // The dictations archive is the other store a renderer can write to, so its
+  // channels are sender-checked the same way the quick-copy ones are, and the
+  // store normalises the payload regardless.
+  const fromDictations = (event) => event.sender.id === dictationsWindow?.webContents.id;
+
+  ipcMain.handle('dictations:list', (event) => {
+    if (!fromDictations(event)) return [];
+    return dictationsStore.list();
+  });
+
+  ipcMain.handle('dictations:update', (event, req) => {
+    if (!fromDictations(event)) return null;
+    return dictationsStore.update(String(req?.id ?? ''), String(req?.text ?? ''));
+  });
+
+  ipcMain.handle('dictations:remove', (event, id) => {
+    if (!fromDictations(event)) return null;
+    return dictationsStore.remove(String(id ?? ''));
+  });
+
+  ipcMain.on('dictations:copy', (event, text) => {
+    if (!fromDictations(event)) return;
+    clipboard.writeText(String(text ?? ''));
+  });
+
+  ipcMain.on('dictations:close', (event) => {
+    if (!fromDictations(event)) return;
+    dictationsWindow.close();
   });
 
   // The library reads the notes folder and nothing else. Its channels are
@@ -1775,6 +2096,13 @@ if (!app.requestSingleInstanceLock()) {
     showSnippetsWindow();
   });
 
+  // The dictations archive lives in the tray too; the settings pane is just
+  // another way to find it.
+  ipcMain.on('settings:openDictations', (event) => {
+    if (!fromLibrary(event)) return;
+    showDictationsWindow();
+  });
+
   // The way out of an install that cannot transcribe anything. Both take
   // minutes, so both report progress through settings:changed rather than
   // leaving the pane on a spinner, and both can be called off.
@@ -1915,6 +2243,27 @@ if (!app.requestSingleInstanceLock()) {
       }
     });
 
+    dictation = new DictationController({
+      ollamaHost: settings.ollamaHost,
+      whisper,
+      // A transcription that fails keeps its audio here rather than losing it,
+      // which is the same "never lose the meeting" rule the WAV path follows.
+      errorDir: path.join(app.getPath('userData'), 'dictation-errors'),
+    });
+    // A live caption while dictating, shown on the indicator so the person
+    // speaking knows it is being heard.
+    dictation.on('live', (text) => {
+      if (dictation?.active) sendToDictate({ state: 'listening', text });
+    });
+    // The hotkey is a toggle, so a session nobody stopped would otherwise run
+    // to the controller's hard ceiling and then keep the mic warm forever.
+    dictation.on('cap', () => {
+      if (!dictation?.active) return;
+      log.warn('stopping the dictation at the length cap');
+      notify('Voice input stopped', 'That was a long one — Minarrador cut it off at the five-minute ceiling.');
+      stopDictation().catch((err) => log.error('stop at the dictation cap failed', err));
+    });
+
     tray = new AppTray({
       startRecording,
       stopRecording,
@@ -1935,6 +2284,8 @@ if (!app.requestSingleInstanceLock()) {
       openLibrary: () => showLibraryWindow(),
       openSettings: () => showLibraryWindow({ settings: true }),
       toggleTranscript: toggleTranscriptWindow,
+      toggleDictation,
+      openDictations: () => showDictationsWindow(),
       diagnostics,
       // Rebuilding is the controller's job now, because a recording in progress
       // has to be re-armed into the same file afterwards — the tray and the
@@ -1948,6 +2299,8 @@ if (!app.requestSingleInstanceLock()) {
     applyCaptureConfig();
     applyLiveConfig();
     applyHotkey();
+    await dictation.init();
+    applyDictateHotkey();
     installPowerHandlers();
     // Also finds the newest meeting still owed its notes, so the tray can offer
     // to write them for a run that failed in an earlier session.
@@ -2018,6 +2371,15 @@ if (!app.requestSingleInstanceLock()) {
     state.jobs.clear();
 
     capture?.destroy();
+
+    // A dictation in flight has no file to finalize — the audio lives only in
+    // memory — so it is dropped rather than transcribed into a process that is
+    // already on its way out.
+    dictation?.cancel();
+    dictation?.destroy();
+    clearTimeout(dictateIndicatorTimer);
+    dictateIndicatorTimer = null;
+
     tray?.destroy();
   }
 

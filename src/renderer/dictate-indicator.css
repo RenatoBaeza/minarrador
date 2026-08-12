@@ -1,0 +1,91 @@
+/* The floating dictation pill. Read-only by construction: the window is
+   focusable:false, so nothing here is ever clicked or typed into. */
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  margin: 0;
+  padding: 0;
+  color-scheme: dark;
+  background: transparent;
+  font-family: 'Segoe UI', system-ui, sans-serif;
+  overflow: hidden;
+}
+
+body {
+  height: 100vh;
+  display: flex;
+}
+
+.pill {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  padding: 8px 14px;
+  background: #16161a;
+  border: 1px solid #2c2c34;
+  border-radius: 14px;
+  box-shadow: 0 6px 24px rgba(0, 0, 0, 0.5);
+}
+
+.dot {
+  flex: none;
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  background: #e11d48;
+  animation: pulse 1.4s ease-in-out infinite;
+}
+
+@keyframes pulse {
+  0%,
+  100% {
+    opacity: 1;
+    transform: scale(1);
+  }
+  50% {
+    opacity: 0.35;
+    transform: scale(0.8);
+  }
+}
+
+body.transcribing .dot {
+  background: #f59e0b;
+  animation-duration: 0.7s;
+}
+
+body.done .dot {
+  background: #22c55e;
+  animation: none;
+}
+
+body.error .dot {
+  background: #e11d48;
+  animation: none;
+}
+
+.texts {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
+.label {
+  font-size: 13px;
+  font-weight: 600;
+  color: #eaeaea;
+  white-space: nowrap;
+}
+
+.caption {
+  font-size: 12px;
+  color: #9ca3af;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
