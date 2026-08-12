@@ -1,21 +1,26 @@
 'use strict';
 
-// Bridge for the meeting library window. Near enough read-only over the notes
-// folder: the page can list, open and quote meetings, and cannot write, rename
-// or delete one. The two exceptions both name a meeting and nothing else —
-// `record` starts or stops one, and `reprocess` asks the main process to run
-// its own pipeline over a folder that already has audio. Every call names a
-// meeting by its folder name and the main process resolves it; no path ever
-// crosses this boundary in the other direction.
+// Bridge for the meeting library window. Everything it can do names a meeting
+// by its folder name, and the main process resolves it; no path ever crosses
+// this boundary in either direction. The page can list, open and quote
+// meetings, and the four things it can change all go through main:
 //
-// Settings are the one thing the window changes, and they go through `settings`
-// below: a fixed vocabulary of keys, each coerced to the type the store expects,
-// with nothing that names a path or a host among them.
+//   record     start or stop the meeting being recorded
+//   reprocess  run the pipeline again over a folder that already has audio
+//   rename     write the title someone typed over the one the model guessed
+//   delete     move a meeting to the Recycle Bin, after main has confirmed it
+//
+// Settings go through `settings` below: a fixed vocabulary of keys, each
+// coerced to the type the store expects, with nothing that names a path or a
+// host among them.
 
 const { contextBridge, ipcRenderer } = require('electron');
 
 /** Things the window may ask the shell to open. Mirrors OPEN_TARGETS in library.js. */
 const TARGETS = ['folder', 'pdf', 'notes', 'transcript', 'audio'];
+
+/** How the two sides of a two-channel recording are named. Mirrors SPEAKERS in paths.js. */
+const SPEAKERS = { mic: 'You', system: 'Others' };
 
 /**
  * Settings the page may change, and what each one is.
@@ -30,6 +35,14 @@ const FIELDS = {
   liveTranscript: Boolean,
   captureMic: Boolean,
   captureSystem: Boolean,
+  separateChannels: Boolean,
+  // An opaque handle Chromium issued for a device, not a path — and main checks
+  // it against the list the capture worker reported before it is stored.
+  micDeviceId: String,
+  micDeviceLabel: String,
+  silenceStopMinutes: Number,
+  maxRecordingMinutes: Number,
+  preventSleep: Boolean,
   hotkey: String,
   liveEngine: String,
   transcribeEngine: String,
@@ -48,6 +61,7 @@ const patch = (values) => {
 };
 
 contextBridge.exposeInMainWorld('library', {
+  speakers: SPEAKERS,
   /** @param {string} query filters by title and transcript text; '' lists everything. */
   list: (query) => ipcRenderer.invoke('library:list', String(query ?? '')),
   read: (id) => ipcRenderer.invoke('library:read', String(id ?? '')),
@@ -67,8 +81,32 @@ contextBridge.exposeInMainWorld('library', {
    *   started — how it *ends* arrives as an onChanged, minutes later.
    */
   reprocess: (id) => ipcRenderer.invoke('library:reprocess', String(id ?? '')),
+  /**
+   * Retitles a meeting. An empty title puts the model's own one back.
+   *
+   * @returns {Promise<{ ok: boolean, reason?: string }>}
+   */
+  rename: (id, title) => ipcRenderer.invoke('library:rename', { id: String(id ?? ''), title: String(title ?? '') }),
+  /**
+   * Moves a meeting to the Recycle Bin.
+   *
+   * Main raises the confirmation itself — a window cannot be trusted to have
+   * asked before it calls, and this is the one call here that destroys work.
+   *
+   * @returns {Promise<{ ok: boolean, reason?: string }>} `ok` false with no
+   *   reason means the confirmation was declined.
+   */
+  delete: (id) => ipcRenderer.invoke('library:delete', String(id ?? '')),
   /** Fires when a recording starts or a pipeline run finishes, so the list can catch up. */
   onChanged: (fn) => ipcRenderer.on('library:changed', () => fn()),
+  /**
+   * Fires as a pipeline run advances — several times a minute.
+   *
+   * Carries the whole activity payload, so the page can update the card and the
+   * reader in place. Deliberately not `onChanged`: that one means "re-read the
+   * folder", which walks the notes directory and every transcript in it.
+   */
+  onProgress: (fn) => ipcRenderer.on('library:progress', (_e, activity) => fn(activity ?? {})),
   /** The tray's Settings… item, landing in an already-open window. */
   onShowSettings: (fn) => ipcRenderer.on('library:showSettings', () => fn()),
   minimize: () => ipcRenderer.send('library:minimize'),
@@ -80,6 +118,14 @@ contextBridge.exposeInMainWorld('library', {
     set: (values) => ipcRenderer.invoke('settings:set', patch(values)),
     chooseNotesFolder: () => ipcRenderer.invoke('settings:chooseNotesFolder'),
     openOllama: () => ipcRenderer.invoke('settings:openOllama'),
+    /**
+     * Downloads a model into Ollama. Main only accepts the two names this app
+     * is configured to use, so nothing typed here could ever reach it.
+     */
+    pullModel: (name) => ipcRenderer.invoke('settings:pullModel', String(name ?? '')),
+    /** Fetches whisper.cpp and a set of weights, for a machine that has neither. */
+    installWhisper: (model) => ipcRenderer.invoke('settings:installWhisper', String(model ?? '')),
+    cancelSetup: () => ipcRenderer.invoke('settings:cancelSetup'),
     editQuickCopy: () => ipcRenderer.send('settings:editQuickCopy'),
     /** A setting changed elsewhere, or an Ollama poll found (or lost) the daemon. */
     onChanged: (fn) => ipcRenderer.on('settings:changed', () => fn()),

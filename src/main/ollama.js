@@ -200,6 +200,70 @@ class Ollama {
     return cleanTranscript(raw);
   }
 
+  /**
+   * Downloads a model into Ollama, reporting progress as it lands.
+   *
+   * The app can be installed into a state where it cannot work: Ollama running
+   * with nothing pulled, and the only instruction anywhere being `ollama pull`
+   * in a terminal that whoever ran the installer does not have open. This is
+   * the same operation, from the settings pane.
+   *
+   * Streams NDJSON, one object per status change, with `completed`/`total`
+   * bytes while a layer is downloading. Deliberately without a timeout — a
+   * multi-gigabyte pull on a slow line is not a hung request — so `signal` is
+   * the only way out, and quitting aborts it.
+   *
+   * @param {string} model tag to pull, e.g. 'gemma4:12b'
+   * @param {{ onProgress?: (p: { status: string, completed: number, total: number }) => void, signal?: AbortSignal }} [options]
+   */
+  async pull(model, { onProgress, signal } = {}) {
+    if (!model) throw new OllamaError('No model was named to pull.');
+    let res;
+    try {
+      res = await fetch(`${this.host}/api/pull`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ model, stream: true }),
+        signal,
+      });
+    } catch (err) {
+      if (signal?.aborted) throw new OllamaError('Cancelled');
+      throw new OllamaError(`Cannot reach Ollama at ${this.host} — is it running? (${err.message})`);
+    }
+    if (!res.ok || !res.body) {
+      throw new OllamaError(`Ollama /api/pull returned ${res.status}: ${(await res.text()).slice(0, 300)}`);
+    }
+
+    const decoder = new TextDecoder();
+    let buffered = '';
+    let last = '';
+    for await (const chunk of res.body) {
+      buffered += decoder.decode(chunk, { stream: true });
+      const lines = buffered.split('\n');
+      // The tail is whatever arrived without its newline yet.
+      buffered = lines.pop() ?? '';
+      for (const line of lines) {
+        if (!line.trim()) continue;
+        let json;
+        try {
+          json = JSON.parse(line);
+        } catch {
+          continue; // A partial object cannot happen here, but nor can it hurt.
+        }
+        // Ollama reports a failed pull in the body with a 200 status, so this
+        // is the only place a bad model name or a dead network surfaces.
+        if (json.error) throw new OllamaError(String(json.error));
+        last = String(json.status ?? last);
+        onProgress?.({
+          status: last,
+          completed: Number(json.completed) || 0,
+          total: Number(json.total) || 0,
+        });
+      }
+    }
+    return last;
+  }
+
   /** Text-only chat. Returns the assistant message content. */
   async chat(model, messages, { signal, temperature = 0.2, timeoutMs, attempts, retryDelayMs } = {}) {
     const json = await this.#post(

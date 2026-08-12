@@ -4,7 +4,19 @@
 // Tray-only app: no main window ever appears. The single hidden renderer exists
 // solely to run the Web Audio graph, which is unavailable in the main process.
 
-const { app, Notification, clipboard, dialog, globalShortcut, shell, nativeImage, BrowserWindow, ipcMain } = require('electron');
+const {
+  app,
+  Notification,
+  clipboard,
+  dialog,
+  globalShortcut,
+  powerMonitor,
+  powerSaveBlocker,
+  shell,
+  nativeImage,
+  BrowserWindow,
+  ipcMain,
+} = require('electron');
 const fs = require('node:fs');
 const path = require('node:path');
 
@@ -15,14 +27,51 @@ const library = require('./library');
 const { CaptureController } = require('./capture');
 const { AppTray } = require('./tray');
 const { Ollama, findOllama, launchOllama } = require('./ollama');
-const { WhisperServer } = require('./whisper');
+const { WhisperServer, installRoot } = require('./whisper');
+const whisperSetup = require('./whisper-setup');
 const { runPipeline, fmtDuration } = require('./pipeline');
-const { createMeetingDir, FILES } = require('./paths');
+const { createMeetingDir, FILES, speakerLine, normaliseTitle } = require('./paths');
 
 const APP_ID = 'com.rntbz.minarrador';
 
 /** How often to look for the Ollama daemon while idle. */
 const OLLAMA_POLL_MS = 60_000;
+
+/**
+ * How much room the notes folder's volume must have before a meeting starts,
+ * and how little is left before one is ended.
+ *
+ * A recording is ~115 MB an hour in mono and ~230 MB in stereo, so the warning
+ * threshold is most of a working day of audio and the refusal is under two
+ * hours of it. The floor matters more than the numbers: a disk that fills
+ * mid-meeting stops the WAV growing while every other part of the app carries
+ * on saying "Recording", which is the failure this app exists not to have.
+ */
+const DISK_WARN_BYTES = 2 * 1024 ** 3;
+const DISK_REFUSE_BYTES = 300 * 1024 ** 2;
+const DISK_STOP_BYTES = 150 * 1024 ** 2;
+/** How often the free space is re-read while recording. */
+const DISK_CHECK_MS = 30_000;
+
+/**
+ * When a long recording says so, and how often it repeats itself.
+ *
+ * Separate from the hard cap: the cap is for the recording nobody is watching,
+ * this is for the person who is and has simply forgotten. Three hours is past
+ * every real meeting and well short of the four-hour default ceiling.
+ */
+const LONG_RECORDING_SECONDS = 3 * 3600;
+const LONG_RECORDING_REPEAT_SECONDS = 3600;
+
+/**
+ * Slowest rate at which pipeline progress is pushed to the library window.
+ *
+ * Progress ticks once per transcribed chunk, which on a short chunk setting is
+ * every few seconds. It rides its own channel rather than `library:changed`
+ * precisely so it cannot make the window re-read every transcript on disk, and
+ * this keeps even the cheap path from being spammed.
+ */
+const PROGRESS_MIN_MS = 700;
 
 /**
  * How long to keep looking after starting Ollama ourselves, and how often.
@@ -51,6 +100,14 @@ const LIBRARY_SETTINGS = new Set([
   'liveTranscript',
   'captureMic',
   'captureSystem',
+  'separateChannels',
+  // Not a path: an opaque device handle Chromium issues, checked below against
+  // the list the capture worker actually reported.
+  'micDeviceId',
+  'micDeviceLabel',
+  'silenceStopMinutes',
+  'maxRecordingMinutes',
+  'preventSleep',
   'hotkey',
   'liveEngine',
   'transcribeEngine',
@@ -109,6 +166,12 @@ const state = {
    */
   liveDir: null,
   recordingStartedAt: null,
+  /** Elapsed seconds at which the "still recording" warning last went out. */
+  warnedLongAt: 0,
+  /** Free space last read on the notes volume, and when — see checkDisk. */
+  disk: { free: null, checkedAt: 0, warned: false },
+  /** powerSaveBlocker handle held for the duration of a recording, or null. */
+  sleepBlocker: null,
   lastDir: null,
   ollamaUp: false,
   /** True while a look-for-Ollama pass is in flight, so the menu can say so. */
@@ -117,10 +180,25 @@ const state = {
   audioModels: [],
   /**
    * Meetings still being processed, keyed by folder so a quit can name them.
-   * The value aborts that run's model requests.
-   * @type {Map<string, AbortController>}
+   *
+   * `abort` stops that run's model requests; `progress` is the same detail the
+   * tray shows, kept per meeting so the library can show it on the right card
+   * rather than the bare "Working…" it used to.
+   *
+   * @type {Map<string, { abort: AbortController, progress: { phase: string, done: number, total: number, label: string } }>}
    */
   jobs: new Map(),
+  /**
+   * The one download the app will run at a time, or null.
+   *
+   * One at a time on purpose: both of these are the way out of "this app cannot
+   * transcribe anything", they are the only things here that take minutes with
+   * nothing to show but a bar, and two at once over one connection is slower
+   * than either alone.
+   *
+   * @type {{ kind: 'model'|'whisper', label: string, status: string, completed: number, total: number, abort: AbortController } | null}
+   */
+  setup: null,
   /** Whether the desktop actually gave us the start/stop shortcut. */
   hotkeyRegistered: false,
   /**
@@ -135,6 +213,8 @@ const state = {
   retry: null,
   /** Guards the shutdown sequence against re-entering before-quit. */
   quitting: false,
+  /** True while a recording is being closed — see finalizeRecording. */
+  stopping: false,
 };
 
 let tray = null;
@@ -143,6 +223,15 @@ let whisper = null;
 let settings = null;
 let uiTimer = null;
 let ollamaTimer = null;
+/**
+ * Throttles for the two streams that tick faster than a window wants redrawing.
+ *
+ * One each rather than one shared, because a download and a pipeline run can
+ * perfectly well be happening at once, and a shared clock would have each of
+ * them swallowing the other's updates.
+ */
+let lastProgressAt = 0;
+let lastSetupAt = 0;
 let transcriptionWindow = null;
 let snippetsWindow = null;
 let libraryWindow = null;
@@ -414,6 +503,45 @@ function settingsState() {
     /** What the live preview is really using, which is not always what was asked for. */
     liveEngine: capture?.liveTranscriber.engine ?? settings.liveEngine,
     /**
+     * The microphones on this machine, and the one actually open.
+     *
+     * `micLabel` is the point of the pair: a capture status of micOk: true says
+     * a microphone opened, not that it is the one being talked into, and a
+     * meeting recorded off the laptop lid instead of the headset looks
+     * identical to a good one until it is played back.
+     */
+    mic: {
+      devices: capture?.devices ?? [],
+      active: capture?.status.micLabel ?? '',
+      chosen: settings.micDeviceId,
+      chosenLabel: settings.micDeviceLabel,
+    },
+    /** Whether a recording is being written as two channels right now. */
+    recordingChannels: capture?.recordingChannels ?? 1,
+    /** Free space where meetings are saved, so the pane can say before it matters. */
+    disk: { free: state.disk.free, low: state.disk.free !== null && state.disk.free < DISK_WARN_BYTES },
+    /** The download in flight, if any — an Ollama model or whisper.cpp itself. */
+    setup: setupState(),
+    /**
+     * GGML weights the app can fetch, for a machine with no whisper.cpp at all.
+     *
+     * Name first, then what it costs: the size and the speed are the whole basis
+     * for choosing, and a dropdown of bare descriptions would not say which
+     * model is being picked.
+     */
+    whisperModels: Object.entries(whisperSetup.MODELS).map(([value, note]) => ({
+      value,
+      label: `${value} — ${note}`,
+    })),
+    /**
+     * Models named by the settings but missing from Ollama, which is precisely
+     * the state a fresh install is in. Nothing else may be pulled: a tag is
+     * free text, and these two came from the store rather than from a page.
+     */
+    pullable: [...new Set([settings.transcribeModel, settings.summaryModel])].filter(
+      (name) => name && !state.models.includes(name),
+    ),
+    /**
      * The shortcut, the ones on offer, and whether the desktop actually gave us
      * this one — a global shortcut another application already holds registers
      * as a silent no-op, which is precisely the kind of gap this pane exists to
@@ -436,7 +564,38 @@ function libraryActivity() {
   return {
     recordingId: state.phase === 'recording' && state.currentDir ? path.basename(state.currentDir) : null,
     processingIds: [...state.jobs.keys()].map((dir) => path.basename(dir)),
+    /**
+     * Where each run has got to. The tray has said "Transcribing 12/60…" since
+     * the pipeline existed while the library card said only "Working…", and the
+     * numbers were already being produced — they just never left this process.
+     */
+    processing: [...state.jobs].map(([dir, job]) => ({ id: path.basename(dir), ...job.progress })),
   };
+}
+
+/**
+ * Tells an open library how far a pipeline run has got.
+ *
+ * Its own channel because it fires on a completely different budget from
+ * `library:changed`: that one means "the folder changed, re-read it", which
+ * costs a walk of the notes directory and a read of every transcript, and it is
+ * sent four times a meeting. This is a number moving, several times a minute,
+ * and the window updates a card in place from it without touching the disk.
+ */
+function notifyProgress() {
+  const now = Date.now();
+  if (now - lastProgressAt < PROGRESS_MIN_MS) return;
+  lastProgressAt = now;
+  if (libraryWindow && !libraryWindow.isDestroyed()) {
+    libraryWindow.webContents.send('library:progress', libraryActivity());
+  }
+}
+
+/** What the settings pane renders for a download in flight, or null. */
+function setupState() {
+  if (!state.setup) return null;
+  const { kind, label, status, completed, total } = state.setup;
+  return { kind, label, status, completed, total };
 }
 
 /**
@@ -450,12 +609,15 @@ function libraryActivity() {
  *
  * Best-effort by design. A preview that cannot be written must never interrupt
  * the recording, which is the artefact that actually matters.
+ *
+ * @param {string} speaker 'mic' | 'system' | '' — which channel carried the
+ *   line, when the recording kept the two apart and one of them clearly did
  */
-function appendLiveTranscript(text) {
+function appendLiveTranscript(text, speaker) {
   const line = String(text ?? '').trim();
   if (!state.liveDir || !line) return;
   try {
-    fs.appendFileSync(path.join(state.liveDir, FILES.liveTranscript), `${line}\n`);
+    fs.appendFileSync(path.join(state.liveDir, FILES.liveTranscript), `${speakerLine(speaker, line)}\n`);
   } catch (err) {
     log.warn('could not append to the live transcript:', err.message);
   }
@@ -556,16 +718,109 @@ function toggleRecording() {
   }
 }
 
+const human = (bytes) =>
+  bytes >= 1024 ** 3 ? `${(bytes / 1024 ** 3).toFixed(1)} GB` : `${Math.round(bytes / 1024 ** 2)} MB`;
+
+/**
+ * Free bytes on the volume the notes folder is on.
+ *
+ * @returns {number|null} null when it cannot be read, which is treated
+ *   throughout as "no reason to stop" — a filesystem that will not report its
+ *   size is not a filesystem that is known to be full.
+ */
+function freeSpace(dir) {
+  try {
+    const stat = fs.statfsSync(dir);
+    return stat.bavail * stat.bsize;
+  } catch (err) {
+    log.warn('could not read the free space on', dir, err.message);
+    return null;
+  }
+}
+
+/**
+ * Re-reads the free space, at most every DISK_CHECK_MS, and acts on it.
+ *
+ * Nothing else notices a disk filling up. The WavWriter reports the write that
+ * finally fails, but by then the meeting has already stopped being recorded;
+ * this is what makes the difference between a truncated file and a warning in
+ * time to do something about it.
+ */
+function checkDisk({ force = false } = {}) {
+  const now = Date.now();
+  if (!force && now - state.disk.checkedAt < DISK_CHECK_MS) return state.disk.free;
+  state.disk.checkedAt = now;
+  state.disk.free = freeSpace(settings.notesDir);
+  const free = state.disk.free;
+  if (free === null) return null;
+
+  if (state.phase === 'recording' && free < DISK_STOP_BYTES) {
+    log.error(`stopping the recording: only ${human(free)} left on the notes volume`);
+    notify('Out of disk space', `Minarrador stopped recording with ${human(free)} left. The audio so far is saved.`);
+    stopRecording().catch((err) => log.error('stop on a full disk failed', err));
+    return free;
+  }
+  if (free < DISK_WARN_BYTES && !state.disk.warned) {
+    state.disk.warned = true;
+    notify('Running out of space', `${human(free)} left where meetings are saved. An hour of recording needs about 230 MB.`);
+    notifySettings();
+  } else if (free >= DISK_WARN_BYTES && state.disk.warned) {
+    state.disk.warned = false;
+    notifySettings();
+  }
+  return free;
+}
+
+/**
+ * Holds off system sleep for as long as a meeting is being recorded.
+ *
+ * `prevent-app-suspension` stops Windows suspending on idle, which is the case
+ * that actually happens: a call where nobody touches the keyboard for an hour.
+ * It does not — cannot — stop a lid close or an explicit sleep, so it is half
+ * the answer; the other half is rebuilding the audio graph on resume, since
+ * what the graph's state is after a suspend is nobody's guess.
+ */
+function applySleepBlocker() {
+  const wanted = settings.preventSleep && state.phase === 'recording';
+  if (wanted === (state.sleepBlocker !== null)) return;
+  if (wanted) {
+    state.sleepBlocker = powerSaveBlocker.start('prevent-app-suspension');
+    log.info('holding off system sleep for the duration of the recording');
+    return;
+  }
+  if (powerSaveBlocker.isStarted(state.sleepBlocker)) powerSaveBlocker.stop(state.sleepBlocker);
+  state.sleepBlocker = null;
+}
+
 function startRecording() {
   if (state.phase === 'recording') return;
   try {
     fs.mkdirSync(settings.notesDir, { recursive: true });
+
+    // Checked before the folder is made rather than after: a meeting that
+    // cannot be written is better refused with a sentence than started and
+    // silently truncated twenty minutes in.
+    const free = checkDisk({ force: true });
+    if (free !== null && free < DISK_REFUSE_BYTES) {
+      dialog.showErrorBox(
+        'Minarrador',
+        `There is only ${human(free)} free where meetings are saved.\n\n` +
+          'Free up some space, or choose another folder under Settings → Meetings folder.',
+      );
+      return;
+    }
+
     const dir = createMeetingDir(settings.notesDir);
     state.currentDir = dir;
     state.liveDir = dir;
     state.recordingStartedAt = new Date();
-    capture.startRecording(path.join(dir, FILES.audio));
+    state.warnedLongAt = 0;
+    capture.startRecording(path.join(dir, FILES.audio), {
+      separateChannels: settings.separateChannels,
+      silenceMinutes: settings.silenceStopMinutes,
+    });
     state.phase = 'recording';
+    applySleepBlocker();
     if (settings.liveTranscript) showTranscriptWindow();
     sendToTranscript('transcript:clear');
     refreshTray();
@@ -583,8 +838,44 @@ function startRecording() {
     log.error('startRecording failed', err);
     dialog.showErrorBox('Minarrador', `Could not start recording:\n\n${err.message}`);
     state.phase = 'idle';
+    applySleepBlocker();
     refreshTray();
   }
+}
+
+/**
+ * Ends a recording nobody is going to end themselves.
+ *
+ * Nothing in the app used to cap a recording at all: a meeting left running on
+ * a Friday was still running on Monday, and the pipeline then spent the morning
+ * on a WAV of an empty office. Both limits are settings, and both default to
+ * something no real meeting reaches.
+ */
+function checkRecordingLimits() {
+  if (state.phase !== 'recording') return;
+  const elapsed = capture?.elapsedSeconds ?? 0;
+
+  const cap = settings.maxRecordingMinutes * 60;
+  if (cap && elapsed >= cap) {
+    log.warn(`stopping the recording at the ${settings.maxRecordingMinutes}-minute ceiling`);
+    notify('Recording stopped', `This meeting reached the ${fmtDuration(cap)} limit. The notes are being written now.`);
+    stopRecording().catch((err) => log.error('stop at the duration cap failed', err));
+    return;
+  }
+
+  // Not a cap, a reminder — for the person who is still there and has simply
+  // forgotten. It repeats, because one notification three hours ago is not
+  // something anybody is still looking at.
+  if (elapsed >= LONG_RECORDING_SECONDS && elapsed - state.warnedLongAt >= LONG_RECORDING_REPEAT_SECONDS) {
+    state.warnedLongAt = elapsed;
+    notify(
+      'Still recording',
+      `Minarrador has been recording for ${fmtDuration(elapsed)}. Click to stop and write the notes.`,
+      () => stopRecording().catch((err) => log.error('stop from the long-recording notice failed', err)),
+    );
+  }
+
+  checkDisk();
 }
 
 /**
@@ -593,17 +884,33 @@ function startRecording() {
  * Split out from stopRecording so shutdown can secure the irreplaceable part —
  * the audio — without waiting on a transcription that may take minutes.
  *
+ * There are now several things that can decide a meeting is over — the tray, the
+ * shortcut, the library, the silence watcher, the duration cap, a full disk, a
+ * quit — and two of them arriving together used to mean two pipeline runs over
+ * one folder, or worse: the second call finding the writer already closed,
+ * reading that as "nothing was recorded", and deleting the meeting. `stopping`
+ * is what makes the first caller the only one.
+ *
  * @returns {{ dir: string, meta: object } | null} null when nothing was kept
  */
 async function finalizeRecording() {
-  if (state.phase !== 'recording') return null;
+  if (state.phase !== 'recording' || state.stopping) return null;
+  state.stopping = true;
   const dir = state.currentDir;
   const startedAt = state.recordingStartedAt;
   const sources = { mic: capture.status.micOk, system: capture.status.systemOk };
 
-  const result = await capture.stopRecording();
+  let result;
+  try {
+    result = await capture.stopRecording();
+  } finally {
+    // Released once the file is closed, not when the pipeline finishes — the
+    // next meeting must not have to wait for minutes of transcription.
+    state.stopping = false;
+  }
   state.phase = 'idle';
   state.currentDir = null;
+  applySleepBlocker();
   refreshTray();
 
   if (!result || result.seconds < 1) {
@@ -621,6 +928,8 @@ async function finalizeRecording() {
     endedAt: new Date().toISOString(),
     durationSeconds: result.seconds,
     sources,
+    /** 2 means the file keeps the microphone and the room on separate channels. */
+    channels: result.channels ?? 1,
   };
   fs.writeFileSync(path.join(dir, FILES.meta), JSON.stringify(meta, null, 2));
   // The folder is now a meeting the library can list, notes or no notes.
@@ -712,16 +1021,17 @@ async function processMeeting(dir, meta) {
   }
 
   const abort = new AbortController();
-  state.jobs.set(dir, abort);
+  const job = { abort, progress: { phase: 'preparing', done: 0, total: 0, label: 'Preparing…' } };
+  state.jobs.set(dir, job);
   if (state.phase === 'idle') state.phase = 'processing';
-  state.progress = 'Preparing…';
+  state.progress = job.progress.label;
   refreshTray();
   notifyLibrary();
 
   const onProgress = (p) => {
     if (p.phase === 'transcribing') {
       state.progress = `Transcribing ${p.done}/${p.total}…`;
-      if (p.text) sendToTranscript('transcript:line', p.text);
+      if (p.text) sendToTranscript('transcript:line', { text: p.text, speaker: p.speaker });
     } else if (p.phase === 'summarising') {
       state.progress = p.total ? `Condensing ${p.done}/${p.total}…` : 'Writing notes…';
     } else if (p.phase === 'designing') {
@@ -729,7 +1039,12 @@ async function processMeeting(dir, meta) {
     } else if (p.phase === 'rendering') {
       state.progress = 'Exporting PDF…';
     }
+    // Kept per meeting as well as on the tray: two runs can overlap — stopping
+    // one meeting while the previous is still processing is allowed — and a
+    // single progress string cannot say which card it belongs to.
+    job.progress = { phase: p.phase, done: p.done ?? 0, total: p.total ?? 0, label: state.progress };
     refreshTray();
+    notifyProgress();
   };
 
   try {
@@ -815,6 +1130,205 @@ function reprocessMeeting(id) {
   log.info('generating notes again for', dir);
   processMeeting(dir, meta).catch((err) => log.error('re-running the pipeline failed for', dir, err));
   return { ok: true };
+}
+
+// ----------------------------------------------------------- editing the archive
+//
+// library.js reads the notes folder and never writes to it, which is what keeps
+// a window that only ever lists folder names from being able to touch the rest
+// of somebody's disk. The two things the archive nonetheless has to allow live
+// here instead: the window asks, main resolves the id through library.meetingDir
+// like every other channel, and main does the work.
+
+/**
+ * Moves a meeting to the Recycle Bin.
+ *
+ * `trashItem` rather than an rm: this is a folder holding the only copy of a
+ * conversation, and the difference between the two is whether a misclick is
+ * recoverable. The confirmation is raised here rather than in the page for the
+ * same reason it is a native dialog anywhere — the window that would be asking
+ * is the window doing the asking.
+ *
+ * @param {string} id meeting folder name
+ * @returns {Promise<{ ok: boolean, reason?: string }>}
+ */
+async function deleteMeeting(id) {
+  const dir = library.meetingDir(settings.notesDir, id);
+  if (!dir) return { ok: false, reason: 'That recording is not in the meetings folder any more.' };
+  if (state.phase === 'recording' && state.currentDir === dir) {
+    return { ok: false, reason: 'That meeting is still recording.' };
+  }
+  if (state.jobs.has(dir)) return { ok: false, reason: 'Those notes are still being written.' };
+
+  const card = library.describeMeeting(dir);
+  const parent = libraryWindow && !libraryWindow.isDestroyed() ? libraryWindow : null;
+  const options = {
+    type: 'warning',
+    buttons: ['Move to Recycle Bin', 'Keep'],
+    defaultId: 1,
+    cancelId: 1,
+    title: 'Delete this recording?',
+    message: `Delete “${card.title}”?`,
+    detail:
+      'The audio, the transcript, the notes and the brief all go to the Recycle Bin together. ' +
+      'Nothing else in Minarrador keeps a copy.',
+  };
+  const { response } = parent
+    ? await dialog.showMessageBox(parent, options)
+    : await dialog.showMessageBox(options);
+  if (response !== 0) return { ok: false };
+
+  const failure = await shell.trashItem(dir).then(
+    () => '',
+    (err) => err.message,
+  );
+  if (failure) {
+    log.error('could not delete', dir, failure);
+    return { ok: false, reason: `Windows would not move that folder to the Recycle Bin: ${failure}` };
+  }
+  log.info('deleted', dir);
+  if (state.lastDir === dir) state.lastDir = null;
+  notifyLibrary();
+  return { ok: true };
+}
+
+/**
+ * Retitles a meeting, or gives it back the title the model wrote.
+ *
+ * The folder name is left alone: it is the meeting's id everywhere — in
+ * state.jobs, in the tray's retry item, in whatever the user has already
+ * opened — and it is a timestamp, which is a better permanent name than
+ * anything typed in a hurry. The title is what people read, and it goes in its
+ * own file so the next pipeline run cannot overwrite it.
+ *
+ * @returns {{ ok: boolean, reason?: string }}
+ */
+function renameMeeting(id, title) {
+  const dir = library.meetingDir(settings.notesDir, id);
+  if (!dir) return { ok: false, reason: 'That recording is not in the meetings folder any more.' };
+  const clean = normaliseTitle(title);
+  try {
+    if (clean) fs.writeFileSync(path.join(dir, FILES.title), `${clean}\n`);
+    else fs.rmSync(path.join(dir, FILES.title), { force: true });
+  } catch (err) {
+    log.warn('could not rename', dir, err.message);
+    return { ok: false, reason: `That title could not be saved: ${err.message}` };
+  }
+  log.info(clean ? `renamed ${path.basename(dir)} to "${clean}"` : `reverted the title of ${path.basename(dir)}`);
+  notifyLibrary();
+  return { ok: true };
+}
+
+// ------------------------------------------------------------------- first run
+//
+// Everything below exists because the app can be installed into a state where
+// it cannot do its job — Ollama with nothing pulled, no whisper.cpp — and the
+// only instructions for getting out of it used to be terminal commands, which
+// is nobody's idea of a first run when the app arrived as an installer.
+
+/** Records where a download has got to and lets the settings pane redraw. */
+function setupProgress(patch) {
+  if (!state.setup) return;
+  Object.assign(state.setup, patch);
+  const now = Date.now();
+  if (now - lastSetupAt < PROGRESS_MIN_MS && !patch.done) return;
+  lastSetupAt = now;
+  notifySettings();
+}
+
+/**
+ * Runs one download to completion, with the pane able to watch and cancel it.
+ *
+ * @param {{ kind: 'model'|'whisper', label: string }} what
+ * @param {(ctx: { signal: AbortSignal, onProgress: (p: object) => void }) => Promise<unknown>} run
+ */
+async function runSetup(what, run) {
+  if (state.setup) return { ok: false, reason: `${state.setup.label} is already downloading.` };
+  const abort = new AbortController();
+  state.setup = { ...what, status: 'starting', completed: 0, total: 0, abort };
+  notifySettings();
+  try {
+    await run({
+      signal: abort.signal,
+      onProgress: (p) => setupProgress(p),
+    });
+    return { ok: true };
+  } catch (err) {
+    if (abort.signal.aborted) {
+      log.info(`${what.label}: cancelled`);
+      return { ok: false, reason: '' };
+    }
+    log.error(`${what.label} failed`, err);
+    return { ok: false, reason: err.message };
+  } finally {
+    state.setup = null;
+    notifySettings();
+  }
+}
+
+/**
+ * Pulls one of the models this app is configured to use.
+ *
+ * Only those two: a model tag is free text, and the point of restricting it is
+ * that nothing a page can invent reaches `ollama pull`. Both of these came out
+ * of the settings store, which is where the offer to pull them comes from too.
+ */
+async function pullModel(name) {
+  if (!state.ollamaUp) return { ok: false, reason: `Nothing is listening at ${settings.ollamaHost}.` };
+  if (![settings.transcribeModel, settings.summaryModel].includes(name)) {
+    return { ok: false, reason: 'Minarrador only downloads the models it is set to use.' };
+  }
+
+  const ollama = new Ollama(settings.ollamaHost);
+  const result = await runSetup({ kind: 'model', label: name }, ({ signal, onProgress }) =>
+    ollama.pull(name, { signal, onProgress: (p) => onProgress({ status: p.status, completed: p.completed, total: p.total }) }),
+  );
+  if (result.ok) {
+    await refreshOllama();
+    notify('Model ready', `${name} is installed. Minarrador can transcribe and write notes now.`);
+  } else if (result.reason) {
+    notify('Could not download the model', result.reason);
+  }
+  return result;
+}
+
+/**
+ * Fetches whisper.cpp — the binary and one set of weights — into the app's own
+ * install root, and points the settings at what arrived.
+ */
+async function installWhisper(model) {
+  if (!Object.hasOwn(whisperSetup.MODELS, model)) {
+    return { ok: false, reason: 'That is not a model Minarrador knows how to fetch.' };
+  }
+  const root = settings.whisperRoot || installRoot();
+  if (!root) return { ok: false, reason: 'There is nowhere to install whisper.cpp on this machine.' };
+
+  const result = await runSetup({ kind: 'whisper', label: `whisper.cpp · ggml-${model}` }, ({ signal, onProgress }) =>
+    whisperSetup.install({
+      root,
+      model,
+      signal,
+      onProgress: (p) =>
+        onProgress({
+          status: p.phase === 'unpacking' ? 'unpacking' : p.label || p.phase,
+          completed: p.completed ?? 0,
+          total: p.total ?? 0,
+        }),
+    }),
+  );
+
+  if (!result.ok) {
+    if (result.reason) notify('Could not install whisper.cpp', result.reason);
+    return result;
+  }
+
+  // Naming the weights that arrived is what turns a finished download into a
+  // live engine: applySetting re-resolves the install and re-points the live
+  // transcriber, so nothing has to be restarted.
+  applySetting({ whisperModel: `ggml-${model}.bin` });
+  log.info('whisper.cpp installed into', root);
+  notify('whisper.cpp is ready', `ggml-${model} is installed. Transcription runs locally and several times faster now.`);
+  return result;
 }
 
 // ------------------------------------------------------------------- services
@@ -922,7 +1436,18 @@ function applySetting(patch) {
   settings = settingsStore.save(patch);
   if ('startAtLogin' in patch) applyLoginItem();
   if ('hotkey' in patch) applyHotkey();
-  if ('captureMic' in patch || 'captureSystem' in patch) applyCaptureConfig();
+  if ('preventSleep' in patch) applySleepBlocker();
+  if ('silenceStopMinutes' in patch) capture?.silence.configure({ minutes: settings.silenceStopMinutes });
+  // A different microphone means a different stream, which means the graph is
+  // rebuilt around it — there is no way to swap a source under a live one.
+  if (
+    'captureMic' in patch ||
+    'captureSystem' in patch ||
+    'micDeviceId' in patch ||
+    'micDeviceLabel' in patch
+  ) {
+    applyCaptureConfig();
+  }
   // Whisper first: which engine the live transcriber can actually use depends on
   // what the server resolved to.
   if ('whisperModel' in patch || 'whisperRoot' in patch || 'whisperThreads' in patch) applyWhisperConfig();
@@ -944,6 +1469,11 @@ async function chooseNotesFolder() {
   if (res.canceled || !res.filePaths[0]) return false;
   settings = settingsStore.save({ notesDir: res.filePaths[0] });
   fs.mkdirSync(settings.notesDir, { recursive: true });
+  // A different folder is very likely a different volume, so everything known
+  // about the free space — including whether it has been warned about — is now
+  // about somewhere else.
+  state.disk = { free: null, checkedAt: 0, warned: false };
+  checkDisk({ force: true });
   refreshTray();
   notifySettings();
   // An open library is now looking at the wrong folder entirely.
@@ -960,7 +1490,12 @@ function applyLoginItem() {
 }
 
 function applyCaptureConfig() {
-  capture.setActive(true, { captureMic: settings.captureMic, captureSystem: settings.captureSystem });
+  capture.setActive(true, {
+    captureMic: settings.captureMic,
+    captureSystem: settings.captureSystem,
+    micDeviceId: settings.micDeviceId,
+    micDeviceLabel: settings.micDeviceLabel,
+  });
 }
 
 function applyWhisperConfig() {
@@ -996,7 +1531,13 @@ function diagnostics() {
       hotkeyRegistered: state.hotkeyRegistered,
       retry: state.retry,
       captureStatus: capture?.status,
+      // Which microphones exist and which one is open — the first thing to ask
+      // about "it recorded nothing" or "it recorded the wrong room".
+      micDevices: capture?.devices,
+      recordingChannels: capture?.recordingChannels,
       levels: capture?.levels,
+      diskFreeBytes: state.disk.free,
+      sleepBlocked: state.sleepBlocker !== null,
       settings,
       logPath: log.path,
     },
@@ -1148,6 +1689,18 @@ if (!app.requestSingleInstanceLock()) {
     return reprocessMeeting(String(id ?? ''));
   });
 
+  // The two ways the archive changes. Both name a meeting and nothing else, and
+  // both are done here rather than in library.js, which stays a reader.
+  ipcMain.handle('library:delete', async (event, id) => {
+    if (!fromLibrary(event)) return { ok: false, reason: '' };
+    return deleteMeeting(String(id ?? ''));
+  });
+
+  ipcMain.handle('library:rename', (event, req) => {
+    if (!fromLibrary(event)) return { ok: false, reason: '' };
+    return renameMeeting(String(req?.id ?? ''), req?.title);
+  });
+
   // Starting a meeting from the library rather than the tray. Neither call is
   // awaited: startRecording is synchronous, and stopRecording runs the whole
   // pipeline, which is minutes of work no click should hang on. The window finds
@@ -1166,7 +1719,14 @@ if (!app.requestSingleInstanceLock()) {
   // Settings. The library is the only surface that changes one now, and it is
   // still a renderer: the patch is filtered to the keys below, and the two that
   // name something on disk are checked against what is actually installed.
-  ipcMain.handle('settings:get', (event) => (fromLibrary(event) ? settingsState() : null));
+  ipcMain.handle('settings:get', (event) => {
+    if (!fromLibrary(event)) return null;
+    // Opening the pane is the one moment the free space is worth a syscall
+    // outside a recording — otherwise the storage row would have nothing to say
+    // until the first meeting had been recorded. checkDisk throttles itself.
+    checkDisk();
+    return settingsState();
+  });
 
   ipcMain.handle('settings:set', (event, patch) => {
     if (!fromLibrary(event)) return null;
@@ -1181,6 +1741,13 @@ if (!app.requestSingleInstanceLock()) {
     if ('whisperModel' in clean && !(whisper?.models ?? []).includes(clean.whisperModel)) delete clean.whisperModel;
     if ('transcribeModel' in clean && !state.models.includes(clean.transcribeModel)) delete clean.transcribeModel;
     if ('summaryModel' in clean && !state.models.includes(clean.summaryModel)) delete clean.summaryModel;
+    // A device id is opaque rather than a path, but it still names something
+    // real, so it is held to the same rule: one of the ones the capture worker
+    // reported, or the empty string that means "whatever Windows defaults to".
+    if ('micDeviceId' in clean && clean.micDeviceId && !capture.devices.some((d) => d.id === clean.micDeviceId)) {
+      delete clean.micDeviceId;
+      delete clean.micDeviceLabel;
+    }
 
     if (Object.keys(clean).length) {
       applySetting(clean);
@@ -1208,6 +1775,67 @@ if (!app.requestSingleInstanceLock()) {
     showSnippetsWindow();
   });
 
+  // The way out of an install that cannot transcribe anything. Both take
+  // minutes, so both report progress through settings:changed rather than
+  // leaving the pane on a spinner, and both can be called off.
+  ipcMain.handle('settings:pullModel', async (event, name) => {
+    if (!fromLibrary(event)) return { ok: false, reason: '' };
+    return pullModel(String(name ?? ''));
+  });
+
+  ipcMain.handle('settings:installWhisper', async (event, model) => {
+    if (!fromLibrary(event)) return { ok: false, reason: '' };
+    return installWhisper(String(model ?? ''));
+  });
+
+  ipcMain.handle('settings:cancelSetup', (event) => {
+    if (!fromLibrary(event)) return null;
+    state.setup?.abort.abort();
+    return settingsState();
+  });
+
+  /**
+   * Survives the machine going to sleep in the middle of a meeting.
+   *
+   * Closing a laptop lid suspends the machine whatever a power-save blocker
+   * says, and what the Web Audio graph's state is on the other side of that is
+   * undefined — in practice it comes back with dead device tracks, so the tray
+   * says "Recording" while the WAV stops growing. Nothing notices, which is the
+   * same class of failure as a dead capture renderer and gets the same answer:
+   * rebuild the graph, re-arm it into the same file, and say how much was lost.
+   *
+   * The audio between the suspend and the rebuild is gone. Nothing can recover
+   * it; the point is that the rest of the meeting is not.
+   */
+  function installPowerHandlers() {
+    let sleptAt = 0;
+
+    powerMonitor.on('suspend', () => {
+      sleptAt = Date.now();
+      if (state.phase !== 'recording') return;
+      // Nothing useful can be done here — the process is about to stop running
+      // — but the log is what makes the gap in the audio explainable later.
+      log.warn('the machine is suspending while a meeting is being recorded');
+    });
+
+    powerMonitor.on('resume', () => {
+      const asleep = sleptAt ? Math.round((Date.now() - sleptAt) / 1000) : 0;
+      sleptAt = 0;
+      log.info(`the machine resumed${asleep ? ` after ${fmtDuration(asleep)}` : ''}`);
+      const wasRecording = state.phase === 'recording';
+      capture?.restart();
+      // Sleeping through a meeting is exactly how a recording ends up hours
+      // long, so the limits get a look the moment the clock is believable again.
+      if (!wasRecording) return;
+      state.disk.checkedAt = 0;
+      notify(
+        'Recording resumed',
+        `The machine was asleep${asleep ? ` for ${fmtDuration(asleep)}` : ''}. That part of the meeting was not recorded, but this one continues.`,
+      );
+      checkRecordingLimits();
+    });
+  }
+
   /**
    * Brings the app up. Everything here has to succeed for there to be a tray
    * icon at all, which is why the caller treats a throw as fatal — see below.
@@ -1219,6 +1847,9 @@ if (!app.requestSingleInstanceLock()) {
     settings = settingsStore.load();
     fs.mkdirSync(settings.notesDir, { recursive: true });
     applyLoginItem();
+    // Read once at startup so the library has something to say about the volume
+    // before the first meeting is recorded onto it.
+    checkDisk({ force: true });
 
     CaptureController.installMediaHandlers();
     whisper = new WhisperServer({
@@ -1237,14 +1868,36 @@ if (!app.requestSingleInstanceLock()) {
     whisper.on('ready', refreshTray);
 
     capture = new CaptureController({ ollamaHost: settings.ollamaHost, whisper });
-    capture.on('status', refreshTray);
-    capture.on('transcript', (text) => {
-      sendToTranscript('transcript:line', text);
-      appendLiveTranscript(text);
+    capture.on('status', () => {
+      refreshTray();
+      // Which microphone opened, and whether the chosen one was there to open,
+      // are both things the settings pane shows.
+      notifySettings();
+    });
+    capture.on('devices', notifySettings);
+    capture.on('transcript', (text, speaker) => {
+      sendToTranscript('transcript:line', { text, speaker });
+      appendLiveTranscript(text, speaker);
     });
     capture.on('speech', () => {
       if (!settings.suggestOnAudio || state.phase === 'recording') return;
       notify('Sounds like a meeting', 'Minarrador heard sustained audio. Click to start recording.', startRecording);
+    });
+    // A meeting that ended without anybody saying so. Stopping it writes the
+    // notes for what was actually said, which is the point — the alternative is
+    // a folder nobody asked for holding hours of an empty room.
+    capture.on('silence', ({ minutes }) => {
+      if (state.phase !== 'recording') return;
+      log.info(`stopping the recording after ${minutes} minutes of silence`);
+      notify('Recording stopped', `Nothing was audible for ${minutes} minutes, so Minarrador stopped and is writing the notes.`);
+      stopRecording().catch((err) => log.error('stop on silence failed', err));
+    });
+    // The WAV stopped growing. Everything else still looks like a recording, so
+    // this is the only chance to say so before the meeting is over.
+    capture.on('writeFailed', ({ error, seconds }) => {
+      log.error('the recording could not be written:', error);
+      notify('Recording stopped', `Minarrador could not keep writing the audio (${error}). ${fmtDuration(seconds)} was saved.`);
+      stopRecording().catch((err) => log.error('stop after a write failure failed', err));
     });
     // The worker rebuilds itself; this is only about telling the person in the
     // meeting, who otherwise has no way to know the room stopped being recorded.
@@ -1283,10 +1936,10 @@ if (!app.requestSingleInstanceLock()) {
       openSettings: () => showLibraryWindow({ settings: true }),
       toggleTranscript: toggleTranscriptWindow,
       diagnostics,
-      restartCapture: () => {
-        capture.setActive(false);
-        setTimeout(applyCaptureConfig, 600);
-      },
+      // Rebuilding is the controller's job now, because a recording in progress
+      // has to be re-armed into the same file afterwards — the tray and the
+      // wake-from-sleep handler both want exactly that.
+      restartCapture: () => capture.restart(),
       // before-quit owns the shutdown sequence, including its re-entrancy guard.
       quit: () => app.quit(),
     });
@@ -1295,6 +1948,7 @@ if (!app.requestSingleInstanceLock()) {
     applyCaptureConfig();
     applyLiveConfig();
     applyHotkey();
+    installPowerHandlers();
     // Also finds the newest meeting still owed its notes, so the tray can offer
     // to write them for a run that failed in an earlier session.
     notifyLibrary();
@@ -1306,9 +1960,13 @@ if (!app.requestSingleInstanceLock()) {
     ollamaTimer = setInterval(() => {
       refreshOllama().catch((err) => log.warn('Ollama poll failed:', err.message));
     }, OLLAMA_POLL_MS);
-    // Keeps the recording clock in the tooltip/menu moving.
+    // Keeps the recording clock in the tooltip/menu moving, and is the one
+    // heartbeat the duration cap, the long-recording notice and the free-space
+    // check all ride on — none of them is worth a timer of its own.
     uiTimer = setInterval(() => {
-      if (state.phase === 'recording') refreshTray();
+      if (state.phase !== 'recording') return;
+      refreshTray();
+      checkRecordingLimits();
     }, 1000);
 
     if (!startedHidden) {
@@ -1339,13 +1997,21 @@ if (!app.requestSingleInstanceLock()) {
     // A global shortcut outlives the window that registered it, so hand it back
     // rather than leaving the combination dead for the next application.
     globalShortcut.unregisterAll();
+    // Same for the sleep block: a process that exits holding one leaves the
+    // machine unable to suspend on idle until the next reboot.
+    state.phase = 'idle';
+    applySleepBlocker();
+    // A download in flight has nobody left to report to, and half a model is
+    // worse than none — whisper-setup renames into place, so an aborted one
+    // leaves no install that later looks real.
+    state.setup?.abort.abort();
 
     // A meeting still being processed is about to lose its pipeline. Stop the
     // model requests rather than leaving them to be cut mid-socket, and leave
     // the folder able to explain itself — every stage that finished has already
     // written its artefact, so this is only ever the tail of the chain.
-    for (const [dir, abort] of state.jobs) {
-      abort.abort();
+    for (const [dir, job] of state.jobs) {
+      job.abort.abort();
       log.warn('quit requested while processing', dir);
       writeResumeNote(dir, 'Minarrador quit while these notes were still being written.');
     }

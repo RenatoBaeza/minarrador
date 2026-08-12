@@ -10,7 +10,7 @@
 const fs = require('node:fs');
 const path = require('node:path');
 
-const { FILES, parseFolderStamp } = require('./paths');
+const { FILES, SPEAKERS, parseFolderStamp, parseSpeakerLine, readTitle } = require('./paths');
 
 /** How much of a meeting rides along in the list payload, per card. */
 const PREVIEW_CHARS = 180;
@@ -63,6 +63,17 @@ const clip = (text, chars = PREVIEW_CHARS) => {
   const flat = String(text ?? '').replace(/\s+/g, ' ').trim();
   return flat.length > chars ? `${flat.slice(0, chars - 1)}…` : flat;
 };
+
+/**
+ * A speaker-labelled transcript with the labels taken back off.
+ *
+ * Everything that treats a transcript as text — the card preview, the search —
+ * wants what was said, not how the file marks up who said it. Leaving them in
+ * would also make searching for "you" match every line of every two-channel
+ * meeting, and report the count as though somebody had said it.
+ */
+const SPEAKER_PREFIX = new RegExp(`^(?:${Object.values(SPEAKERS).join('|')}): `, 'gm');
+const spoken = (text) => String(text ?? '').replace(SPEAKER_PREFIX, '');
 
 /**
  * Resolves a meeting id to its folder, refusing anything that is not a direct
@@ -151,14 +162,23 @@ function describeMeeting(dir) {
 
   const transcript = transcriptSource(dir);
   const summary = Array.isArray(notes?.summary) ? notes.summary.filter((s) => typeof s === 'string') : [];
-  const preview = clip(summary[0] ?? (transcript.file ? head(transcript.file) : ''));
+  const preview = clip(spoken(summary[0] ?? (transcript.file ? head(transcript.file) : '')));
 
   const failed = has('ERROR.txt');
   const status = notes ? 'ready' : failed ? 'failed' : has('UNPROCESSED.txt') ? 'unprocessed' : 'pending';
 
+  // A title someone typed beats the one a model guessed at, always. Otherwise
+  // every meeting is called whatever the summariser made of it, and an archive
+  // of "Weekly Sync Discussion" is an archive nobody can find anything in.
+  const chosen = readTitle(dir);
+  const generated = typeof notes?.title === 'string' && notes.title.trim() ? notes.title.trim() : '';
+
   return {
     id,
-    title: typeof notes?.title === 'string' && notes.title.trim() ? notes.title.trim() : 'Untitled recording',
+    title: chosen || generated || 'Untitled recording',
+    /** The model's own title, kept so a rename can be undone back to it. */
+    generatedTitle: generated,
+    renamed: Boolean(chosen),
     startedAt,
     durationSeconds: Number.isFinite(meta.durationSeconds) ? meta.durationSeconds : 0,
     status,
@@ -187,7 +207,7 @@ function describeMeeting(dir) {
  */
 function findInMeeting(dir, card, query) {
   const needle = query.toLowerCase();
-  const transcript = readText(transcriptSource(dir).file);
+  const transcript = spoken(readText(transcriptSource(dir).file));
   const haystacks = [
     { text: transcript, quote: true },
     { text: card.title, quote: false },
@@ -264,6 +284,11 @@ function listMeetings(notesDir, { query = '' } = {}) {
  * where only the .txt survived, or one where the pipeline never ran and the live
  * preview is all there is — the file's own line breaks stand in, untimed.
  *
+ * A line also knows which side of the conversation it came from, when the
+ * recording kept the two apart. transcript.json carries that as a field;
+ * everywhere else it is a prefix on the line, which is read back off here so
+ * the reader can render it as a speaker rather than as part of the sentence.
+ *
  * @param {'pipeline'|'live'|'none'} source which file is being read; the live
  *   preview writes one caption per line, the pipeline one paragraph per chunk
  */
@@ -275,6 +300,7 @@ function transcriptLines(dir, file, source) {
       .filter((s) => typeof s?.text === 'string' && s.text.trim())
       .map((s) => ({
         startSeconds: Number.isFinite(s.startSeconds) ? s.startSeconds : null,
+        speaker: SPEAKERS[s.speaker] ? String(s.speaker) : '',
         text: s.text.trim(),
       }));
   }
@@ -283,7 +309,7 @@ function transcriptLines(dir, file, source) {
     .split(source === 'live' ? /\n+/ : /\n{2,}/)
     .map((block) => block.trim())
     .filter(Boolean)
-    .map((text) => ({ startSeconds: null, text }));
+    .map((block) => ({ startSeconds: null, ...parseSpeakerLine(block) }));
 }
 
 /**
@@ -341,6 +367,8 @@ function readMeeting(notesDir, id) {
       mic: Boolean(meta.sources?.mic),
       system: Boolean(meta.sources?.system),
     },
+    /** Names for the two sides, so the reader never has to know the channel scheme. */
+    speakers: SPEAKERS,
     models: {
       transcribe: String(meta.models?.transcribe ?? ''),
       summary: String(meta.models?.summary ?? ''),

@@ -6,7 +6,17 @@ const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
 
-const { WavWriter, buildWav, readWav, rms, splitIntoChunks, HEADER_BYTES } = require('../src/main/wav');
+const {
+  WavWriter,
+  buildWav,
+  readWav,
+  rms,
+  channelRms,
+  splitIntoChunks,
+  deinterleave,
+  downmix,
+  HEADER_BYTES,
+} = require('../src/main/wav');
 
 const RATE = 16000;
 
@@ -162,4 +172,147 @@ test('splitIntoChunks handles input shorter than one chunk', () => {
 
 test('splitIntoChunks returns nothing for empty audio', () => {
   assert.deepEqual(splitIntoChunks(Buffer.alloc(0), RATE, 60), []);
+});
+
+// The byte offsets are what let a two-channel recording be cut once, on the mix,
+// and have both channels sliced to the same boundaries — a cut found where
+// neither side was talking.
+test('splitIntoChunks reports byte offsets that match the audio it returns', () => {
+  const pcm = tone(150);
+  const chunks = splitIntoChunks(pcm, RATE, 60);
+
+  assert.equal(chunks[0].start, 0);
+  assert.equal(chunks.at(-1).end, pcm.length);
+  for (const c of chunks) {
+    assert.equal(c.end - c.start, c.pcm.length, 'the offsets must span exactly the chunk');
+    assert.deepEqual(pcm.subarray(c.start, c.end), c.pcm);
+    assert.equal(c.start % 2, 0, 'an offset must never land inside a sample');
+  }
+});
+
+// ------------------------------------------------------- two-channel recordings
+
+/** Interleaves two equal-length mono buffers into one stereo buffer. */
+function interleave(left, right) {
+  const frames = left.length / 2;
+  const out = Buffer.alloc(frames * 4);
+  for (let f = 0; f < frames; f++) {
+    out.writeInt16LE(left.readInt16LE(f * 2), f * 4);
+    out.writeInt16LE(right.readInt16LE(f * 2), f * 4 + 2);
+  }
+  return out;
+}
+
+test('deinterleave pulls the two sides of a recording back apart', () => {
+  const mic = tone(0.25, 0.5);
+  const system = tone(0.25, 0.1);
+  const [left, right] = deinterleave(interleave(mic, system), 2);
+
+  assert.deepEqual(left, mic, 'left is the microphone');
+  assert.deepEqual(right, system, 'right is the system audio');
+});
+
+test('deinterleave hands a mono buffer straight back', () => {
+  const pcm = tone(0.1);
+  assert.deepEqual(deinterleave(pcm, 1), [pcm]);
+});
+
+test('deinterleave ignores a trailing partial frame rather than reading past it', () => {
+  const stereo = interleave(tone(0.05), tone(0.05));
+  const truncated = stereo.subarray(0, stereo.length - 3);
+  const [left, right] = deinterleave(truncated, 2);
+  assert.equal(left.length, right.length);
+  assert.doesNotThrow(() => deinterleave(truncated, 2));
+});
+
+test('downmix sums the channels rather than halving both voices', () => {
+  // One side talking, the other silent — which is what most of a meeting is.
+  const speech = tone(0.2, 0.4);
+  const quiet = silence(0.2);
+  const mono = downmix(interleave(speech, quiet), 2);
+
+  assert.equal(mono.length, speech.length);
+  assert.deepEqual(mono, speech, 'a lone speaker must keep their level');
+});
+
+test('downmix clamps instead of wrapping when both sides are loud', () => {
+  const loud = tone(0.1, 1.0);
+  const mono = downmix(interleave(loud, loud), 2);
+  for (let i = 0; i < mono.length; i += 2) {
+    const s = mono.readInt16LE(i);
+    assert.ok(s >= -32768 && s <= 32767);
+  }
+  // Wrapping would put full-scale positive samples at the negative rail.
+  const peak = Math.max(...Array.from({ length: mono.length / 2 }, (_, i) => mono.readInt16LE(i * 2)));
+  assert.ok(peak > 0, 'a loud sum must saturate, not invert');
+});
+
+test('downmix leaves mono alone', () => {
+  const pcm = tone(0.1);
+  assert.deepEqual(downmix(pcm, 1), pcm);
+});
+
+test('channelRms reads one side without being dragged down by the other', () => {
+  const speech = tone(0.2, 0.5);
+  const stereo = interleave(speech, silence(0.2));
+
+  assert.ok(Math.abs(channelRms(stereo, 2, 0) - rms(speech)) < 1e-6, 'the talking side reads as itself');
+  assert.equal(channelRms(stereo, 2, 1), 0, 'the silent side reads as silence');
+  // Measured across both channels the same audio looks 3 dB quieter, which is
+  // what would put every utterance nearer the silence gate.
+  assert.ok(rms(stereo) < channelRms(stereo, 2, 0));
+});
+
+test('channelRms falls back to the whole buffer for mono', () => {
+  const pcm = tone(0.1);
+  assert.equal(channelRms(pcm, 1, 0), rms(pcm));
+});
+
+test('WavWriter writes a stereo header the reader agrees with', () => {
+  const file = tmpFile('stereo.wav');
+  const writer = new WavWriter(file, { sampleRate: RATE, channels: 2 });
+  const stereo = interleave(tone(1), silence(1));
+  writer.write(stereo);
+  const result = writer.close();
+
+  assert.equal(result.bytes, stereo.length);
+  assert.equal(result.seconds.toFixed(2), '1.00', 'a stereo second is twice the bytes, not twice the duration');
+
+  const read = readWav(file);
+  assert.equal(read.channels, 2);
+  assert.equal(read.seconds.toFixed(2), '1.00');
+  assert.deepEqual(read.pcm, stereo);
+});
+
+// A full disk fails every write from here on. Throwing would come back out
+// through the IPC handler that delivers PCM, where nobody catches it.
+test('WavWriter keeps what it has and reports the failure instead of throwing', () => {
+  const file = tmpFile('doomed.wav');
+  const writer = new WavWriter(file, { sampleRate: RATE, channels: 1 });
+  writer.write(tone(0.5));
+  const kept = writer.dataBytes;
+
+  // Stand in for the disk filling up: close the descriptor under the writer.
+  fs.closeSync(writer.fd);
+
+  assert.doesNotThrow(() => writer.write(tone(0.5)));
+  assert.ok(writer.error, 'the caller has to be able to tell that it stopped');
+  assert.equal(writer.dataBytes, kept, 'the failed write must not be counted');
+  assert.equal(writer.fd, null, 'a writer that cannot write is closed, not left half open');
+
+  // Every later write is a no-op rather than a second failure.
+  assert.doesNotThrow(() => writer.write(tone(0.1)));
+  assert.equal(writer.close().error, writer.error);
+});
+
+test('readWav recovers a recording whose header was never patched after a failure', () => {
+  const file = tmpFile('cut-short.wav');
+  const writer = new WavWriter(file, { sampleRate: RATE, channels: 1 });
+  const pcm = tone(0.75);
+  writer.write(pcm);
+  fs.closeSync(writer.fd);
+  writer.write(tone(0.1)); // fails, and closes without being able to patch
+
+  // The bytes are on disk even though the length field is still zero.
+  assert.equal(readWav(file).pcm.length, pcm.length);
 });

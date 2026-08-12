@@ -44,7 +44,22 @@ const view = {
   mode: 'reader',
   /** settingsState() from the main process, or null before it has been asked for. */
   settings: null,
-  activity: { recordingId: null, processingIds: [] },
+  /**
+   * Which GGML weights the whisper.cpp install button would fetch.
+   *
+   * Lives here rather than in settings: nothing has been chosen until the
+   * download finishes, and writing a whisperModel that is not on disk is
+   * exactly the state the settings pane exists to mark in red.
+   */
+  whisperPick: 'base',
+  /**
+   * True while the title is an open text box.
+   *
+   * The reader redraws whenever the folder changes, and a pipeline finishing
+   * elsewhere would otherwise throw away half a typed title.
+   */
+  renaming: false,
+  activity: { recordingId: null, processingIds: [], processing: [] },
   /**
    * What the last record click asked for, until the rail confirms it happened.
    * Recording is started and stopped in the main process, so this window learns
@@ -136,12 +151,52 @@ function highlighted(text, query) {
   return frag;
 }
 
+// ------------------------------------------------------------------ progress
+
+/** Where the pipeline has got to on one meeting, or null if it is not running. */
+const progressFor = (id) => (view.activity.processing ?? []).find((p) => p.id === id) ?? null;
+
+/**
+ * A pipeline stage, short enough to sit in a card's pill.
+ *
+ * The tray has said "Transcribing 12/60…" since the pipeline existed while this
+ * card said "Working…", and an hour of audio is a long time to be told only
+ * that something is happening.
+ */
+function progressTag(p) {
+  if (!p) return 'Working…';
+  if (p.phase === 'transcribing' && p.total) return `Transcribing ${p.done}/${p.total}`;
+  if (p.phase === 'summarising') return p.total ? `Condensing ${p.done}/${p.total}` : 'Writing notes';
+  if (p.phase === 'designing') return 'Designing';
+  if (p.phase === 'rendering') return 'Exporting PDF';
+  return 'Working…';
+}
+
+/** The same thing in a sentence, for the reader where there is room for one. */
+function progressSentence(p) {
+  if (!p) return 'Starting…';
+  if (p.phase === 'transcribing' && p.total) {
+    return `Transcribing the audio — chunk ${Math.min(p.done + 1, p.total)} of ${p.total}.`;
+  }
+  if (p.phase === 'summarising') {
+    return p.total ? `Condensing the transcript — part ${p.done + 1} of ${p.total}.` : 'Writing the notes.';
+  }
+  if (p.phase === 'designing') return 'Designing the printed brief.';
+  if (p.phase === 'rendering') return 'Exporting the PDF.';
+  return p.label || 'Starting…';
+}
+
+/** 0..1 through the run, or null when the stage has nothing to count. */
+const progressFraction = (p) => (p && p.total ? Math.min(1, p.done / p.total) : null);
+
 // ------------------------------------------------------------------- the rail
 
 /** What a folder without notes should say for itself, if anything. */
 function cardTag(meeting) {
   if (meeting.id === view.activity.recordingId) return { text: 'Recording', className: 'recording' };
-  if (view.activity.processingIds.includes(meeting.id)) return { text: 'Working…', className: 'working' };
+  if (view.activity.processingIds.includes(meeting.id)) {
+    return { text: progressTag(progressFor(meeting.id)), className: 'working' };
+  }
   if (meeting.status === 'failed') return { text: 'Failed', className: 'failed' };
   if (meeting.status === 'unprocessed') return { text: 'No notes', className: '' };
   if (meeting.status === 'pending') return { text: 'Audio only', className: '' };
@@ -232,6 +287,82 @@ function metaRow(meeting) {
   return row;
 }
 
+// -------------------------------------------------------------- what is copied
+
+/**
+ * The transcript as text, with the speaker kept on each line where there is one.
+ *
+ * Pasting a transcript into anything else is the point of the button, and a
+ * two-channel meeting pasted without its labels loses the one thing that
+ * separates a transcript from a wall of sentences.
+ */
+const transcriptText = (meeting) =>
+  meeting.transcript
+    .map((line) => (line.speaker ? `${window.library.speakers[line.speaker]}: ${line.text}` : line.text))
+    .join('\n\n');
+
+/** Just the checkboxes — the thing people actually paste into Slack or Jira. */
+const actionItemsMarkdown = (meeting) =>
+  meeting.actionItems
+    .map((a) => `- [ ] ${a.task}${a.owner ? ` — **${a.owner}**` : ''}${a.due ? ` *(${a.due})*` : ''}`)
+    .join('\n');
+
+/**
+ * The notes as Markdown.
+ *
+ * Built here from the structured meeting rather than read back out of
+ * notes.md — that file only exists once the pipeline has finished, and this
+ * button is at its most useful on the meeting that just landed. It is also the
+ * shape "copy the action items" is a subset of.
+ */
+function notesMarkdown(meeting) {
+  const started = new Date(meeting.startedAt);
+  const lines = [`# ${meeting.title}`, '', `*${started.toLocaleString()} · ${fmtDuration(meeting.durationSeconds)}*`, ''];
+
+  if (meeting.summary.length) {
+    lines.push('## Summary', '');
+    for (const bullet of meeting.summary) lines.push(`- ${bullet}`);
+    lines.push('');
+  }
+
+  lines.push('## Decisions', '');
+  if (meeting.decisions.length) {
+    for (const d of meeting.decisions) lines.push(`- **${d.decision}**${d.context ? ` — ${d.context}` : ''}`);
+  } else {
+    lines.push('- *Nothing was settled in this meeting.*');
+  }
+  lines.push('');
+
+  lines.push('## Action items', '');
+  lines.push(actionItemsMarkdown(meeting) || '- *Nobody left with anything to do.*');
+  lines.push('');
+  return lines.join('\n');
+}
+
+// ----------------------------------------------------------------- the actions
+
+/**
+ * A button that copies, and says so.
+ *
+ * The clipboard gives no feedback of its own, and a button that does nothing
+ * visible reads as one that did not work.
+ */
+function copyButton(label, enabled, text) {
+  const button = el('button', 'button', label);
+  button.type = 'button';
+  button.disabled = !enabled;
+  if (enabled) {
+    button.addEventListener('click', () => {
+      window.library.copy(text());
+      button.textContent = 'Copied';
+      setTimeout(() => {
+        button.textContent = label;
+      }, 1200);
+    });
+  }
+  return button;
+}
+
 function actionBar(meeting) {
   const bar = el('div', 'actions');
 
@@ -241,21 +372,104 @@ function actionBar(meeting) {
     button.disabled = !enabled;
     if (enabled) button.addEventListener('click', () => onClick(button));
     bar.append(button);
+    return button;
   };
 
   act('Open PDF brief', 'button primary', meeting.files.pdf, () => window.library.open(meeting.id, 'pdf'));
   act('Open folder', 'button', true, () => window.library.open(meeting.id, 'folder'));
   act('Play audio', 'button', meeting.files.audio, () => window.library.open(meeting.id, 'audio'));
-  act('Copy transcript', 'button', meeting.transcript.length > 0, (button) => {
-    window.library.copy(meeting.transcript.map((line) => line.text).join('\n\n'));
-    // The clipboard gives no feedback of its own, and a button that does
-    // nothing visible reads as one that did not work.
-    button.textContent = 'Copied';
-    setTimeout(() => {
-      button.textContent = 'Copy transcript';
-    }, 1200);
-  });
+
+  bar.append(
+    copyButton('Copy notes', meeting.status === 'ready', () => notesMarkdown(meeting)),
+    // The single most-pasted thing a meeting produces, and until now the only
+    // way at it was to open the PDF and retype it.
+    copyButton('Copy action items', meeting.actionItems.length > 0, () => actionItemsMarkdown(meeting)),
+    copyButton('Copy transcript', meeting.transcript.length > 0, () => transcriptText(meeting)),
+  );
+
+  // Editing the archive sits apart from reading it, at the other end of the row.
+  bar.append(el('span', 'spacer'));
+  act('Rename', 'button', true, () => startRename(meeting));
+  act('Delete', 'button danger', true, (button) => removeMeeting(meeting, button));
   return bar;
+}
+
+/**
+ * Turns the title into a text box.
+ *
+ * A meeting is called whatever the summariser made of it, for ever — which is
+ * how an archive becomes a hundred rows of "Weekly Sync Discussion". The folder
+ * name is left alone: it is the meeting's id everywhere else, and a timestamp
+ * is a better permanent name than anything typed in a hurry.
+ */
+function startRename(meeting) {
+  const heading = readerEl.querySelector('.doc h1');
+  if (!heading || view.renaming) return;
+  view.renaming = true;
+
+  const input = el('input', 'title-input');
+  input.type = 'text';
+  input.value = meeting.title;
+  input.maxLength = 120;
+  input.spellcheck = false;
+  input.setAttribute('aria-label', 'Meeting title');
+  heading.replaceChildren(input);
+  input.focus();
+  input.select();
+
+  let settled = false;
+  const finish = async (save) => {
+    if (settled) return;
+    settled = true;
+    view.renaming = false;
+    const wanted = input.value.trim();
+    // Unchanged, or cancelled: put the heading back without a round trip.
+    if (!save || wanted === meeting.title) {
+      renderReader(meeting);
+      return;
+    }
+    const result = await window.library.rename(meeting.id, wanted);
+    // A rename changes the rail as well as the reader, so the refresh behind
+    // library:changed is what redraws this — but a failure never fires one, and
+    // the pane must not be left holding a dead input.
+    if (!result?.ok) renderReader(meeting);
+  };
+
+  input.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') {
+      e.preventDefault();
+      finish(true);
+    } else if (e.key === 'Escape') {
+      // Stop it reaching the window handler, which reads Escape as "close".
+      e.stopPropagation();
+      e.preventDefault();
+      finish(false);
+    }
+  });
+  // Clicking away commits, the way a rename does everywhere else.
+  input.addEventListener('blur', () => finish(true));
+}
+
+/**
+ * Deletes a meeting, once the main process has asked whether that is meant.
+ *
+ * The confirmation is raised there rather than here: this is the one thing the
+ * window can do that destroys work, and a page cannot be the thing that
+ * vouches for having asked first.
+ */
+async function removeMeeting(meeting, button) {
+  button.disabled = true;
+  const result = await window.library.delete(meeting.id);
+  if (result?.ok) {
+    // The folder is gone; the refresh behind library:changed drops the card.
+    view.selected = null;
+    view.meeting = null;
+    renderPlaceholder();
+    return;
+  }
+  button.disabled = false;
+  // No reason means the confirmation was declined, which needs no comment.
+  if (result?.reason) button.parentElement?.append(el('span', 'notice-warn', result.reason));
 }
 
 function tabs(meeting) {
@@ -310,13 +524,38 @@ function generateButton(meeting) {
   return wrap;
 }
 
+/**
+ * The "this is still running" notice, with where it has got to.
+ *
+ * The numbers were already being produced — the tray has shown them since the
+ * pipeline existed — they simply never left the main process. An hour of audio
+ * is a long time to be told only that something is happening.
+ */
+function workingNotice(meeting) {
+  const notice = el('div', 'notice');
+  notice.append(
+    el('strong', '', 'Still working. '),
+    'Transcription and notes are running now — this page fills in when they land.',
+  );
+
+  const p = progressFor(meeting.id);
+  notice.append(el('div', 'notice-progress', progressSentence(p)));
+  const track = el('div', 'progress-track');
+  const bar = el('div', 'progress-bar');
+  const fraction = progressFraction(p);
+  // No bar at all rather than an empty one for a stage with nothing to count:
+  // a bar stuck at zero reads as a run that is not moving.
+  track.classList.toggle('indeterminate', fraction === null);
+  bar.style.width = fraction === null ? '100%' : `${Math.round(fraction * 100)}%`;
+  track.append(bar);
+  notice.append(track);
+  return notice;
+}
+
 /** The "there are no notes here" explanation, phrased for why there are none. */
 function notesNotice(meeting) {
+  if (view.activity.processingIds.includes(meeting.id)) return workingNotice(meeting);
   const notice = el('div', 'notice');
-  if (view.activity.processingIds.includes(meeting.id)) {
-    notice.append(el('strong', '', 'Still working. '), 'Transcription and notes are running now — this page fills in when they land.');
-    return notice;
-  }
   if (meeting.id === view.activity.recordingId) {
     notice.append(el('strong', '', 'Recording. '), 'Notes are written once you stop, from a full pass over the saved audio.');
     return notice;
@@ -393,6 +632,15 @@ function notesView(meeting) {
 function transcriptView(meeting) {
   const frag = document.createDocumentFragment();
   if (!meeting.transcript.length) {
+    // A run in progress is the most likely reason this tab is empty, and the
+    // transcript is the artefact it is producing — so this is the tab someone
+    // watches it on. "Not been transcribed yet" while it is being transcribed
+    // is the same silence the card's bare "Working…" used to be.
+    if (view.activity.processingIds.includes(meeting.id)) {
+      frag.append(workingNotice(meeting));
+      return frag;
+    }
+
     const notice = el('div', 'notice');
     notice.append(
       el('strong', '', 'No transcript. '),
@@ -400,11 +648,9 @@ function transcriptView(meeting) {
         ? 'The recording has not been transcribed yet.'
         : 'This folder has no audio in it either.',
     );
-    // Same button as the notes tab, and the same three states it must not offer
-    // itself in: nothing to work from, a meeting still recording, and a run
-    // already under way.
-    const busy =
-      meeting.id === view.activity.recordingId || view.activity.processingIds.includes(meeting.id);
+    // Same button as the notes tab, and the same two states it must not offer
+    // itself in: nothing to work from, and a meeting still recording.
+    const busy = meeting.id === view.activity.recordingId;
     if (meeting.files.audio && meeting.status !== 'ready' && !busy) notice.append(generateButton(meeting));
     frag.append(notice);
     return frag;
@@ -430,6 +676,10 @@ function transcriptView(meeting) {
     // all when scrubbing back to "the bit about pricing".
     row.append(el('span', 'at', line.startSeconds === null ? '' : fmtClock(line.startSeconds)));
     const said = el('span', 'said');
+    // The microphone and the system audio were recorded on separate channels
+    // and transcribed separately, so a line already knows which side of the
+    // call it came from. Nobody has to have said a name out loud.
+    if (line.speaker) said.append(el('span', `who ${line.speaker}`, meeting.speakers?.[line.speaker] ?? line.speaker));
     said.append(highlighted(line.text, view.query));
     row.append(said);
     frag.append(row);
@@ -523,6 +773,79 @@ function buttonRow({ title, hint, alert: alertText, ok, value, missing, label, p
   return row;
 }
 
+/**
+ * A row that is a dropdown *and* a button: pick a thing, then fetch it.
+ *
+ * Only used by the two first-run downloads, where the choice and the action
+ * belong to the same sentence — "install whisper.cpp with these weights" is one
+ * decision, and splitting it across two rows would read as two.
+ */
+function downloadRow({ title, hint, alert: alertText, options, value, onPick, label, disabled, onClick }) {
+  const row = el('div', 'row missing');
+  const body = el('span', 'row-body');
+  body.append(el('span', 'row-title', title));
+  if (hint) body.append(el('span', 'row-hint', hint));
+  if (alertText) body.append(el('span', 'row-alert', alertText));
+
+  const controls = el('span', 'row-controls');
+  if (options) {
+    const picker = el('select', 'control narrow');
+    for (const option of options) {
+      const node = el('option', '', option.label);
+      node.value = option.value;
+      node.selected = option.value === value;
+      picker.append(node);
+    }
+    picker.disabled = Boolean(disabled);
+    picker.addEventListener('change', () => onPick(picker.value));
+    controls.append(picker);
+  }
+
+  const button = el('button', 'button primary', label);
+  button.type = 'button';
+  button.disabled = Boolean(disabled);
+  button.addEventListener('click', () => onClick(button));
+  controls.append(button);
+
+  row.append(body, controls);
+  return row;
+}
+
+/**
+ * The download in flight, wherever it was started from.
+ *
+ * At the top of the pane rather than in the section that launched it: it is
+ * minutes of work with nothing else to look at, and burying it under a section
+ * heading would mean scrolling to find out whether it is still going.
+ */
+function setupRow(setup) {
+  const row = el('div', 'row');
+  const body = el('span', 'row-body');
+  body.append(el('span', 'row-title', `Downloading ${setup.label}`));
+  const detail = setup.total
+    ? `${setup.status} — ${fmtBytes(setup.completed)} of ${fmtBytes(setup.total)}`
+    : setup.status || 'starting…';
+  body.append(el('span', 'row-hint', detail));
+
+  const track = el('div', 'progress-track');
+  const bar = el('div', 'progress-bar');
+  track.classList.toggle('indeterminate', !setup.total);
+  bar.style.width = setup.total ? `${Math.round((setup.completed / setup.total) * 100)}%` : '100%';
+  track.append(bar);
+  body.append(track);
+
+  const button = el('button', 'button', 'Cancel');
+  button.type = 'button';
+  button.addEventListener('click', async () => {
+    button.disabled = true;
+    view.settings = await window.library.settings.cancelSetup();
+    if (view.mode === 'settings') renderSettings();
+  });
+
+  row.append(body, button);
+  return row;
+}
+
 const group = (frag, heading, rows) => {
   frag.append(el('h2', '', heading));
   const box = el('div', 'rows');
@@ -548,6 +871,20 @@ function modelOptions(names, current, suffix = () => '') {
   }
   return options;
 }
+
+/** "20 minutes", "4 hours", or the word for the value that turns a limit off. */
+function minuteOptions(values, never) {
+  return values.map((n) => ({
+    value: String(n),
+    label: n === 0 ? never : n % 60 === 0 ? `${n / 60} hour${n === 60 ? '' : 's'}` : `${n} minutes`,
+  }));
+}
+
+const SILENCE_CHOICES = [0, 5, 10, 15, 30, 60];
+const MAX_LENGTH_CHOICES = [0, 60, 120, 180, 240, 480];
+
+const fmtBytes = (bytes) =>
+  bytes >= 1024 ** 3 ? `${(bytes / 1024 ** 3).toFixed(1)} GB` : `${Math.round(bytes / 1024 ** 2)} MB`;
 
 function recordingSection(frag, s) {
   const noSource = !s.settings.captureMic && !s.settings.captureSystem;
@@ -600,7 +937,98 @@ function recordingSection(frag, s) {
       checked: s.settings.captureSystem,
       disabled: s.recording,
     }),
+    micRow(s),
+    toggleRow({
+      title: 'Keep the two sources on separate channels',
+      hint:
+        'Records you on the left and everyone else on the right, so the transcript can say who said what ' +
+        'and the notes can name who owns an action item. Costs about twice the disk.',
+      key: 'separateChannels',
+      checked: s.settings.separateChannels,
+      disabled: s.recording,
+    }),
   ]);
+
+  group(frag, 'Limits', [
+    selectRow({
+      title: 'Stop after silence',
+      hint: 'Ends a meeting that nobody stopped. The notes are written from what was actually said.',
+      options: minuteOptions(SILENCE_CHOICES, 'Never'),
+      value: String(s.settings.silenceStopMinutes),
+      note: defaultNote(
+        s.settings.silenceStopMinutes,
+        s.defaults.silenceStopMinutes,
+        `${s.defaults.silenceStopMinutes} minutes`,
+      ),
+      onPick: (value) => saveSetting({ silenceStopMinutes: Number(value) }),
+    }),
+    selectRow({
+      title: 'Longest recording',
+      // The backstop for the first one failing to notice: hold music, a fan the
+      // microphone can hear, a call left connected over a weekend.
+      hint: 'A hard ceiling. Minarrador stops and writes the notes when a meeting reaches it.',
+      alert:
+        s.settings.silenceStopMinutes === 0 && s.settings.maxRecordingMinutes === 0
+          ? 'Nothing will stop a recording you forget about.'
+          : '',
+      missing: s.settings.silenceStopMinutes === 0 && s.settings.maxRecordingMinutes === 0,
+      options: minuteOptions(MAX_LENGTH_CHOICES, 'No limit'),
+      value: String(s.settings.maxRecordingMinutes),
+      note: defaultNote(
+        s.settings.maxRecordingMinutes,
+        s.defaults.maxRecordingMinutes,
+        `${s.defaults.maxRecordingMinutes / 60} hours`,
+      ),
+      onPick: (value) => saveSetting({ maxRecordingMinutes: Number(value) }),
+    }),
+    toggleRow({
+      title: 'Keep the machine awake while recording',
+      // Honest about what it can and cannot do: Windows suspends on a lid close
+      // whatever this says, which is why the app also rebuilds on resume.
+      hint:
+        'Stops Windows suspending an idle machine mid-meeting. Closing the lid still suspends it — Minarrador ' +
+        'rebuilds the audio graph on wake and carries on into the same file.',
+      key: 'preventSleep',
+      checked: s.settings.preventSleep,
+    }),
+  ]);
+}
+
+/**
+ * Which microphone is being recorded — and, when it is not the chosen one, that
+ * it is not.
+ *
+ * The gap this exists for: `getUserMedia` with no deviceId takes the Windows
+ * default, so a meeting can record the laptop lid while the headset sits
+ * unused, and every indicator in the app says the microphone is fine.
+ */
+function micRow(s) {
+  const { devices, active, chosen, chosenLabel } = s.mic;
+  const known = devices.some((d) => d.id === chosen);
+  const options = [{ value: '', label: 'System default' }, ...devices.map((d) => ({ value: d.id, label: d.label }))];
+  if (chosen && !known) options.push({ value: chosen, label: `${chosenLabel || 'Chosen device'} — not connected` });
+
+  return selectRow({
+    title: 'Microphone',
+    hint: devices.length
+      ? 'Which input your side of the conversation is recorded from.'
+      : 'Available once Minarrador has opened a microphone at least once.',
+    // Naming what is open is the whole point: a green tick next to "Mic" only
+    // ever meant that something opened.
+    ok: active ? `Recording from ${active}` : '',
+    alert: chosen && !known ? 'That device is not connected. The system default is being used instead.' : '',
+    missing: Boolean(chosen) && !known,
+    options,
+    value: chosen,
+    disabled: !s.settings.captureMic || s.recording || !devices.length,
+    onPick: (value) =>
+      saveSetting({
+        micDeviceId: value,
+        // Stored alongside because Chromium's ids are salted per origin and are
+        // not guaranteed to come back the same after a restart.
+        micDeviceLabel: devices.find((d) => d.id === value)?.label ?? '',
+      }),
+  });
 }
 
 function liveSection(frag, s) {
@@ -609,12 +1037,43 @@ function liveSection(frag, s) {
   const wantsWhisper = s.settings.liveEngine === 'whisper';
   const models = whisper?.models ?? [];
   const model = whisper?.model ?? '';
+  const busy = Boolean(s.setup);
 
-  group(frag, 'Live transcript', [
+  const rows = [];
+  // The way out of "this app cannot transcribe anything". It used to say `npm
+  // run whisper:setup`, which needs a checkout, npm and a terminal — none of
+  // which exist for anyone who installed the build, so the app shipped able to
+  // be in a state it could not get out of.
+  if (!installed) {
+    rows.push(
+      downloadRow({
+        title: 'Install whisper.cpp',
+        hint:
+          'A local speech recogniser: several times faster than the audio model, and it means Ollama is only ' +
+          'needed for the notes. Downloaded once, from GitHub and Hugging Face. No meeting data is involved.',
+        alert: 'Not installed. Transcription falls back to the Ollama audio model, which takes about as long as the meeting did.',
+        options: s.whisperModels,
+        value: view.whisperPick,
+        onPick: (value) => {
+          view.whisperPick = value;
+        },
+        label: busy ? 'Downloading…' : 'Download',
+        disabled: busy,
+        onClick: async () => {
+          const result = await window.library.settings.installWhisper(view.whisperPick);
+          view.settings = await window.library.settings.get();
+          if (view.mode === 'settings') renderSettings();
+          return result;
+        },
+      }),
+    );
+  }
+
+  rows.push(
     selectRow({
       title: 'Engine',
       hint: 'whisper.cpp is a local speech recogniser and runs several times faster than the audio model.',
-      alert: wantsWhisper && !installed ? 'whisper.cpp is not installed — falling back to Ollama. Run npm run whisper:setup.' : '',
+      alert: wantsWhisper && !installed ? 'whisper.cpp is not installed — falling back to Ollama.' : '',
       missing: wantsWhisper && !installed,
       options: [
         { value: 'whisper', label: installed ? `whisper.cpp — ${model}` : 'whisper.cpp — not installed' },
@@ -627,7 +1086,7 @@ function liveSection(frag, s) {
     selectRow({
       title: 'Whisper model',
       hint: 'Bigger weights are more accurate and slower. Captions trail further behind as they grow.',
-      alert: installed ? '' : 'No GGML models — run npm run whisper:setup to fetch one.',
+      alert: installed ? '' : 'No GGML models yet — install one above.',
       note: defaultNote(model, s.defaults.whisperModel),
       missing: !installed,
       options: modelOptions(models, model),
@@ -647,7 +1106,9 @@ function liveSection(frag, s) {
       disabled: !installed,
       onPick: (value) => saveSetting({ whisperThreads: Number(value) }),
     }),
-  ]);
+  );
+
+  group(frag, 'Live transcript', rows);
 }
 
 function ollamaSection(frag, s) {
@@ -658,8 +1119,31 @@ function ollamaSection(frag, s) {
   const whisperInstalled = Boolean(s.whisper?.available);
   const whisperModel = s.whisper?.model ?? '';
   const wantsWhisper = s.settings.transcribeEngine === 'whisper';
+  const busy = Boolean(s.setup);
+
+  // A running Ollama with nothing pulled is the other half of an install that
+  // cannot work, and `ollama pull` in a terminal is not an answer for anyone
+  // who arrived here via an installer. Only the models this app is set to use
+  // are on offer — main refuses anything else, so no tag typed anywhere could
+  // reach the daemon.
+  const pulls = (s.pullable ?? []).map((name) =>
+    downloadRow({
+      title: `Download ${name}`,
+      hint: 'Ollama fetches this to your machine and Minarrador uses it from there. It is the model the settings below name.',
+      alert: 'Configured but not installed. Nothing can be transcribed or summarised until it is.',
+      label: busy ? 'Downloading…' : 'Download',
+      disabled: busy || !ollama.up,
+      onClick: async () => {
+        const result = await window.library.settings.pullModel(name);
+        view.settings = await window.library.settings.get();
+        if (view.mode === 'settings') renderSettings();
+        return result;
+      },
+    }),
+  );
 
   group(frag, 'Transcription and notes', [
+    ...(ollama.up ? pulls : []),
     buttonRow({
       title: 'Ollama',
       value: ollama.host,
@@ -724,13 +1208,23 @@ function ollamaSection(frag, s) {
 }
 
 function storageSection(frag, s) {
+  const free = s.disk?.free ?? null;
+  // Two channels is ~230 MB an hour, one is ~115. Saying so beside the number
+  // is what turns "41 GB free" into something anyone can act on.
+  const space = free === null ? '' : `${fmtBytes(free)} free — about ${Math.floor(free / (230 * 1024 ** 2))} hours of recording`;
+
   group(frag, 'Storage and shorthands', [
     buttonRow({
       title: 'Meetings folder',
       value: s.settings.notesDir,
       hint: 'One folder per recording: the audio, the transcript, the notes and the PDF brief.',
-      alert: s.notesDirExists ? '' : 'This folder does not exist any more. Pick another, or the library stays empty.',
-      missing: !s.notesDirExists,
+      alert: !s.notesDirExists
+        ? 'This folder does not exist any more. Pick another, or the library stays empty.'
+        : s.disk?.low
+          ? `Running out of space — ${space}.`
+          : '',
+      ok: s.notesDirExists && !s.disk?.low && space ? space : '',
+      missing: !s.notesDirExists || Boolean(s.disk?.low),
       label: 'Change…',
       onClick: async () => {
         view.settings = await window.library.settings.chooseNotesFolder();
@@ -768,6 +1262,13 @@ function renderSettings() {
   );
 
   const frag = document.createDocumentFragment();
+  // A download in flight goes above every section, because it is the only thing
+  // on this pane that is happening rather than set.
+  if (s.setup) {
+    const box = el('div', 'rows');
+    box.append(setupRow(s.setup));
+    frag.append(box);
+  }
   recordingSection(frag, s);
   liveSection(frag, s);
   ollamaSection(frag, s);
@@ -795,7 +1296,68 @@ function closeSettings() {
   view.mode = 'reader';
   settingsEl.setAttribute('aria-pressed', 'false');
   if (view.meeting) renderReader(view.meeting);
-  else readerEl.replaceChildren(placeholder);
+  else renderPlaceholder();
+}
+
+// ------------------------------------------------------------------ first run
+
+/**
+ * What is missing before this app can turn a meeting into notes.
+ *
+ * The library is the front door, and until now a fresh install opened it to a
+ * cheerful empty archive — the fact that nothing was installed to transcribe
+ * with was only visible to somebody who went looking in Settings. Recording
+ * still works and the audio is still kept, so this is a notice rather than a
+ * wall.
+ *
+ * @returns {string[]} one sentence per thing to fix, empty when nothing is
+ */
+function setupGaps(s) {
+  if (!s) return [];
+  const gaps = [];
+  if (!s.ollama.up) {
+    gaps.push(
+      s.ollama.installed
+        ? 'Ollama is not running. It writes the notes — start it from Settings.'
+        : 'Ollama is not installed. It writes the notes; get it from ollama.com/download.',
+    );
+  } else if (!s.models.includes(s.settings.summaryModel)) {
+    gaps.push(`The notes model (${s.settings.summaryModel}) is not installed. Settings can download it.`);
+  }
+  if (!s.whisper?.available && (!s.ollama.up || !s.models.includes(s.settings.transcribeModel))) {
+    gaps.push('Nothing is installed to transcribe with. Settings can fetch whisper.cpp, which is the fast option.');
+  }
+  return gaps;
+}
+
+/** The placeholder, plus the reasons the app cannot finish a meeting yet. */
+function renderPlaceholder() {
+  const gaps = setupGaps(view.settings);
+  if (!gaps.length) {
+    renderPlaceholder();
+    return;
+  }
+
+  const wrap = el('div', 'doc');
+  wrap.append(placeholder);
+  const notice = el('div', 'notice');
+  notice.append(
+    el('strong', '', 'Minarrador is not ready to write notes. '),
+    'Recording works and the audio is always kept, so nothing is lost in the meantime.',
+  );
+  const list = el('ul', 'bullets');
+  for (const gap of gaps) list.append(el('li', '', gap));
+  notice.append(list);
+
+  const actions = el('div', 'notice-actions');
+  const button = el('button', 'button primary', 'Open settings');
+  button.type = 'button';
+  button.addEventListener('click', () => openSettings());
+  actions.append(button);
+  notice.append(actions);
+
+  wrap.append(notice);
+  readerEl.replaceChildren(wrap);
 }
 
 // ------------------------------------------------------------------ recording
@@ -852,6 +1414,35 @@ recordEl.addEventListener('click', () => {
  * hence the checks: a pipeline finishing must not throw someone out of the
  * setting they were changing.
  */
+/**
+ * Moves the numbers on, and nothing else.
+ *
+ * The counterpart to refresh(): that one re-reads the notes folder and every
+ * transcript in it, which is far too much for a chunk counter ticking several
+ * times a minute. This updates the two places a number appears — the card's
+ * pill and the reader's notice — from a payload that cost the main process
+ * nothing to send.
+ */
+function renderProgress(activity) {
+  view.activity = { ...view.activity, ...activity };
+  for (const p of view.activity.processing ?? []) {
+    const tag = listEl.querySelector(`.card[data-id="${CSS.escape(p.id)}"] .tag.working`);
+    if (tag) tag.textContent = progressTag(p);
+  }
+
+  if (view.mode !== 'reader' || !view.selected) return;
+  const line = readerEl.querySelector('.notice-progress');
+  if (!line) return;
+  const p = progressFor(view.selected);
+  line.textContent = progressSentence(p);
+  const fraction = progressFraction(p);
+  const track = readerEl.querySelector('.progress-track');
+  const bar = readerEl.querySelector('.progress-bar');
+  if (!track || !bar) return;
+  track.classList.toggle('indeterminate', fraction === null);
+  bar.style.width = fraction === null ? '100%' : `${Math.round(fraction * 100)}%`;
+}
+
 async function select(id) {
   view.selected = id;
   for (const row of listEl.querySelectorAll('.card')) {
@@ -866,13 +1457,16 @@ async function select(id) {
   if (!meeting) {
     view.selected = null;
     view.meeting = null;
-    if (view.mode === 'reader') readerEl.replaceChildren(placeholder);
+    if (view.mode === 'reader') renderPlaceholder();
     await refresh();
     return;
   }
   if (view.selected !== id) return; // A faster click won.
   view.meeting = meeting;
   if (view.mode !== 'reader') return;
+  // A pipeline finishing somewhere else must not throw away a half-typed
+  // title. The rail behind it is already up to date either way.
+  if (view.renaming) return;
   readerEl.scrollTop = 0;
   renderReader(meeting);
 }
@@ -966,6 +1560,10 @@ document.getElementById('minimize').addEventListener('click', () => window.libra
 document.getElementById('close').addEventListener('click', () => window.library.close());
 settingsEl.addEventListener('click', () => (view.mode === 'settings' ? closeSettings() : openSettings()));
 
+// A run advancing is a number changing, not a folder changing: it updates what
+// is on screen without anything being re-read from disk.
+window.library.onProgress((activity) => renderProgress(activity));
+
 // A recording that just finished belongs at the top of the list without anyone
 // having to reopen the window.
 window.library.onChanged(async () => {
@@ -981,18 +1579,24 @@ window.library.onChanged(async () => {
 
 // A model list arriving, or Ollama coming up sixty seconds after someone
 // started it, is the whole reason this pane can be trusted to say what is
-// missing — so it redraws rather than waiting to be reopened.
+// missing — so it redraws rather than waiting to be reopened. The empty-archive
+// notice is built from the same state, so it follows along.
 window.library.settings.onChanged(async () => {
-  if (view.mode !== 'settings') return;
   view.settings = await window.library.settings.get();
   if (view.mode === 'settings') renderSettings();
+  else if (!view.selected) renderPlaceholder();
 });
 
 // The tray's Settings… item, which opens this window straight onto the pane.
 window.library.onShowSettings(() => openSettings());
 
-refresh().then(() => {
+// The settings are read at launch rather than when the pane is opened, because
+// the placeholder is built from them: a first run with nothing installed opens
+// onto an empty archive, and the reason it will stay empty belongs there.
+Promise.all([refresh(), window.library.settings.get()]).then(([, settings]) => {
+  view.settings = settings;
   // Open the newest meeting on launch: the window is almost always opened to
   // read the one that just finished.
   if (view.meetings.length) select(view.meetings[0].id);
+  else renderPlaceholder();
 });

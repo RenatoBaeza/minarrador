@@ -6,7 +6,18 @@ const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
 
-const { folderStamp, parseFolderStamp, createMeetingDir, FILES } = require('../src/main/paths');
+const {
+  folderStamp,
+  parseFolderStamp,
+  createMeetingDir,
+  FILES,
+  SPEAKERS,
+  speakerLine,
+  parseSpeakerLine,
+  normaliseTitle,
+  readTitle,
+  MAX_TITLE,
+} = require('../src/main/paths');
 
 function tmpDir(t) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'minarrador-paths-'));
@@ -93,5 +104,57 @@ test('FILES names are stable, since the folder is the app’s public contract', 
     html: 'notes.html',
     pdf: 'notes.pdf',
     meta: 'meta.json',
+    title: 'title.txt',
   });
+});
+
+// ------------------------------------------------------------------- speakers
+//
+// The prefix is part of the transcript file format: it is written by the
+// pipeline and by the live preview, and read back by the library. A round trip
+// that does not hold turns a speaker label into part of what somebody said.
+
+test('speakerLine labels a line, and leaves an unattributed one alone', () => {
+  assert.equal(speakerLine('mic', 'so where did we land'), `${SPEAKERS.mic}: so where did we land`);
+  assert.equal(speakerLine('system', 'we did not'), `${SPEAKERS.system}: we did not`);
+  assert.equal(speakerLine('', 'a mono recording'), 'a mono recording');
+  assert.equal(speakerLine('nonsense', 'not a channel'), 'not a channel');
+});
+
+test('parseSpeakerLine reads back exactly what speakerLine wrote', () => {
+  for (const speaker of ['mic', 'system', '']) {
+    const text = 'the quick brown fox: with a colon in it';
+    assert.deepEqual(parseSpeakerLine(speakerLine(speaker, text)), { speaker, text });
+  }
+});
+
+test('parseSpeakerLine leaves a line that merely looks labelled alone', () => {
+  // A real sentence can start with a word and a colon; only the exact labels count.
+  assert.deepEqual(parseSpeakerLine('Ana: I will draft it'), { speaker: '', text: 'Ana: I will draft it' });
+  assert.deepEqual(parseSpeakerLine(`${SPEAKERS.mic}:no space`), { speaker: '', text: `${SPEAKERS.mic}:no space` });
+  assert.deepEqual(parseSpeakerLine(''), { speaker: '', text: '' });
+  assert.deepEqual(parseSpeakerLine(null), { speaker: '', text: '' });
+});
+
+// ---------------------------------------------------------------------- titles
+
+test('normaliseTitle flattens a title to the one line a card can show', () => {
+  assert.equal(normaliseTitle('  Pricing   review\n\n'), 'Pricing review');
+  assert.equal(normaliseTitle('a\tb\nc'), 'a b c');
+  assert.equal(normaliseTitle('   '), '', 'nothing left means "use the model’s title"');
+  assert.equal(normaliseTitle(undefined), '');
+  assert.equal(normaliseTitle('x'.repeat(500)).length, MAX_TITLE);
+});
+
+test('readTitle finds a typed title, and shrugs at a folder without one', (t) => {
+  const dir = tmpDir(t);
+  assert.equal(readTitle(dir), '', 'no override is the normal case');
+
+  fs.writeFileSync(path.join(dir, FILES.title), 'Pricing review\n');
+  assert.equal(readTitle(dir), 'Pricing review');
+
+  // A file hand-edited to nothing means the same as no file at all, rather than
+  // titling the meeting with an empty string.
+  fs.writeFileSync(path.join(dir, FILES.title), '\n \n');
+  assert.equal(readTitle(dir), '');
 });

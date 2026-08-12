@@ -41,6 +41,36 @@ function createMeetingDir(notesDir, date = new Date()) {
   return dir;
 }
 
+/**
+ * What a channel of a two-channel recording is called in a transcript.
+ *
+ * The keys are the channels the capture graph produces — left is the
+ * microphone, right is everything the system played — and the values are what
+ * goes in front of a line. Kept here with the file names because that is what
+ * this is: part of the format of transcript.txt and live-transcript.txt, which
+ * are read back by the library and by whoever opens the folder.
+ */
+const SPEAKERS = { mic: 'You', system: 'Others' };
+
+/** One transcript line, labelled when it is known who said it. */
+const speakerLine = (speaker, text) => (SPEAKERS[speaker] ? `${SPEAKERS[speaker]}: ${text}` : String(text));
+
+/**
+ * Pulls a speaker label back off a line written by {@link speakerLine}.
+ *
+ * Only needed for the live preview, which is a flat text file — the pipeline's
+ * transcript keeps the speaker as a field in transcript.json.
+ *
+ * @returns {{ speaker: string, text: string }} `speaker` is '' when unlabelled
+ */
+function parseSpeakerLine(line) {
+  const text = String(line ?? '');
+  for (const [speaker, label] of Object.entries(SPEAKERS)) {
+    if (text.startsWith(`${label}: `)) return { speaker, text: text.slice(label.length + 2) };
+  }
+  return { speaker: '', text };
+}
+
 const FILES = {
   audio: 'audio.wav',
   transcript: 'transcript.txt',
@@ -60,9 +90,50 @@ const FILES = {
   html: 'notes.html',
   pdf: 'notes.pdf',
   meta: 'meta.json',
+  /**
+   * A title the user typed, which wins over the one the model produced.
+   *
+   * Its own file rather than a field in notes.json or meta.json because both of
+   * those are rewritten every time the notes are generated again: a rename
+   * would survive until the first re-run and then quietly revert. Nothing in
+   * the pipeline touches this one.
+   */
+  title: 'title.txt',
 };
+
+/** Longest title worth keeping; past this it is a paragraph, not a name. */
+const MAX_TITLE = 120;
+
+/**
+ * A user-typed title, flattened to the one line a rail card can show.
+ *
+ * @returns {string} '' when there is nothing left, which means "use the model's"
+ */
+const normaliseTitle = (text) => String(text ?? '').replace(/\s+/g, ' ').trim().slice(0, MAX_TITLE);
+
+/** The title someone typed over this meeting, or '' if they never did. */
+function readTitle(dir) {
+  try {
+    return normaliseTitle(fs.readFileSync(path.join(dir, FILES.title), 'utf8'));
+  } catch {
+    // No override, which is the normal case.
+    return '';
+  }
+}
 
 // Required lazily so this module stays importable outside Electron (tests, tools).
 const userData = () => require('electron').app.getPath('userData');
 
-module.exports = { folderStamp, parseFolderStamp, createMeetingDir, FILES, userData };
+module.exports = {
+  folderStamp,
+  parseFolderStamp,
+  createMeetingDir,
+  FILES,
+  SPEAKERS,
+  speakerLine,
+  parseSpeakerLine,
+  normaliseTitle,
+  readTitle,
+  MAX_TITLE,
+  userData,
+};

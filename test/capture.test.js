@@ -4,7 +4,7 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 const { once } = require('node:events');
 
-const { SpeechDetector, LiveTranscriber } = require('../src/main/capture');
+const { SpeechDetector, SilenceDetector, LiveTranscriber } = require('../src/main/capture');
 
 const BYTES_PER_SECOND = 16000 * 2;
 /** Mirrors LIVE_MAX_SECONDS in capture.js. */
@@ -27,6 +27,23 @@ const pcmSeconds = (seconds) => {
 };
 
 const silentSeconds = (seconds) => Buffer.alloc(Math.round(seconds * BYTES_PER_SECOND));
+
+/**
+ * `seconds` of two-channel PCM, with each side either audible or silent.
+ *
+ * The layout the app records when both sources are live: left is the
+ * microphone, right is everything the system played.
+ */
+function stereoSeconds(seconds, { mic = false, system = false } = {}) {
+  const frames = Math.round(seconds * 16000);
+  const out = Buffer.alloc(frames * 4);
+  for (let f = 0; f < frames; f++) {
+    const sample = Math.round(Math.sin((f * 2 * Math.PI * 300) / 16000) * 8000);
+    if (mic) out.writeInt16LE(sample, f * 4);
+    if (system) out.writeInt16LE(sample, f * 4 + 2);
+  }
+  return out;
+}
 
 /** Feeds `count` level readings at the given loudness. */
 function feed(detector, count, rms) {
@@ -95,6 +112,80 @@ test('SpeechDetector snooze mutes an in-progress conversation', () => {
   detector.snooze(60_000);
   feed(detector, 300, 0.05);
   assert.equal(fired, 0);
+});
+
+// ------------------------------------------------------------ SilenceDetector
+//
+// The other half of the same machinery: SpeechDetector exists to notice a
+// meeting starting, this one to notice one that ended without anybody pressing
+// Stop. Nothing else in the app caps a recording at all.
+
+/** Feeds `minutes` of level readings, which arrive five a second. */
+const feedMinutes = (detector, minutes, rms) => feed(detector, Math.round(minutes * 60 * 5), rms);
+
+test('SilenceDetector fires once a recording has been quiet for the configured stretch', () => {
+  const detector = new SilenceDetector({ minutes: 5 });
+  let fired = 0;
+  detector.on('silence', () => fired++);
+
+  feedMinutes(detector, 4.9, 0);
+  assert.equal(fired, 0, 'a long pause in a real meeting is not the end of it');
+
+  feedMinutes(detector, 0.2, 0);
+  assert.equal(fired, 1);
+});
+
+test('SilenceDetector restarts its count the moment anybody speaks', () => {
+  const detector = new SilenceDetector({ minutes: 5 });
+  let fired = 0;
+  detector.on('silence', () => fired++);
+
+  feedMinutes(detector, 4.9, 0);
+  feed(detector, 1, 0.05); // somebody says something
+  feedMinutes(detector, 4.9, 0);
+
+  assert.equal(fired, 0, 'the stretch has to be unbroken');
+});
+
+test('SilenceDetector counts either source as the room being audible', () => {
+  const detector = new SilenceDetector({ minutes: 1 });
+  let fired = 0;
+  detector.on('silence', () => fired++);
+
+  // Nobody in the room, but the call is still making noise.
+  for (let i = 0; i < 5 * 60 * 2; i++) detector.push({ mic: 0, system: 0.05 });
+  assert.equal(fired, 0);
+});
+
+test('SilenceDetector fires once, not all the way down', () => {
+  const detector = new SilenceDetector({ minutes: 1 });
+  let fired = 0;
+  detector.on('silence', () => fired++);
+
+  feedMinutes(detector, 5, 0);
+  assert.equal(fired, 1, 'the recording is already being stopped; a second event only races the first');
+});
+
+test('SilenceDetector does nothing at all when it is turned off', () => {
+  const detector = new SilenceDetector({ minutes: 0 });
+  let fired = 0;
+  detector.on('silence', () => fired++);
+
+  feedMinutes(detector, 600, 0); // ten hours of nothing
+  assert.equal(fired, 0);
+});
+
+test('SilenceDetector is re-armed by reset, for the next meeting', () => {
+  const detector = new SilenceDetector({ minutes: 1 });
+  let fired = 0;
+  detector.on('silence', () => fired++);
+
+  feedMinutes(detector, 2, 0);
+  assert.equal(fired, 1);
+
+  detector.reset();
+  feedMinutes(detector, 2, 0);
+  assert.equal(fired, 2);
 });
 
 // ------------------------------------------------------------ LiveTranscriber
@@ -536,6 +627,124 @@ test('LiveTranscriber cuts through someone who never pauses', () => {
 
   live.push(pcmSeconds(1.5));
   assert.equal(live.segmentReady, true, 'waiting for a pause that never comes would strand the caption');
+
+  live.stop();
+});
+
+// ------------------------------------------------ two-channel live transcription
+//
+// A two-channel recording is folded back to mono before it is sent: the saved
+// transcript transcribes the sides separately, but this is the one place with a
+// realtime floor to clear, and doubling the requests would be the wrong trade.
+// The speaker is inferred from which channel carried the segment instead.
+
+test('LiveTranscriber sends one mono request for a two-channel recording', async () => {
+  const whisper = fakeWhisper();
+  const live = new LiveTranscriber({ ollama: fakeOllama(), whisper });
+  live.configure({ enabled: true, engine: 'whisper' });
+  live.start(2);
+
+  live.push(stereoSeconds(3, { mic: true }));
+  await live.drain();
+
+  assert.equal(whisper.calls.length, 1, 'one decode, not one per channel');
+  // Three seconds of stereo is six seconds of bytes; the WAV that goes out is
+  // three seconds of mono.
+  assert.equal(whisper.calls[0].wavBytes, 3 * BYTES_PER_SECOND + 44);
+
+  live.stop();
+});
+
+test('LiveTranscriber attributes a segment to the side that carried it', async () => {
+  const whisper = fakeWhisper();
+  const live = new LiveTranscriber({ ollama: fakeOllama(), whisper });
+  live.configure({ enabled: true, engine: 'whisper' });
+  live.start(2);
+
+  live.push(stereoSeconds(3, { mic: true }));
+  const mine = once(live, 'text');
+  await live.drain();
+  assert.deepEqual((await mine).slice(0, 2), ['whisper line', 'mic']);
+
+  live.push(stereoSeconds(3, { system: true }));
+  const theirs = once(live, 'text');
+  await live.drain();
+  assert.deepEqual((await theirs).slice(0, 2), ['whisper line', 'system']);
+
+  live.stop();
+});
+
+test('LiveTranscriber declines to guess when both sides talked over each other', async () => {
+  const whisper = fakeWhisper();
+  const live = new LiveTranscriber({ ollama: fakeOllama(), whisper });
+  live.configure({ enabled: true, engine: 'whisper' });
+  live.start(2);
+
+  live.push(stereoSeconds(3, { mic: true, system: true }));
+  const spoken = once(live, 'text');
+  await live.drain();
+
+  // Leakage between the channels is normal — the microphone hears the speakers —
+  // so a side has to have carried most of the segment before its name goes on it.
+  assert.equal((await spoken)[1], '', 'a wrong label is worse than none');
+  live.stop();
+});
+
+test('LiveTranscriber never labels a mono recording', async () => {
+  const whisper = fakeWhisper();
+  const live = new LiveTranscriber({ ollama: fakeOllama(), whisper });
+  live.configure({ enabled: true, engine: 'whisper' });
+  live.start(1);
+
+  live.push(pcmSeconds(3));
+  const spoken = once(live, 'text');
+  await live.drain();
+
+  assert.equal((await spoken)[1], '', 'there is only one channel to have said it');
+  live.stop();
+});
+
+test('LiveTranscriber measures a two-channel segment in seconds, not in bytes', () => {
+  const live = new LiveTranscriber({ ollama: fakeOllama(), whisper: fakeWhisper() });
+  live.configure({ enabled: true, engine: 'whisper' });
+  live.start(2);
+
+  // Six seconds of stereo bytes but only three seconds of meeting, which is
+  // under the 12-second ceiling that forces a cut.
+  live.push(stereoSeconds(3, { mic: true }));
+  assert.equal(live.segmentReady, false, 'a pause has not happened yet');
+
+  live.push(stereoSeconds(0.7, {}));
+  assert.equal(live.segmentReady, true);
+
+  live.stop();
+});
+
+test('LiveTranscriber caps a two-channel buffer by duration, not by size', () => {
+  const live = new LiveTranscriber({ ollama: fakeOllama(), whisper: fakeWhisper() });
+  live.configure({ enabled: true, engine: 'whisper' });
+  live.start(2);
+
+  for (let i = 0; i < 120; i++) live.push(stereoSeconds(1, { mic: true }));
+
+  // The ceiling is 20 seconds of meeting, which in stereo is twice the bytes.
+  assert.ok(live.bytes <= LIVE_MAX_BYTES * 2, `expected under ${LIVE_MAX_BYTES * 2} bytes, got ${live.bytes}`);
+  assert.ok(live.bytes > LIVE_MAX_BYTES, 'and not half as much audio as a mono recording would keep');
+  live.stop();
+});
+
+test('LiveTranscriber hears one loud side over a silent one', async () => {
+  // Measured across both channels the same speech reads 3 dB quieter, which
+  // would push a quiet utterance under the gate and drop the line entirely.
+  const whisper = fakeWhisper();
+  const live = new LiveTranscriber({ ollama: fakeOllama(), whisper });
+  live.configure({ enabled: true, engine: 'whisper' });
+  live.start(2);
+
+  live.push(stereoSeconds(3, { system: true }));
+  assert.equal(live.voicedBytes, live.bytes, 'the whole buffer is voiced, not half of it');
+  await live.drain();
+  assert.equal(whisper.calls.length, 1);
 
   live.stop();
 });

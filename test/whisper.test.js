@@ -108,6 +108,27 @@ test('resolveInstall takes a model given as an absolute path', () => {
   assert.equal(resolveInstall({ root: '', model: elsewhere }).model, elsewhere);
 });
 
+// The app can now install whisper.cpp itself, into a root of its own — so
+// discovery has to prefer a real install over the first place it would look.
+test('resolveInstall prefers a root that has the binary over one that merely exists', () => {
+  const empty = fakeInstall({ models: [], binary: false });
+  const real = fakeInstall({ models: ['ggml-base.bin'] });
+
+  const install = resolveInstall({ roots: [empty, real] });
+  assert.equal(install.root, real, 'an install that works beats one that is only a folder');
+  assert.equal(install.model, path.join(real, 'models', 'ggml-base.bin'));
+});
+
+test('resolveInstall reports a root that exists when none of them has a binary', () => {
+  const missing = path.join(os.tmpdir(), 'minarrador-whisper-never-created');
+  const present = fakeInstall({ models: [], binary: false });
+
+  // Reporting the tree somebody is actually looking at is more use in an error
+  // than naming a path that has never existed.
+  assert.equal(resolveInstall({ roots: [missing, present] }).root, present);
+  assert.equal(resolveInstall({ roots: [missing] }).root, missing, 'and failing that, where an install would go');
+});
+
 test('listModels ignores everything that is not a GGML file', () => {
   const root = fakeInstall({ models: ['ggml-base.bin', 'notes.txt'] });
   assert.deepEqual(listModels(path.join(root, 'models')), ['ggml-base.bin']);

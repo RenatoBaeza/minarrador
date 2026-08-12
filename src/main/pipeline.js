@@ -8,8 +8,8 @@ const fs = require('node:fs');
 const path = require('node:path');
 
 const { Ollama } = require('./ollama');
-const { readWav, buildWav, splitIntoChunks, rms } = require('./wav');
-const { FILES } = require('./paths');
+const { readWav, buildWav, splitIntoChunks, deinterleave, downmix, rms } = require('./wav');
+const { FILES, SPEAKERS, speakerLine, readTitle } = require('./paths');
 
 // ./pdf pulls in Electron, so it is required at call time rather than on import.
 // That keeps every pure stage of this file usable from a plain Node process.
@@ -60,59 +60,108 @@ function transcribeEngineLabel(engine, config, whisper) {
 const whisperTimeoutMs = (seconds) => Math.max(60_000, Math.round(seconds * 15_000));
 
 /**
+ * The tracks a recording is transcribed as, in the order they are read.
+ *
+ * A mono file is one anonymous track. A two-channel one is the microphone and
+ * the system loopback, kept apart by the capture graph and therefore already
+ * separated by speaker — which is the whole reason for recording two channels.
+ * Attribution used to depend on somebody saying a name out loud.
+ *
+ * @param {Buffer} pcm interleaved PCM straight out of the WAV
+ * @param {number} channels
+ * @returns {{ speaker: string, pcm: Buffer }[]}
+ */
+function tracksOf(pcm, channels) {
+  if (channels !== 2) return [{ speaker: '', pcm }];
+  const [mic, system] = deinterleave(pcm, 2);
+  return [
+    { speaker: 'mic', pcm: mic },
+    { speaker: 'system', pcm: system },
+  ];
+}
+
+/**
  * @param {object} deps
  * @param {import('./whisper').WhisperServer} [deps.whisper] when installed and
  *   configured, this transcribes instead of the Ollama audio model
  */
 async function transcribe(dir, config, { onProgress, signal, ollama, whisper = null }) {
   const audioPath = path.join(dir, FILES.audio);
-  const { pcm, sampleRate, seconds } = readWav(audioPath);
+  const { pcm, sampleRate, channels, seconds } = readWav(audioPath);
 
   const engine = transcribeEngineFor(config, whisper);
   const engineLabel = transcribeEngineLabel(engine, config, whisper);
-  const chunks = splitIntoChunks(pcm, sampleRate, config.chunkSeconds ?? 60);
+  const tracks = tracksOf(pcm, channels);
+  // Chunked once, on the mix: both sides are then cut in the same place, and
+  // that place is a moment when neither of them was talking. Chunking each
+  // track on its own silences would put the boundaries somewhere different on
+  // each, and every line's timestamp would be measured against its own grid.
+  const chunks = splitIntoChunks(downmix(pcm, channels), sampleRate, config.chunkSeconds ?? 60);
   const segments = [];
-  /** Tail of the last chunk, so a sentence split across two keeps its context. */
-  let tail = '';
+  /** Tail of the last chunk *of that track*, so a split sentence keeps its context. */
+  const tails = new Map(tracks.map((t) => [t.speaker, '']));
 
   for (let i = 0; i < chunks.length; i++) {
-    if (signal?.aborted) throw new Error('cancelled');
     const c = chunks[i];
     const chunkSeconds = c.endSeconds - c.startSeconds;
-    let text = '';
-    if (rms(c.pcm) >= SILENCE_RMS) {
-      const wav = buildWav(c.pcm, sampleRate);
-      text =
-        engine === 'whisper'
-          ? await whisper.transcribe(wav, { prompt: tail, signal, timeoutMs: whisperTimeoutMs(chunkSeconds) })
-          : await ollama.transcribe(config.transcribeModel, wav, { signal, seconds: chunkSeconds });
-      if (text) tail = text.slice(-PROMPT_CHARS);
+    for (const track of tracks) {
+      if (signal?.aborted) throw new Error('cancelled');
+      // The boundaries were found on the downmix, which is frame-for-frame the
+      // same length as each track, so the offsets carry across unchanged.
+      const slice = track.pcm.subarray(c.start, c.end);
+      let text = '';
+      // The side that was listening is silent for most of the meeting, so this
+      // is what keeps two channels from costing two transcriptions.
+      if (rms(slice) >= SILENCE_RMS) {
+        const wav = buildWav(slice, sampleRate);
+        text =
+          engine === 'whisper'
+            ? await whisper.transcribe(wav, {
+                prompt: tails.get(track.speaker),
+                signal,
+                timeoutMs: whisperTimeoutMs(chunkSeconds),
+              })
+            : await ollama.transcribe(config.transcribeModel, wav, { signal, seconds: chunkSeconds });
+        if (text) tails.set(track.speaker, text.slice(-PROMPT_CHARS));
+      }
+      onProgress?.({ phase: 'transcribing', done: i, total: chunks.length, text, engine, speaker: track.speaker });
+      segments.push({
+        index: segments.length,
+        chunk: i,
+        speaker: track.speaker,
+        startSeconds: Math.round(c.startSeconds * 10) / 10,
+        endSeconds: Math.round(c.endSeconds * 10) / 10,
+        text,
+      });
     }
-    onProgress?.({ phase: 'transcribing', done: i, total: chunks.length, text, engine });
-    segments.push({
-      index: i,
-      startSeconds: Math.round(c.startSeconds * 10) / 10,
-      endSeconds: Math.round(c.endSeconds * 10) / 10,
-      text,
-    });
   }
   onProgress?.({ phase: 'transcribing', done: chunks.length, total: chunks.length, engine });
 
+  // Both sides of a chunk are timestamped to the same minute, so nothing finer
+  // than the chunk decides the order — within one, the microphone goes first.
   const transcript = segments
-    .map((s) => s.text.trim())
-    .filter(Boolean)
+    .filter((s) => s.text.trim())
+    .map((s) => speakerLine(s.speaker, s.text.trim()))
     .join('\n\n');
 
   fs.writeFileSync(path.join(dir, FILES.transcript), transcript ? `${transcript}\n` : '');
   fs.writeFileSync(
     path.join(dir, FILES.transcriptJson),
     JSON.stringify(
-      { model: engineLabel, engine, sampleRate, durationSeconds: Math.round(seconds), segments },
+      {
+        model: engineLabel,
+        engine,
+        sampleRate,
+        channels,
+        speakers: channels === 2 ? SPEAKERS : {},
+        durationSeconds: Math.round(seconds),
+        segments,
+      },
       null,
       2,
     ),
   );
-  return { transcript, segments, durationSeconds: seconds, engine, engineLabel };
+  return { transcript, segments, durationSeconds: seconds, channels, engine, engineLabel };
 }
 
 // ------------------------------------------------------------------- summarise
@@ -133,18 +182,44 @@ const SUMMARY_RULES = [
   'Respond with a single JSON object and nothing else. No markdown fences, no commentary.',
 ].join('\n');
 
-async function summarise(dir, config, { onProgress, signal, ollama, transcript }) {
+/**
+ * The extra rules a two-channel transcript earns.
+ *
+ * Only added when the lines are actually labelled: telling the model to read
+ * speaker prefixes off a transcript that has none is an invitation to imagine
+ * some, which is exactly the failure the base rules spend their length on.
+ */
+const SPEAKER_RULES = [
+  `Every line is prefixed with who said it. "${SPEAKERS.mic}:" is the person recording this meeting; ` +
+    `"${SPEAKERS.system}:" is everyone else on the call, captured together from the speakers.`,
+  `An action item accepted by "${SPEAKERS.mic}" has owner "${SPEAKERS.mic}". One accepted by a named person ` +
+    'takes that name. Only fall back to "Unassigned" when nobody took it on.',
+  `"${SPEAKERS.system}" is several people sharing one channel, so never treat it as one person's name — ` +
+    'use the name they are called by in the transcript, if there is one.',
+  'Never repeat the prefixes in the notes themselves; they are transcript formatting, not content.',
+].join('\n');
+
+/**
+ * @param {object} deps
+ * @param {boolean} [deps.speakers] whether the transcript carries speaker labels
+ */
+async function summarise(dir, config, { onProgress, signal, ollama, transcript, speakers = false }) {
   onProgress?.({ phase: 'summarising' });
 
   let source = transcript;
   if (transcript.length > CONDENSE_THRESHOLD) {
-    source = await condense(transcript, config, { ollama, signal, onProgress });
+    source = await condense(transcript, config, { ollama, signal, onProgress, speakers });
   }
 
   const raw = await ollama.chat(
     config.summaryModel,
     [
-      { role: 'system', content: `You are a meticulous meeting-notes assistant.\n${SUMMARY_RULES}` },
+      {
+        role: 'system',
+        content:
+          `You are a meticulous meeting-notes assistant.\n${SUMMARY_RULES}` +
+          (speakers ? `\n${SPEAKER_RULES}` : ''),
+      },
       {
         role: 'user',
         content:
@@ -161,7 +236,7 @@ async function summarise(dir, config, { onProgress, signal, ollama, transcript }
 }
 
 /** Squeezes an over-long transcript into per-block digests before the final pass. */
-async function condense(transcript, config, { ollama, signal, onProgress }) {
+async function condense(transcript, config, { ollama, signal, onProgress, speakers = false }) {
   const blocks = [];
   let pos = 0;
   while (pos < transcript.length) {
@@ -186,8 +261,14 @@ async function condense(transcript, config, { ollama, signal, onProgress }) {
           role: 'user',
           content:
             `This is part ${i + 1} of ${blocks.length} of a meeting transcript. Write a dense factual digest ` +
-            'preserving every decision, commitment, owner name, date and number mentioned. Prose only, no headings.\n\n' +
-            blocks[i],
+            'preserving every decision, commitment, owner name, date and number mentioned. Prose only, no headings.' +
+            // The digest is all the final pass will see, so who committed to
+            // what has to survive this step or the labels were pointless.
+            (speakers
+              ? `\nLines are prefixed with the speaker: "${SPEAKERS.mic}" is the person recording, ` +
+                `"${SPEAKERS.system}" is everyone else. Keep track of which of them said each thing.`
+              : '') +
+            `\n\n${blocks[i]}`,
         },
       ],
       { signal, temperature: 0.1 },
@@ -496,18 +577,42 @@ async function runPipeline(dir, config, { onProgress, signal, meta: metaIn, whis
     models: { transcribe: transcribeEngineLabel(engine, config, whisper), summary: config.summaryModel },
   };
 
-  const { transcript, durationSeconds } = await transcribe(dir, config, { onProgress, signal, ollama, whisper });
+  const { transcript, durationSeconds, channels } = await transcribe(dir, config, {
+    onProgress,
+    signal,
+    ollama,
+    whisper,
+  });
   meta.durationSeconds = meta.durationSeconds || durationSeconds;
+  // What the audio turned out to be, rather than what the recorder intended:
+  // this folder may have been recorded by an older version, or by hand.
+  meta.channels = channels;
 
   await requireOllama(ollama, config, 'write the notes');
 
-  const notes = await summarise(dir, config, { onProgress, signal, ollama, transcript });
-  fs.writeFileSync(path.join(dir, FILES.notes), renderMarkdown(notes, meta));
+  const notes = await summarise(dir, config, {
+    onProgress,
+    signal,
+    ollama,
+    transcript,
+    speakers: channels === 2,
+  });
 
-  const pdfPath = await renderPdf(dir, config, { onProgress, signal, ollama, notes, meta });
+  // notes.json keeps what the model produced; everything a person reads gets
+  // the title they typed, if they typed one. Applied here rather than inside
+  // summarise so the override survives a re-run without being written back into
+  // the model's own output.
+  const titled = { ...notes, title: readTitle(dir) || notes.title };
+  fs.writeFileSync(path.join(dir, FILES.notes), renderMarkdown(titled, meta));
+
+  const pdfPath = await renderPdf(dir, config, { onProgress, signal, ollama, notes: titled, meta });
 
   meta.completedAt = new Date().toISOString();
   meta.files = Object.values(FILES).filter((f) => f !== FILES.html && fs.existsSync(path.join(dir, f)));
+  // A title the user typed is theirs, not this run's to overwrite — but it is
+  // worth recording that one is in force, so meta.json still describes the
+  // folder as it reads.
+  meta.title = readTitle(dir) || notes.title;
   fs.writeFileSync(path.join(dir, FILES.meta), JSON.stringify(meta, null, 2));
 
   onProgress?.({ phase: 'done' });
@@ -517,6 +622,7 @@ async function runPipeline(dir, config, { onProgress, signal, meta: metaIn, whis
 module.exports = {
   runPipeline,
   transcribe,
+  tracksOf,
   transcribeEngineFor,
   transcribeEngineLabel,
   summarise,

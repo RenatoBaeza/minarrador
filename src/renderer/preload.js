@@ -12,7 +12,10 @@ contextBridge.exposeInMainWorld('capture', {
   sendLevel: (levels) => ipcRenderer.send('capture:level', levels),
   /** Which sources actually opened, plus any error text. */
   sendStatus: (status) => ipcRenderer.send('capture:status', status),
+  /** Audio inputs this machine has, so the settings pane can offer a choice. */
+  sendDevices: (devices) => ipcRenderer.send('capture:devices', devices),
 
   onConfigure: (fn) => ipcRenderer.on('capture:configure', (_e, cfg) => fn(cfg)),
-  onSetRecording: (fn) => ipcRenderer.on('capture:setRecording', (_e, value) => fn(value)),
+  /** `channels` is the WAV layout main is writing: 1 summed, or 2 kept apart. */
+  onSetRecording: (fn) => ipcRenderer.on('capture:setRecording', (_e, value, channels) => fn(value, channels)),
 });

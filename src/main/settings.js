@@ -37,8 +37,45 @@ function defaults() {
     summaryModel: 'gemma4:12b',
     captureMic: true,
     captureSystem: true,
+    /**
+     * Which microphone to record, or '' for whatever Windows calls the default.
+     *
+     * The label is stored beside the id because Chromium salts device ids per
+     * origin and does not always reissue the same one after a restart — the
+     * name on the device is the more durable of the two, and having both means
+     * a headset is still found when only one of them survives.
+     */
+    micDeviceId: '',
+    micDeviceLabel: '',
+    /**
+     * Keep the microphone and the system audio on separate channels of the WAV.
+     *
+     * The reason the notes can say who owns an action item: the two sources are
+     * never the same signal, so mixing them down threw away a speaker
+     * separation the graph already had. Costs twice the disk (~230 MB/hour) for
+     * a meeting where both sides are live, which is the trade this turns off.
+     */
+    separateChannels: true,
     /** Watch levels while idle and offer to start recording. */
     suggestOnAudio: true,
+    /**
+     * Stop a recording that has heard nothing for this many minutes; 0 never does.
+     *
+     * For the meeting that ended without anyone pressing Stop. Fifteen minutes
+     * is longer than any pause in a real call and short enough that a forgotten
+     * recording costs a coffee break rather than a weekend.
+     */
+    silenceStopMinutes: 15,
+    /**
+     * Hard ceiling on one recording, in minutes; 0 removes it.
+     *
+     * The backstop for silence detection failing to notice — a call left on
+     * hold music, a fan the mic can hear. Four hours is past the length of any
+     * meeting and still leaves a WAV the pipeline can get through.
+     */
+    maxRecordingMinutes: 240,
+    /** Hold off system sleep while recording, so a meeting is not cut in half. */
+    preventSleep: true,
     startAtLogin: true,
     /** Show the live transcript window while recording. */
     liveTranscript: true,
@@ -84,6 +121,10 @@ const RANGES = {
   // 0 means "let whisper.cpp decide"; the ceiling is a guard against a typo
   // spawning hundreds of decode threads mid-meeting.
   whisperThreads: [0, 64],
+  // Both 0 mean "never", so neither may be clamped up off it. The ceilings only
+  // exist so a hand-edited file cannot describe a cap that is not one.
+  silenceStopMinutes: [0, 240],
+  maxRecordingMinutes: [0, 1440],
 };
 
 /**

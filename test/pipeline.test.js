@@ -13,6 +13,7 @@ const {
   fallbackHtml,
   fmtDuration,
   transcribe,
+  tracksOf,
   transcribeEngineFor,
   transcribeEngineLabel,
 } = require('../src/main/pipeline');
@@ -219,13 +220,42 @@ test('fallbackHtml copes with meta from an older or partial run', () => {
 
 /** A meeting folder holding a WAV of `seconds` of audible 16 kHz mono tone. */
 function meetingWithAudio(t, seconds = 3) {
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'minarrador-pipeline-'));
-  t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+  const dir = tmpMeeting(t);
   const samples = 16000 * seconds;
   const pcm = Buffer.alloc(samples * 2);
   // Loud enough to clear SILENCE_RMS, or every chunk would be skipped as room tone.
   for (let i = 0; i < samples; i++) pcm.writeInt16LE(Math.round(8000 * Math.sin(i / 8)), i * 2);
   fs.writeFileSync(path.join(dir, FILES.audio), buildWav(pcm, 16000));
+  return dir;
+}
+
+function tmpMeeting(t) {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'minarrador-pipeline-'));
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+  return dir;
+}
+
+/**
+ * A two-channel meeting folder: the microphone on the left, the system audio on
+ * the right, each audible only during the seconds it is given.
+ *
+ * `talking` is a list of `[speaker, fromSecond, toSecond]`, so a test can say
+ * "you speak for the first minute, they answer in the second" and then assert
+ * that the transcript attributes each of them.
+ *
+ * @param {[('mic'|'system'), number, number][]} talking
+ */
+function stereoMeeting(t, seconds, talking) {
+  const dir = tmpMeeting(t);
+  const frames = 16000 * seconds;
+  const pcm = Buffer.alloc(frames * 4);
+  for (const [speaker, from, to] of talking) {
+    const channel = speaker === 'mic' ? 0 : 1;
+    for (let f = Math.round(from * 16000); f < Math.round(to * 16000) && f < frames; f++) {
+      pcm.writeInt16LE(Math.round(8000 * Math.sin(f / 8)), f * 4 + channel * 2);
+    }
+  }
+  fs.writeFileSync(path.join(dir, FILES.audio), buildWav(pcm, 16000, 2));
   return dir;
 }
 
@@ -329,4 +359,128 @@ test('transcribe stops on an abort rather than working through the rest of the m
     () => transcribe(dir, { transcribeEngine: 'whisper', chunkSeconds: 1 }, { whisper: fakeWhisper(), ollama: fakeOllama(), signal: abort.signal }),
     /cancelled/,
   );
+});
+
+test('a mono recording is transcribed as one unattributed track', () => {
+  const pcm = Buffer.alloc(400);
+  const tracks = tracksOf(pcm, 1);
+  assert.equal(tracks.length, 1);
+  assert.equal(tracks[0].speaker, '');
+  assert.deepEqual(tracks[0].pcm, pcm);
+});
+
+test('a two-channel recording is transcribed as the microphone then the room', () => {
+  const tracks = tracksOf(Buffer.alloc(400), 2);
+  assert.deepEqual(tracks.map((track) => track.speaker), ['mic', 'system']);
+  for (const track of tracks) assert.equal(track.pcm.length, 200, 'each side is half the interleaved bytes');
+});
+
+// ------------------------------------------------------- two-channel transcripts
+//
+// The point of recording two channels: each side is transcribed on its own, so
+// every line knows who said it. Attribution used to work only when somebody said
+// a name out loud.
+
+// 3.5 seconds at a 2-second chunk is exactly two chunks: the second nominal cut
+// falls past the end of the audio, so there is no stub third one to reason about.
+// The pause at 1.8-2.0 is where splitIntoChunks puts the first.
+const TWO_CHUNKS = { seconds: 3.5, chunkSeconds: 2 };
+
+test('transcribe labels each line with the side of the call it came from', async (t) => {
+  // You talk through the first chunk, they answer through the second.
+  const dir = stereoMeeting(t, TWO_CHUNKS.seconds, [
+    ['mic', 0, 1.8],
+    ['system', 2, 3.5],
+  ]);
+  const whisper = fakeWhisper();
+
+  const out = await transcribe(dir, { transcribeEngine: 'whisper', ...TWO_CHUNKS }, { whisper, ollama: fakeOllama() });
+
+  assert.equal(out.channels, 2);
+  const said = out.segments.filter((s) => s.text);
+  assert.deepEqual(said.map((s) => s.speaker), ['mic', 'system']);
+
+  const written = fs.readFileSync(path.join(dir, FILES.transcript), 'utf8');
+  assert.equal(written, 'You: heard 1\n\nOthers: heard 2\n');
+
+  const json = JSON.parse(fs.readFileSync(path.join(dir, FILES.transcriptJson), 'utf8'));
+  assert.equal(json.channels, 2);
+  assert.deepEqual(json.speakers, { mic: 'You', system: 'Others' });
+});
+
+test('transcribe skips the side that was only listening', async (t) => {
+  const dir = stereoMeeting(t, TWO_CHUNKS.seconds, [
+    ['mic', 0, 1.8],
+    ['system', 2, 3.5],
+  ]);
+  const whisper = fakeWhisper();
+
+  const out = await transcribe(dir, { transcribeEngine: 'whisper', ...TWO_CHUNKS }, { whisper, ollama: fakeOllama() });
+
+  // Every chunk holds a slot for both sides, and only the audible ones are sent.
+  // That is what keeps two channels from costing two transcriptions: the side
+  // that was listening is silence, and silence is skipped.
+  assert.equal(out.segments.length, 4, 'two chunks, two sides');
+  assert.equal(whisper.calls.length, 2, 'a silent channel must not be sent to the model');
+});
+
+test('transcribe gives each side its own context, not the other side’s last line', async (t) => {
+  // Both talking, in both chunks, with the same pause between them.
+  const dir = stereoMeeting(t, TWO_CHUNKS.seconds, [
+    ['mic', 0, 1.8],
+    ['mic', 2, 3.5],
+    ['system', 0, 1.8],
+    ['system', 2, 3.5],
+  ]);
+  const whisper = fakeWhisper();
+
+  await transcribe(dir, { transcribeEngine: 'whisper', ...TWO_CHUNKS }, { whisper, ollama: fakeOllama() });
+
+  // Order is mic, system, mic, system — so the second chunk's mic request must
+  // be prompted with the first mic line, not with what the other side said.
+  assert.equal(whisper.calls.length, 4);
+  assert.equal(whisper.calls[0].prompt, '');
+  assert.equal(whisper.calls[1].prompt, '');
+  assert.equal(whisper.calls[2].prompt, 'heard 1', 'the microphone continues its own sentence');
+  assert.equal(whisper.calls[3].prompt, 'heard 2', 'and so does the room');
+});
+
+test('transcribe cuts both channels at the same boundaries', async (t) => {
+  const dir = stereoMeeting(t, 6, [
+    ['mic', 0, 6],
+    ['system', 0, 6],
+  ]);
+  const out = await transcribe(
+    dir,
+    { transcribeEngine: 'whisper', chunkSeconds: 2 },
+    { whisper: fakeWhisper(), ollama: fakeOllama() },
+  );
+
+  // Every chunk index has to hold exactly one segment per side, spanning the
+  // same seconds — otherwise each line's timestamp is on its own grid.
+  const byChunk = new Map();
+  for (const s of out.segments) {
+    const bucket = byChunk.get(s.chunk) ?? [];
+    bucket.push(s);
+    byChunk.set(s.chunk, bucket);
+  }
+  for (const [, bucket] of byChunk) {
+    assert.equal(bucket.length, 2);
+    assert.equal(bucket[0].startSeconds, bucket[1].startSeconds);
+    assert.equal(bucket[0].endSeconds, bucket[1].endSeconds);
+  }
+});
+
+test('a mono recording still produces an unlabelled transcript', async (t) => {
+  const dir = meetingWithAudio(t, 2);
+  const out = await transcribe(
+    dir,
+    { transcribeEngine: 'whisper', chunkSeconds: 1 },
+    { whisper: fakeWhisper(), ollama: fakeOllama() },
+  );
+
+  assert.equal(out.channels, 1);
+  assert.ok(out.segments.every((s) => s.speaker === ''));
+  assert.doesNotMatch(fs.readFileSync(path.join(dir, FILES.transcript), 'utf8'), /^You:|^Others:/m);
+  assert.deepEqual(JSON.parse(fs.readFileSync(path.join(dir, FILES.transcriptJson), 'utf8')).speakers, {});
 });

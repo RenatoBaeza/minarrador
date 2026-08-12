@@ -410,6 +410,46 @@ main {
   background: #4c6ef5;
 }
 
+/* Deleting is the one thing this window does that destroys work, so it is the
+   one button that does not look like the rest — quiet until it is reached for,
+   and unmistakable then. */
+.button.danger {
+  color: #e0808f;
+}
+
+.button.danger:hover:not(:disabled) {
+  background: #e11d48;
+  border-color: #e11d48;
+  color: #fff;
+}
+
+/* Pushes rename and delete to the far end of the action row, away from the
+   buttons that only ever read something. */
+.actions .spacer {
+  flex: 1;
+  min-width: 12px;
+}
+
+/* The title, while it is being typed. Sized to sit exactly where the heading
+   was, so committing a rename does not make the page jump. */
+.title-input {
+  width: 100%;
+  background: #1b1b21;
+  border: 1px solid #3b5bdb;
+  border-radius: 6px;
+  color: inherit;
+  font: inherit;
+  font-size: 26px;
+  line-height: 1.2;
+  letter-spacing: -0.02em;
+  padding: 2px 8px;
+  margin: -3px -9px;
+}
+
+.title-input:focus {
+  outline: none;
+}
+
 /* Notes / Transcript. A segmented control rather than two links: the two are
    the same meeting seen twice, not two places to navigate to. */
 .tabs {
@@ -547,6 +587,33 @@ main {
   white-space: pre-wrap;
 }
 
+/* Who said it. Only ever present on a recording that kept the microphone and
+   the system audio on separate channels — which is the whole reason it can be
+   shown at all, since each side was transcribed on its own. */
+.who {
+  display: inline-block;
+  margin-right: 8px;
+  padding: 1px 7px;
+  border-radius: 999px;
+  font-size: 10.5px;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  vertical-align: 1px;
+  white-space: nowrap;
+  background: #2e2e38;
+  color: #9ca3af;
+}
+
+.who.mic {
+  background: rgba(76, 110, 245, 0.16);
+  color: #93a7f7;
+}
+
+.who.system {
+  background: rgba(22, 163, 74, 0.16);
+  color: #6ee7a0;
+}
+
 mark {
   background: rgba(251, 191, 36, 0.28);
   color: #fde68a;
@@ -610,6 +677,49 @@ mark {
 .notice-warn {
   color: #e0808f;
   font-size: 12.5px;
+}
+
+/* Where a pipeline run has got to. The numbers were always there — the tray has
+   shown them since the pipeline existed — they just never reached this window,
+   which said "Working…" for the whole of an hour-long transcription. */
+.notice-progress {
+  margin-top: 10px;
+  color: #93a7f7;
+  font-size: 12.5px;
+}
+
+.progress-track {
+  margin-top: 8px;
+  height: 4px;
+  border-radius: 999px;
+  background: #2c2c34;
+  overflow: hidden;
+}
+
+.progress-bar {
+  height: 100%;
+  border-radius: 999px;
+  background: #3b5bdb;
+  transition: width 0.4s ease;
+}
+
+/* A stage with nothing to count — writing the notes, exporting the PDF — gets a
+   bar that is plainly not measuring anything, rather than one stuck at zero,
+   which reads as a run that has stopped. */
+.progress-track.indeterminate .progress-bar {
+  background: linear-gradient(90deg, #2c2c34 0%, #3b5bdb 50%, #2c2c34 100%);
+  background-size: 40% 100%;
+  animation: sweep 1.4s linear infinite;
+  transition: none;
+}
+
+@keyframes sweep {
+  from {
+    background-position: -60% 0;
+  }
+  to {
+    background-position: 160% 0;
+  }
 }
 
 /* ----------------------------------------------------------------- settings */
@@ -712,6 +822,31 @@ mark {
 
 .control:disabled {
   opacity: 0.45;
+}
+
+/* A row whose control is a picker and a button — the two first-run downloads,
+   where choosing the thing and fetching it are one decision. */
+.row-controls {
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  max-width: 55%;
+}
+
+.control.narrow {
+  width: 200px;
+  max-width: none;
+}
+
+.row-controls .button {
+  white-space: nowrap;
+}
+
+/* The setup row's bar is inside the label column rather than beside it: it is
+   describing the row, not controlling it. */
+.row-body .progress-track {
+  max-width: 320px;
 }
 
 .row.missing .control {

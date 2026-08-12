@@ -274,6 +274,126 @@ test('the host is normalised so a trailing slash cannot double up', async () => 
   }
 });
 
+// ------------------------------------------------------------------------ pull
+//
+// A running Ollama with nothing pulled is half of an install that cannot work,
+// and `ollama pull` in a terminal is not an answer for anyone who arrived via
+// the installer. The route streams NDJSON, one object per status change.
+
+/**
+ * An Ollama stand-in that streams `lines` back as newline-delimited JSON.
+ *
+ * `chunk` controls how the bytes are cut up, because the interesting failure
+ * here is a JSON object split across two network chunks.
+ */
+async function fakePullServer(lines, { status = 200, chunk = 0 } = {}) {
+  const calls = [];
+  const server = http.createServer((req, res) => {
+    const chunks = [];
+    req.on('data', (c) => chunks.push(c));
+    req.on('end', async () => {
+      calls.push({ url: req.url, body: JSON.parse(Buffer.concat(chunks).toString('utf8') || 'null') });
+      res.writeHead(status, { 'Content-Type': 'application/x-ndjson' });
+      const body = lines.map((l) => `${JSON.stringify(l)}\n`).join('');
+      if (!chunk) {
+        res.end(body);
+        return;
+      }
+      for (let i = 0; i < body.length; i += chunk) {
+        res.write(body.slice(i, i + chunk));
+        await new Promise((r) => setImmediate(r));
+      }
+      res.end();
+    });
+  });
+
+  await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
+  const host = `http://127.0.0.1:${server.address().port}`;
+  return { host, calls, client: new Ollama(host), close: () => new Promise((resolve) => server.close(resolve)) };
+}
+
+test('pull reports each layer as it lands and returns the final status', async () => {
+  const fake = await fakePullServer([
+    { status: 'pulling manifest' },
+    { status: 'pulling abc', completed: 1000, total: 4000 },
+    { status: 'pulling abc', completed: 4000, total: 4000 },
+    { status: 'success' },
+  ]);
+  try {
+    const seen = [];
+    const last = await fake.client.pull('gemma4:12b', { onProgress: (p) => seen.push(p) });
+
+    assert.equal(last, 'success');
+    assert.equal(fake.calls[0].url, '/api/pull');
+    assert.deepEqual(fake.calls[0].body, { model: 'gemma4:12b', stream: true });
+    assert.equal(seen.length, 4);
+    assert.deepEqual(seen[1], { status: 'pulling abc', completed: 1000, total: 4000 });
+    // A status line with no byte counts still reports numbers a bar can use.
+    assert.deepEqual(seen[0], { status: 'pulling manifest', completed: 0, total: 0 });
+  } finally {
+    await fake.close();
+  }
+});
+
+test('pull reassembles an object split across two network chunks', async () => {
+  const fake = await fakePullServer(
+    [{ status: 'pulling manifest' }, { status: 'pulling abc', completed: 2048, total: 4096 }, { status: 'success' }],
+    { chunk: 7 },
+  );
+  try {
+    const seen = [];
+    assert.equal(await fake.client.pull('m', { onProgress: (p) => seen.push(p) }), 'success');
+    assert.deepEqual(seen.map((p) => p.status), ['pulling manifest', 'pulling abc', 'success']);
+    assert.equal(seen[1].completed, 2048);
+  } finally {
+    await fake.close();
+  }
+});
+
+// Ollama reports a bad model name in the body with a 200 status, so the stream
+// is the only place this surfaces.
+test('pull fails on an error in the stream, not just on a bad status', async () => {
+  const fake = await fakePullServer([{ status: 'pulling manifest' }, { error: 'model "nope" not found' }]);
+  try {
+    await assert.rejects(
+      () => fake.client.pull('nope'),
+      (err) => err instanceof OllamaError && /model "nope" not found/.test(err.message),
+    );
+  } finally {
+    await fake.close();
+  }
+});
+
+test('pull fails on a bad status too', async () => {
+  const fake = await fakePullServer([], { status: 500 });
+  try {
+    await assert.rejects(() => fake.client.pull('m'), /returned 500/);
+  } finally {
+    await fake.close();
+  }
+});
+
+test('pull refuses to ask for nothing', async () => {
+  await assert.rejects(() => new Ollama('http://127.0.0.1:1').pull(''), /No model was named/);
+});
+
+test('pull reports an unreachable daemon as one', async () => {
+  // Port 1 is not something a daemon listens on.
+  await assert.rejects(() => new Ollama('http://127.0.0.1:1').pull('m'), /Cannot reach Ollama/);
+});
+
+test('pull stops when it is cancelled', async () => {
+  const fake = await fakePullServer([{ status: 'pulling manifest' }, { status: 'success' }]);
+  try {
+    await assert.rejects(
+      () => fake.client.pull('m', { signal: AbortSignal.abort() }),
+      (err) => err instanceof OllamaError && /Cancelled/.test(err.message),
+    );
+  } finally {
+    await fake.close();
+  }
+});
+
 // ---------------------------------------------------------- starting the daemon
 
 const LOCAL = path.join('C:', 'Users', 'someone', 'AppData', 'Local');

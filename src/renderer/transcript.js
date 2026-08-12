@@ -37,13 +37,22 @@ window.transcript.onClear(() => {
   content.replaceChildren(hint);
 });
 
-window.transcript.onLine((text) => {
+window.transcript.onLine(({ text, speaker }) => {
   if (!text.trim()) return;
   const stick = atBottom();
   hint.remove();
   const p = document.createElement('p');
+  // A two-channel recording already knows which side of the call a line came
+  // from, so the preview says it — the whole reason for keeping the microphone
+  // and the room apart is that "who said that" stops being a guess.
+  if (speaker) {
+    const who = document.createElement('span');
+    who.className = `who ${speaker}`;
+    who.textContent = window.transcript.speakers[speaker];
+    p.append(who);
+  }
   // textContent, never innerHTML: this string came out of a language model.
-  p.textContent = text;
+  p.append(document.createTextNode(text));
   content.append(p);
   if (stick) content.scrollTop = content.scrollHeight;
 });

@@ -13,7 +13,13 @@ const BASE = Object.freeze({
   summaryModel: 'gemma4:12b',
   captureMic: true,
   captureSystem: true,
+  micDeviceId: '',
+  micDeviceLabel: '',
+  separateChannels: true,
   suggestOnAudio: true,
+  silenceStopMinutes: 15,
+  maxRecordingMinutes: 240,
+  preventSleep: true,
   startAtLogin: true,
   liveTranscript: true,
   liveEngine: 'whisper',
@@ -71,10 +77,32 @@ test('coerce clamps chunkSeconds into a workable range', () => {
   assert.equal(coerce({ chunkSeconds: 45.7 }, BASE).chunkSeconds, 46);
 });
 
+// Both limits use 0 for "never", so the clamp must not lift them off it — a
+// floor of 1 would turn "no ceiling" into "stop after a minute".
+test('coerce keeps 0 as the value that turns a recording limit off', () => {
+  assert.equal(coerce({ silenceStopMinutes: 0 }, BASE).silenceStopMinutes, 0);
+  assert.equal(coerce({ maxRecordingMinutes: 0 }, BASE).maxRecordingMinutes, 0);
+  assert.equal(coerce({ silenceStopMinutes: -5 }, BASE).silenceStopMinutes, 0);
+});
+
+test('coerce clamps a hand-edited recording limit to something that is one', () => {
+  assert.equal(coerce({ silenceStopMinutes: 99999 }, BASE).silenceStopMinutes, 240);
+  assert.equal(coerce({ maxRecordingMinutes: 99999 }, BASE).maxRecordingMinutes, 1440);
+  assert.equal(coerce({ silenceStopMinutes: 12.6 }, BASE).silenceStopMinutes, 13);
+});
+
 test('coerce ignores blank strings, which would blank out a model name', () => {
   const out = coerce({ transcribeModel: '   ', ollamaHost: '' }, BASE);
   assert.equal(out.transcribeModel, BASE.transcribeModel);
   assert.equal(out.ollamaHost, BASE.ollamaHost);
+});
+
+// The chosen microphone defaults to '' meaning "whatever Windows picks", which
+// is the one string field where empty is a real value rather than a mistake.
+test('coerce lets the microphone choice fall back to the system default', () => {
+  assert.equal(coerce({ micDeviceId: '   ' }, BASE).micDeviceId, '');
+  assert.equal(coerce({ micDeviceId: 'abc123' }, BASE).micDeviceId, 'abc123');
+  assert.equal(coerce({ micDeviceId: 42 }, BASE).micDeviceId, '', 'a non-string is not a device');
 });
 
 test('coerce trims incidental whitespace', () => {

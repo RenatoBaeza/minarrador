@@ -13,7 +13,7 @@ const fs = require('node:fs');
 
 const log = require('../src/main/logger');
 const { CaptureController } = require('../src/main/capture');
-const { readWav, rms } = require('../src/main/wav');
+const { readWav, rms, channelRms } = require('../src/main/wav');
 
 const seconds = Number(process.argv.find((a) => /^\d+$/.test(a))) || 5;
 
@@ -33,8 +33,11 @@ app.whenReady().then(async () => {
   await new Promise((r) => setTimeout(r, 3000)); // let getUserMedia settle
 
   console.log('Sources:');
-  console.log(`  microphone   : ${capture.status.micOk ? 'OK' : `unavailable — ${capture.status.micError}`}`);
+  console.log(
+    `  microphone   : ${capture.status.micOk ? `OK — ${capture.status.micLabel || 'unnamed device'}` : `unavailable — ${capture.status.micError}`}`,
+  );
   console.log(`  system audio : ${capture.status.systemOk ? 'OK' : `unavailable — ${capture.status.systemError}`}`);
+  console.log(`  inputs seen  : ${capture.devices.map((d) => d.label).join(', ') || 'none reported'}`);
 
   if (!capture.status.micOk && !capture.status.systemOk) {
     console.error('\nNo capture source available.');
@@ -49,11 +52,19 @@ app.whenReady().then(async () => {
   await new Promise((r) => setTimeout(r, seconds * 1000));
   const result = await capture.stopRecording();
 
-  const { pcm, sampleRate, seconds: dur } = readWav(out);
+  const { pcm, sampleRate, channels, seconds: dur } = readWav(out);
   const level = rms(pcm);
-  console.log(`\nWrote ${result.bytes} bytes — ${dur.toFixed(2)}s @ ${sampleRate} Hz`);
+  console.log(`\nWrote ${result.bytes} bytes — ${dur.toFixed(2)}s @ ${sampleRate} Hz, ${channels} channel(s)`);
   console.log(`Peak levels  : mixed ${peak.mixed.toFixed(4)}  mic ${peak.mic.toFixed(4)}  system ${peak.system.toFixed(4)}`);
   console.log(`File RMS     : ${level.toFixed(5)} ${level < 0.0005 ? '(silent — nothing was playing?)' : '(signal present)'}`);
+  // With both sources live the file is written as two channels, and the point of
+  // that is that the two are different. A stereo file whose channels read the
+  // same is a merger that has quietly folded them together.
+  if (channels === 2) {
+    console.log(
+      `Per channel  : left/mic ${channelRms(pcm, 2, 0).toFixed(5)}  right/system ${channelRms(pcm, 2, 1).toFixed(5)}`,
+    );
+  }
 
   if (process.argv.includes('--keep')) console.log(`Kept: ${out}`);
   else fs.rmSync(out, { force: true });

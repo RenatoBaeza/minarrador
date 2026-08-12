@@ -89,14 +89,35 @@ function languageCode(label) {
 }
 
 /**
+ * Where the app installs whisper.cpp when it fetches it itself.
+ *
+ * Under userData because it is the only one of the three roots that is reliably
+ * writable and survives an app update — resources/ is replaced wholesale by the
+ * installer, and in a packaged build the vendor path is inside app.asar.
+ *
+ * @returns {string} '' outside Electron, where there is no such directory
+ */
+function installRoot() {
+  try {
+    return path.join(require('electron').app.getPath('userData'), 'whisper');
+  } catch {
+    // A plain Node process (tests, tools) has no app to ask.
+    return '';
+  }
+}
+
+/**
  * Where a whisper.cpp install may live, most specific first.
  *
- * `resourcesPath` only exists inside Electron, and only points somewhere real in
- * a packaged build; the vendor directory is what `npm run whisper:setup` fills
- * during development.
+ * The user-data root comes first because an install the app fetched on request
+ * is the most deliberate of the three. `resourcesPath` only exists inside
+ * Electron and only points somewhere real in a packaged build; the vendor
+ * directory is what `npm run whisper:setup` fills during development.
  */
 function defaultRoots() {
   const roots = [];
+  const own = installRoot();
+  if (own) roots.push(own);
   if (process.resourcesPath) roots.push(path.join(process.resourcesPath, 'whisper'));
   roots.push(path.join(__dirname, '..', '..', 'vendor', 'whisper'));
   return roots;
@@ -118,19 +139,27 @@ function listModels(modelsDir) {
 /**
  * Works out which binary and weights to use.
  *
- * @param {{ root?: string, model?: string }} [cfg] `root` replaces discovery
- *   entirely — someone who names an install means that one, and quietly running
- *   a different copy would be the worst way to report a typo. `model` is either
- *   an absolute path or a file name inside the models folder.
+ * @param {{ root?: string, roots?: string[], model?: string }} [cfg] `root`
+ *   replaces discovery entirely — someone who names an install means that one,
+ *   and quietly running a different copy would be the worst way to report a
+ *   typo. `roots` replaces only the candidate list, which is how the ordering
+ *   below is exercised without depending on where Electron happens to put
+ *   userData on the machine running the test. `model` is either an absolute
+ *   path or a file name inside the models folder.
  * @returns {{ root: string, binary: string, modelsDir: string, model: string }}
  *   `model` is '' when nothing usable was found — callers report that as "not
  *   installed" rather than spawning a server that would exit immediately.
  */
-function resolveInstall({ root = '', model = '' } = {}) {
-  const roots = root ? [root] : defaultRoots();
-  // Fall back to the last candidate so an uninstalled setup still reports the
-  // path it expected, which is the only useful thing to put in an error.
-  const chosen = roots.find((dir) => fs.existsSync(path.join(dir, 'bin', SERVER_EXE))) ?? roots.at(-1);
+function resolveInstall({ root = '', roots: candidates = null, model = '' } = {}) {
+  const roots = root ? [root] : (candidates ?? defaultRoots());
+  // A root with the binary in it wins. Failing that, one that at least exists —
+  // a checkout with models but no binaries is a real state, and reporting the
+  // tree somebody is actually looking at is more use than reporting the first
+  // candidate. Failing even that, the first, which is where an install would go.
+  const chosen =
+    roots.find((dir) => fs.existsSync(path.join(dir, 'bin', SERVER_EXE))) ??
+    roots.find((dir) => fs.existsSync(dir)) ??
+    roots[0];
   const modelsDir = path.join(chosen, 'models');
 
   let resolved;
@@ -517,6 +546,8 @@ module.exports = {
   WhisperError,
   defaultThreads,
   threadChoices,
+  installRoot,
+  defaultRoots,
   resolveInstall,
   listModels,
   cleanWhisperText,

@@ -8,7 +8,7 @@ const { EventEmitter } = require('node:events');
 const path = require('node:path');
 
 const log = require('./logger');
-const { WavWriter, buildWav, rms } = require('./wav');
+const { WavWriter, buildWav, rms, channelRms, downmix } = require('./wav');
 const { Ollama } = require('./ollama');
 
 const SAMPLE_RATE = 16000;
@@ -108,6 +108,54 @@ class SpeechDetector extends EventEmitter {
 }
 
 /**
+ * Fires 'silence' when a recording has heard nothing for a long stretch.
+ *
+ * SpeechDetector inverted, and for the opposite problem: that one exists to
+ * notice a meeting starting, this one to notice one that ended without anybody
+ * pressing Stop. Nothing else in the app would — there is no duration cap on
+ * the audio graph, so a recording left running on a Friday is still running on
+ * Monday, and the pipeline then spends the morning on a multi-hour WAV of an
+ * empty room.
+ *
+ * Fires once per arming: the meeting is being stopped, and a second event on
+ * the way down would only race the first.
+ */
+class SilenceDetector extends EventEmitter {
+  /** @param {{ minutes?: number, floorRms?: number }} [options] `minutes` 0 disables it. */
+  constructor({ minutes = 0, floorRms = 0.006 } = {}) {
+    super();
+    this.floorRms = floorRms;
+    this.quiet = 0;
+    this.fired = false;
+    this.configure({ minutes });
+  }
+
+  configure({ minutes, floorRms } = {}) {
+    if (minutes !== undefined) this.minutes = Math.max(0, Number(minutes) || 0);
+    if (floorRms !== undefined) this.floorRms = floorRms;
+    return this;
+  }
+
+  reset() {
+    this.quiet = 0;
+    this.fired = false;
+  }
+
+  /** Levels arrive ~5x/second, the same cadence SpeechDetector is sized for. */
+  push({ mic = 0, system = 0 }) {
+    if (!this.minutes || this.fired) return;
+    if (Math.max(mic, system) >= this.floorRms) {
+      this.quiet = 0;
+      return;
+    }
+    this.quiet += 1;
+    if (this.quiet * 200 < this.minutes * 60_000) return;
+    this.fired = true;
+    this.emit('silence', { minutes: this.minutes });
+  }
+}
+
+/**
  * Buffers recorded PCM and turns it into rough live transcript lines.
  *
  * Deliberately independent of the post-recording pipeline: this is a preview
@@ -117,6 +165,13 @@ class SpeechDetector extends EventEmitter {
  * Two engines can do the transcribing. whisper.cpp is the one that makes this
  * feel live and is preferred whenever it is installed; the Ollama audio model is
  * the fallback for a machine that has never run `npm run whisper:setup`.
+ *
+ * A two-channel recording is folded back to mono before it is sent. The saved
+ * transcript transcribes the two sides separately, which costs a request per
+ * speaker per chunk; here that would double the work in the one place with a
+ * realtime floor to clear. The speaker is inferred instead, from which channel
+ * carried the segment — near enough whenever one person is talking at a time,
+ * which is nearly always, and free.
  *
  * @fires LiveTranscriber#text
  */
@@ -131,12 +186,16 @@ class LiveTranscriber extends EventEmitter {
     this.preferredEngine = 'whisper';
     this.model = '';
     this.language = '';
+    /** Layout of the PCM being pushed: 1 mono, or 2 with mic left, system right. */
+    this.channels = 1;
     this.chunks = [];
     this.bytes = 0;
     /** Trailing silence, in bytes — how a segment boundary is spotted. */
     this.quietBytes = 0;
     /** Audible audio in the buffer, which is what decides if there is anything to send. */
     this.voicedBytes = 0;
+    /** Voiced bytes per channel, which is how a segment is attributed to a side. */
+    this.voicedByChannel = [0, 0];
     /** Tail of the last line, handed to whisper as decoder context. */
     this.tail = '';
     this.busy = false;
@@ -180,8 +239,15 @@ class LiveTranscriber extends EventEmitter {
     return this.enabled && this.ready && this.running;
   }
 
-  start() {
+  /** Bytes of buffered audio one second of meeting costs, at the current layout. */
+  get bytesPerSecond() {
+    return BYTES_PER_SECOND * this.channels;
+  }
+
+  /** @param {1|2} [channels] layout of the PCM about to be pushed. */
+  start(channels = 1) {
     if (!this.enabled || !this.ready || this.running) return;
+    this.channels = channels === 2 ? 2 : 1;
     this.reset();
     this.tail = '';
     this.running = true;
@@ -201,6 +267,7 @@ class LiveTranscriber extends EventEmitter {
     this.bytes = 0;
     this.quietBytes = 0;
     this.voicedBytes = 0;
+    this.voicedByChannel = [0, 0];
   }
 
   /** Loads the engine so the first segment does not also pay for the load. */
@@ -231,9 +298,10 @@ class LiveTranscriber extends EventEmitter {
    */
   get segmentReady() {
     const shape = LIVE_SEGMENT[this.engine];
-    if (this.bytes >= shape.maxSeconds * BYTES_PER_SECOND) return true;
-    if (this.voicedBytes < shape.minSeconds * BYTES_PER_SECOND) return false;
-    return this.quietBytes >= (shape.silenceHoldMs / 1000) * BYTES_PER_SECOND;
+    const perSecond = this.bytesPerSecond;
+    if (this.bytes >= shape.maxSeconds * perSecond) return true;
+    if (this.voicedBytes < shape.minSeconds * perSecond) return false;
+    return this.quietBytes >= (shape.silenceHoldMs / 1000) * perSecond;
   }
 
   /** Sends a segment when one is ready, then looks again shortly. */
@@ -243,7 +311,7 @@ class LiveTranscriber extends EventEmitter {
     this.#schedule(LIVE_POLL_MS);
   }
 
-  /** @param {Buffer} buf 16-bit mono PCM at SAMPLE_RATE */
+  /** @param {Buffer} buf 16-bit PCM at SAMPLE_RATE, in `channels` channels */
   push(buf) {
     // Gated on `running`, not on the timer handle: there is no timer pending
     // while a request is in flight, and that is exactly when audio must keep
@@ -252,14 +320,21 @@ class LiveTranscriber extends EventEmitter {
     this.chunks.push(buf);
     this.bytes += buf.length;
     // Buffers arrive every ~256 ms, which is fine enough to find a pause with.
-    if (rms(buf) < LIVE_SILENCE_RMS) {
+    // Measured per channel and taken at its loudest: one side of a stereo
+    // recording is silent whenever the other is talking, so a mixed reading
+    // would put every utterance 3 dB nearer the gate for no reason.
+    const levels =
+      this.channels === 2 ? [channelRms(buf, 2, 0), channelRms(buf, 2, 1)] : [rms(buf), 0];
+    if (Math.max(...levels) < LIVE_SILENCE_RMS) {
       this.quietBytes += buf.length;
     } else {
       this.quietBytes = 0;
       this.voicedBytes += buf.length;
+      // Which side was audible, so the finished line can say who was talking.
+      for (const c of [0, 1]) if (levels[c] >= LIVE_SILENCE_RMS) this.voicedByChannel[c] += buf.length;
     }
     // Drop the oldest audio rather than letting a slow model grow the queue.
-    while (this.bytes > LIVE_MAX_SECONDS * BYTES_PER_SECOND && this.chunks.length > 1) {
+    while (this.bytes > LIVE_MAX_SECONDS * this.bytesPerSecond && this.chunks.length > 1) {
       this.bytes -= this.chunks.shift().length;
     }
     // Dropped audio may have been the speech that was counted; the buffer is the
@@ -267,20 +342,42 @@ class LiveTranscriber extends EventEmitter {
     this.voicedBytes = Math.min(this.voicedBytes, this.bytes);
   }
 
+  /**
+   * Which side of the conversation a segment belongs to, or '' when it is not
+   * clear enough to claim.
+   *
+   * A margin rather than a plain comparison: leakage between the two is normal —
+   * the microphone hears the speakers, and echo cancellation only mostly
+   * removes them — so a side has to have carried most of the segment before its
+   * name goes on the line. Guessing wrong is worse than not guessing.
+   */
+  get segmentSpeaker() {
+    if (this.channels !== 2) return '';
+    const [mic, system] = this.voicedByChannel;
+    if (mic > system * 2) return 'mic';
+    if (system > mic * 2) return 'system';
+    return '';
+  }
+
   /** Sends everything buffered so far as one request. Driven by #tick. */
   async drain() {
     // One request in flight at a time; audio keeps buffering (bounded) meanwhile.
-    if (this.busy || !this.ready || this.bytes < BYTES_PER_SECOND) return;
+    if (this.busy || !this.ready || this.bytes < this.bytesPerSecond) return;
     this.busy = true;
-    const pcm = Buffer.concat(this.chunks, this.bytes);
-    const seconds = this.bytes / BYTES_PER_SECOND;
+    const raw = Buffer.concat(this.chunks, this.bytes);
+    const seconds = this.bytes / this.bytesPerSecond;
     const engine = this.engine;
+    const speaker = this.segmentSpeaker;
     this.reset();
 
     try {
       // Nobody spoke: asking the model anyway costs a request and tends to come
       // back as an invented line.
-      if (rms(pcm) < LIVE_SILENCE_RMS) return;
+      if (rms(raw) < LIVE_SILENCE_RMS) return;
+      // One request for both sides. The channel that carried it is already
+      // known, and a second decode would cost the latency this preview exists
+      // to keep.
+      const pcm = this.channels === 2 ? downmix(raw, 2) : raw;
       const wav = buildWav(pcm, SAMPLE_RATE);
       const text =
         engine === 'whisper'
@@ -294,7 +391,7 @@ class LiveTranscriber extends EventEmitter {
             });
       if (text) {
         this.tail = text.slice(-LIVE_PROMPT_CHARS);
-        this.emit('text', text);
+        this.emit('text', text, speaker);
       }
     } catch (err) {
       // A live preview is best-effort; the recording itself is unaffected.
@@ -307,6 +404,15 @@ class LiveTranscriber extends EventEmitter {
 
 /** How long to wait before rebuilding a worker whose renderer died. */
 const RECOVER_DELAY_MS = 1500;
+/**
+ * How long a deliberate restart leaves the graph down.
+ *
+ * Long enough for the renderer's async teardown — closing an AudioContext and
+ * stopping the device tracks — to finish before the next build starts, since
+ * the two share the same module state and an overlap would tear down the graph
+ * that had just come up.
+ */
+const RESTART_DELAY_MS = 600;
 /**
  * Consecutive rebuilds before we stop trying.
  *
@@ -322,20 +428,33 @@ class CaptureController extends EventEmitter {
     super();
     this.window = null;
     this.writer = null;
-    this.status = { micOk: false, systemOk: false, micError: '', systemError: '', running: false };
+    this.status = { micOk: false, systemOk: false, micError: '', systemError: '', micLabel: '', running: false };
     this.levels = { mixed: 0, mic: 0, system: 0 };
+    /** Audio inputs the worker last reported, for the settings pane's picker. */
+    this.devices = [];
     this.detector = new SpeechDetector();
+    this.silence = new SilenceDetector();
     this.ollama = new Ollama(ollamaHost);
     this.whisper = whisper;
     this.liveTranscriber = new LiveTranscriber({ ollama: this.ollama, whisper });
     this.detector.on('speech', (info) => this.emit('speech', info));
-    this.liveTranscriber.on('text', (text) => this.emit('transcript', text));
+    this.silence.on('silence', (info) => this.emit('silence', info));
+    this.liveTranscriber.on('text', (text, speaker) => this.emit('transcript', text, speaker));
     this.monitoring = false;
     this._quitting = false;
     /** Last configuration sent to the renderer, replayed after a rebuild. */
-    this.config = { active: false, captureMic: true, captureSystem: true };
+    this.config = { active: false, captureMic: true, captureSystem: true, micDeviceId: '', micDeviceLabel: '' };
+    /**
+     * Whether a meeting with both sources live is written as two channels.
+     *
+     * Read at Start and then fixed for that recording: the WAV header declares
+     * a layout once, and the file has to keep it.
+     */
+    this.separateChannels = true;
     this.recoveries = 0;
     this.recoverTimer = null;
+    /** Set once when the file stops being writable, so it is reported once. */
+    this.writeFailed = false;
   }
 
   /** Grants screen-audio loopback without showing a picker. */
@@ -376,6 +495,14 @@ class CaptureController extends EventEmitter {
       const buf = Buffer.from(arrayBuffer);
       if (this.writer) {
         this.writer.write(buf);
+        // A full disk stops the WAV growing and everything else carries on
+        // looking normal — the tray still says Recording, the captions still
+        // arrive. Say so once, and let main decide to end the meeting.
+        if (this.writer.error && !this.writeFailed) {
+          this.writeFailed = true;
+          log.error('recording could not be written:', this.writer.error);
+          this.emit('writeFailed', { error: this.writer.error, seconds: this.writer.seconds });
+        }
         this.liveTranscriber.push(buf);
       }
     });
@@ -384,7 +511,16 @@ class CaptureController extends EventEmitter {
       if (event.sender.id !== this.window?.webContents.id) return;
       this.levels = levels;
       if (this.monitoring && !this.writer) this.detector.push(levels);
+      if (this.writer) this.silence.push(levels);
       this.emit('levels', levels);
+    });
+
+    ipcMain.on('capture:devices', (event, devices) => {
+      if (event.sender.id !== this.window?.webContents.id) return;
+      this.devices = (Array.isArray(devices) ? devices : [])
+        .filter((d) => d && typeof d.id === 'string' && d.id)
+        .map((d) => ({ id: d.id, label: String(d.label ?? '') }));
+      this.emit('devices', this.devices);
     });
 
     ipcMain.on('capture:status', (event, status) => {
@@ -500,9 +636,32 @@ class CaptureController extends EventEmitter {
     // buffer can never arrive for a graph that has not been configured yet.
     this.window.webContents.send('capture:configure', { ...this.config });
     if (wasRecording && this.isRecording) {
-      this.window.webContents.send('capture:setRecording', true);
+      this.window.webContents.send('capture:setRecording', true, this.writer.channels);
       log.info('capture worker rebuilt; recording continues into the same file');
     }
+  }
+
+  /**
+   * Tears the audio graph down and builds it again.
+   *
+   * The way back from a graph in an undefined state that has not actually
+   * crashed — the machine came back from sleep, or someone pressed Restart
+   * Audio Capture. A recording in progress survives it: the WAV is written here
+   * in the main process and stays open, so the meeting continues into the same
+   * file with a gap where the graph was down, exactly as a renderer crash does.
+   */
+  restart() {
+    if (!this.window || this.window.isDestroyed()) return;
+    const wc = this.window.webContents;
+    wc.send('capture:configure', { ...this.config, active: false });
+    setTimeout(() => {
+      if (this._quitting || this.window?.webContents !== wc) return;
+      wc.send('capture:configure', { ...this.config });
+      // Re-arming is belt and braces: a graph built while a recording is open
+      // asks the worklet for the recording state itself. This covers the graph
+      // that was already up when the message arrived.
+      if (this.isRecording) wc.send('capture:setRecording', true, this.writer.channels);
+    }, RESTART_DELAY_MS);
   }
 
   /** Opens (or closes) the audio graph. Required before recording. */
@@ -520,7 +679,7 @@ class CaptureController extends EventEmitter {
    */
   configureLive(cfg) {
     this.liveTranscriber.configure(cfg);
-    if (this.isRecording && this.liveTranscriber.enabled) this.liveTranscriber.start();
+    if (this.isRecording && this.liveTranscriber.enabled) this.liveTranscriber.start(this.writer.channels);
   }
 
   get isRecording() {
@@ -531,25 +690,45 @@ class CaptureController extends EventEmitter {
     return this.writer ? this.writer.seconds : 0;
   }
 
-  startRecording(filePath) {
+  /**
+   * How many channels the next recording should be written in.
+   *
+   * Two only when there are genuinely two different signals to keep apart. A
+   * stereo file with one dead channel is twice the disk for nothing, and the
+   * pipeline would spend a pass transcribing silence.
+   */
+  get recordingChannels() {
+    return this.separateChannels && this.status.micOk && this.status.systemOk ? 2 : 1;
+  }
+
+  /**
+   * @param {string} filePath
+   * @param {{ separateChannels?: boolean, silenceMinutes?: number }} [options]
+   */
+  startRecording(filePath, { separateChannels = true, silenceMinutes = 0 } = {}) {
     if (this.writer) return;
-    this.writer = new WavWriter(filePath, { sampleRate: SAMPLE_RATE, channels: 1 });
+    this.separateChannels = separateChannels;
+    const channels = this.recordingChannels;
+    this.writeFailed = false;
+    this.writer = new WavWriter(filePath, { sampleRate: SAMPLE_RATE, channels });
     this.detector.reset();
-    this.liveTranscriber.start();
-    this.window?.webContents.send('capture:setRecording', true);
-    log.info('recording ->', filePath);
+    this.silence.configure({ minutes: silenceMinutes }).reset();
+    this.liveTranscriber.start(channels);
+    this.window?.webContents.send('capture:setRecording', true, channels);
+    log.info(`recording -> ${filePath} (${channels === 2 ? 'mic left, system right' : 'mono'})`);
   }
 
   stopRecording() {
     if (!this.writer) return null;
-    this.window?.webContents.send('capture:setRecording', false);
+    this.window?.webContents.send('capture:setRecording', false, this.writer.channels);
     this.liveTranscriber.stop();
+    this.silence.reset();
     // Let the worklet's final flush land before we patch the header.
     const writer = this.writer;
     return new Promise((resolve) => {
       setTimeout(() => {
         this.writer = null;
-        const result = writer.close();
+        const result = { ...writer.close(), channels: writer.channels };
         // Suppress the "audio detected" nudge right after a session ends.
         this.detector.snooze(2 * 60 * 1000);
         log.info(`stopped: ${result.seconds.toFixed(1)}s, ${result.bytes} bytes`);
@@ -587,4 +766,4 @@ function isMediaClient(frame) {
   }
 }
 
-module.exports = { CaptureController, SpeechDetector, LiveTranscriber };
+module.exports = { CaptureController, SpeechDetector, SilenceDetector, LiveTranscriber };

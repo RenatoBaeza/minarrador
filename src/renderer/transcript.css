@@ -110,6 +110,32 @@ select {
   margin: 0 0 12px;
 }
 
+/* Who said it, when the recording kept the two sides apart. Inline rather than
+   in a gutter: captions arrive at their own pace and a column of labels beside
+   a ragged list of lines reads worse than a prefix on each one. */
+.who {
+  display: inline-block;
+  margin-right: 8px;
+  padding: 1px 7px;
+  border-radius: 999px;
+  font-size: 10.5px;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  vertical-align: 1px;
+  background: #2e2e38;
+  color: #9ca3af;
+}
+
+.who.mic {
+  background: rgba(76, 110, 245, 0.18);
+  color: #93a7f7;
+}
+
+.who.system {
+  background: rgba(16, 163, 74, 0.18);
+  color: #6ee7a0;
+}
+
 .hint {
   color: #6b7280;
   font-style: italic;

@@ -7,7 +7,7 @@ const os = require('node:os');
 const path = require('node:path');
 
 const { listMeetings, readMeeting, meetingDir, openTarget } = require('../src/main/library');
-const { FILES } = require('../src/main/paths');
+const { FILES, SPEAKERS, speakerLine } = require('../src/main/paths');
 
 function tmpDir(t) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'minarrador-library-'));
@@ -19,7 +19,11 @@ function tmpDir(t) {
  * Writes a meeting folder. Only the artefacts named actually appear, so a test
  * can build the half-finished folders the library has to explain.
  */
-function meeting(root, id, { notes, meta, transcript, liveTranscript, transcriptJson, audio = true, extra = {} } = {}) {
+function meeting(
+  root,
+  id,
+  { notes, meta, transcript, liveTranscript, transcriptJson, title, audio = true, extra = {} } = {},
+) {
   const dir = path.join(root, id);
   fs.mkdirSync(dir, { recursive: true });
   if (audio) fs.writeFileSync(path.join(dir, FILES.audio), 'RIFF');
@@ -28,9 +32,13 @@ function meeting(root, id, { notes, meta, transcript, liveTranscript, transcript
   if (transcript !== undefined) fs.writeFileSync(path.join(dir, FILES.transcript), transcript);
   if (liveTranscript !== undefined) fs.writeFileSync(path.join(dir, FILES.liveTranscript), liveTranscript);
   if (transcriptJson) fs.writeFileSync(path.join(dir, FILES.transcriptJson), JSON.stringify(transcriptJson));
+  if (title !== undefined) fs.writeFileSync(path.join(dir, FILES.title), title);
   for (const [name, body] of Object.entries(extra)) fs.writeFileSync(path.join(dir, name), body);
   return dir;
 }
+
+/** A transcript line as the reader receives it. */
+const line = (text, { at = null, speaker = '' } = {}) => ({ startSeconds: at, speaker, text });
 
 const NOTES = {
   title: 'Pricing review',
@@ -139,10 +147,7 @@ test('readMeeting timestamps transcript lines from the chunks they came from', (
   });
 
   const detail = readMeeting(root, '2026-08-11_10-00-00');
-  assert.deepEqual(detail.transcript, [
-    { startSeconds: 0, text: 'First minute.' },
-    { startSeconds: 95, text: 'Second minute.' },
-  ]);
+  assert.deepEqual(detail.transcript, [line('First minute.', { at: 0 }), line('Second minute.', { at: 95 })]);
 });
 
 test('readMeeting falls back to paragraphs when there is no segment file', (t) => {
@@ -150,10 +155,7 @@ test('readMeeting falls back to paragraphs when there is no segment file', (t) =
   meeting(root, '2026-08-11_10-00-00', { notes: NOTES, transcript: 'One.\n\n\nTwo.\n' });
 
   const detail = readMeeting(root, '2026-08-11_10-00-00');
-  assert.deepEqual(detail.transcript, [
-    { startSeconds: null, text: 'One.' },
-    { startSeconds: null, text: 'Two.' },
-  ]);
+  assert.deepEqual(detail.transcript, [line('One.'), line('Two.')]);
 });
 
 // The live preview is the only text a meeting whose pipeline never ran has, so
@@ -169,10 +171,7 @@ test('readMeeting falls back to the live transcript, one caption per line', (t) 
 
   const detail = readMeeting(root, '2026-08-11_10-00-00');
   assert.equal(detail.transcriptSource, 'live');
-  assert.deepEqual(detail.transcript, [
-    { startSeconds: null, text: 'So where did we land on pricing?' },
-    { startSeconds: null, text: 'We did not.' },
-  ]);
+  assert.deepEqual(detail.transcript, [line('So where did we land on pricing?'), line('We did not.')]);
 });
 
 test('the pipeline transcript wins over the live one wherever both exist', (t) => {
@@ -185,11 +184,134 @@ test('the pipeline transcript wins over the live one wherever both exist', (t) =
 
   const detail = readMeeting(root, '2026-08-11_10-00-00');
   assert.equal(detail.transcriptSource, 'pipeline');
-  assert.deepEqual(detail.transcript, [{ startSeconds: null, text: 'The careful pass.' }]);
+  assert.deepEqual(detail.transcript, [line('The careful pass.')]);
   assert.equal(
     openTarget(root, '2026-08-11_10-00-00', 'transcript'),
     path.join(root, '2026-08-11_10-00-00', FILES.transcript),
   );
+});
+
+// ------------------------------------------------------------------- speakers
+//
+// A two-channel recording is transcribed one side at a time, so every line
+// already knows who said it. The reader has to receive that as a field rather
+// than as part of the sentence, and search has to not treat the labels as
+// something anybody said.
+
+test('readMeeting carries the speaker for each line of a two-channel meeting', (t) => {
+  const root = tmpDir(t);
+  meeting(root, '2026-08-11_10-00-00', {
+    notes: NOTES,
+    transcript: `${speakerLine('mic', 'So where did we land on pricing?')}\n\n${speakerLine('system', 'We did not.')}`,
+    transcriptJson: {
+      channels: 2,
+      speakers: SPEAKERS,
+      segments: [
+        { index: 0, chunk: 0, speaker: 'mic', startSeconds: 0, endSeconds: 60, text: 'So where did we land on pricing?' },
+        { index: 1, chunk: 0, speaker: 'system', startSeconds: 0, endSeconds: 60, text: 'We did not.' },
+      ],
+    },
+  });
+
+  const detail = readMeeting(root, '2026-08-11_10-00-00');
+  assert.deepEqual(detail.transcript, [
+    line('So where did we land on pricing?', { at: 0, speaker: 'mic' }),
+    line('We did not.', { at: 0, speaker: 'system' }),
+  ]);
+  assert.deepEqual(detail.speakers, SPEAKERS, 'the reader is given the names, not the channel scheme');
+});
+
+test('readMeeting reads the speaker back off a live transcript, which is only text', (t) => {
+  const root = tmpDir(t);
+  meeting(root, '2026-08-11_10-00-00', {
+    liveTranscript: `${speakerLine('mic', 'I will draft it.')}\n${speakerLine('system', 'Thanks.')}\nUnattributed.\n`,
+  });
+
+  assert.deepEqual(readMeeting(root, '2026-08-11_10-00-00').transcript, [
+    line('I will draft it.', { speaker: 'mic' }),
+    line('Thanks.', { speaker: 'system' }),
+    line('Unattributed.'),
+  ]);
+});
+
+test('readMeeting ignores a speaker that is not one of the two channels', (t) => {
+  const root = tmpDir(t);
+  meeting(root, '2026-08-11_10-00-00', {
+    transcript: 'said things',
+    transcriptJson: { segments: [{ index: 0, speaker: 'somebody-else', startSeconds: 0, text: 'said things' }] },
+  });
+  assert.deepEqual(readMeeting(root, '2026-08-11_10-00-00').transcript, [line('said things', { at: 0 })]);
+});
+
+test('a search does not count the speaker labels as words anybody said', (t) => {
+  const root = tmpDir(t);
+  // Notes, so the preview quotes the summary rather than the transcript — this
+  // is about what the transcript contributes, and nothing else.
+  meeting(root, '2026-08-11_10-00-00', {
+    notes: NOTES,
+    transcript: [
+      speakerLine('mic', 'Did you see the pricing page?'),
+      speakerLine('system', 'Not yet.'),
+      speakerLine('mic', 'Have a look.'),
+    ].join('\n\n'),
+  });
+
+  // "You:" prefixes two of the three lines. Only the one somebody actually said
+  // counts; otherwise every labelled line in every meeting is a hit for "you".
+  const hits = listMeetings(root, { query: 'you' });
+  assert.equal(hits.length, 1);
+  assert.equal(hits[0].matches, 1);
+  assert.match(hits[0].preview, /Did you see/, 'the quote is the sentence, not the label on it');
+});
+
+test('a card previews what was said, not how the file marks up who said it', (t) => {
+  const root = tmpDir(t);
+  meeting(root, '2026-08-11_10-00-00', {
+    transcript: `${speakerLine('mic', 'Did you see the pricing page?')}\n\n${speakerLine('system', 'Not yet.')}`,
+  });
+
+  assert.equal(listMeetings(root)[0].preview, 'Did you see the pricing page? Not yet.');
+});
+
+// ------------------------------------------------------------------- renaming
+//
+// Every meeting is otherwise called whatever the summariser made of it, for
+// ever. The override is its own file precisely so a re-run cannot revert it.
+
+test('a typed title wins over the one the model wrote', (t) => {
+  const root = tmpDir(t);
+  meeting(root, '2026-08-11_10-00-00', { notes: NOTES, title: 'Q3 pricing, final\n' });
+
+  const [card] = listMeetings(root);
+  assert.equal(card.title, 'Q3 pricing, final');
+  assert.equal(card.generatedTitle, 'Pricing review', 'the model’s title is kept so a rename can be undone');
+  assert.equal(card.renamed, true);
+  assert.equal(readMeeting(root, '2026-08-11_10-00-00').title, 'Q3 pricing, final');
+});
+
+test('a meeting with no notes can still carry a title', (t) => {
+  const root = tmpDir(t);
+  meeting(root, '2026-08-11_10-00-00', { title: 'Call with the bank' });
+
+  const [card] = listMeetings(root);
+  assert.equal(card.title, 'Call with the bank');
+  assert.equal(card.generatedTitle, '');
+  assert.equal(card.status, 'pending', 'a title says nothing about whether the notes ran');
+});
+
+test('an emptied title file falls back to the model’s, not to a blank', (t) => {
+  const root = tmpDir(t);
+  meeting(root, '2026-08-11_10-00-00', { notes: NOTES, title: '  \n' });
+
+  const [card] = listMeetings(root);
+  assert.equal(card.title, 'Pricing review');
+  assert.equal(card.renamed, false);
+});
+
+test('a typed title is searchable like any other', (t) => {
+  const root = tmpDir(t);
+  meeting(root, '2026-08-11_10-00-00', { notes: NOTES, title: 'Board offsite' });
+  assert.deepEqual(listMeetings(root, { query: 'offsite' }).map((m) => m.id), ['2026-08-11_10-00-00']);
 });
 
 test('a live transcript is searched and previewed like any other', (t) => {

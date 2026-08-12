@@ -48,10 +48,11 @@ module.exports = [
 
   {
     // The two engine clients are the only places allowed to talk to the
-    // network, and both only ever reach a daemon on this machine. The setup
-    // script is the sole exception that leaves it: it runs from a terminal, not
-    // from the app, and only to fetch whisper.cpp itself.
-    files: ['src/main/ollama.js', 'src/main/whisper.js', 'scripts/setup-whisper.js'],
+    // network, and both only ever reach a daemon on this machine.
+    // whisper-setup.js is the sole exception that leaves it, and it fetches
+    // whisper.cpp and nothing else — no meeting data is involved anywhere in
+    // it. scripts/setup-whisper.js is the terminal front end onto that.
+    files: ['src/main/ollama.js', 'src/main/whisper.js', 'src/main/whisper-setup.js', 'scripts/setup-whisper.js'],
     rules: { 'no-restricted-globals': 'off' },
   },
 
