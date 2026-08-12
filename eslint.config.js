@@ -57,7 +57,7 @@ module.exports = [
 
   {
     // Preloads: browser context, but with require() and the contextBridge.
-    files: ['src/renderer/preload.js', 'src/renderer/transcript-preload.js'],
+    files: ['src/renderer/preload.js', 'src/renderer/transcript-preload.js', 'src/renderer/snippets-preload.js'],
     languageOptions: {
       ecmaVersion: 2024,
       sourceType: 'commonjs',
@@ -69,11 +69,11 @@ module.exports = [
   {
     // Renderer pages: browser only, no Node. contextIsolation means the bridge
     // objects arrive on window, so they are declared read-only globals.
-    files: ['src/renderer/capture.js', 'src/renderer/transcript.js'],
+    files: ['src/renderer/capture.js', 'src/renderer/transcript.js', 'src/renderer/snippets.js'],
     languageOptions: {
       ecmaVersion: 2024,
       sourceType: 'script',
-      globals: { ...globals.browser, capture: 'readonly', transcript: 'readonly' },
+      globals: { ...globals.browser, capture: 'readonly', transcript: 'readonly', quickCopy: 'readonly' },
     },
     rules: {
       ...shared,

@@ -10,6 +10,8 @@ const path = require('node:path');
 const {
   WhisperServer,
   WhisperError,
+  defaultThreads,
+  threadChoices,
   resolveInstall,
   listModels,
   cleanWhisperText,
@@ -138,8 +140,42 @@ test('WhisperServer.describe surfaces what the tray needs', () => {
   assert.equal(view.model, 'ggml-small.bin');
   assert.deepEqual(view.models, ['ggml-base.bin', 'ggml-small.bin']);
   assert.equal(view.threads, 4);
+  assert.equal(view.effectiveThreads, 4);
+  assert.deepEqual(view.threadChoices, threadChoices(), 'the menu needs the list to build its radio items');
   assert.equal(view.available, true);
   assert.equal(view.running, false);
+});
+
+// -------------------------------------------------------------- decode threads
+
+test('defaultThreads asks for more than whisper-server would, without taking the machine', () => {
+  const threads = defaultThreads();
+  const cores = os.cpus().length;
+
+  assert.ok(Number.isInteger(threads), `expected a whole number of threads, got ${threads}`);
+  // Four is whisper-server's own default and too slow for the large models; the
+  // ceiling is what keeps the call being recorded responsive.
+  assert.ok(threads >= 2 && threads <= 8, `${threads} is outside the useful range on ${cores} cores`);
+  assert.ok(threads <= Math.max(2, cores), 'never ask for more threads than the machine has');
+});
+
+test('threadChoices offers automatic first and nothing the machine cannot field', () => {
+  const choices = threadChoices();
+  const cores = os.cpus().length;
+
+  assert.equal(choices[0], 0, '0 is the automatic option the menu labels');
+  assert.deepEqual(choices, [...choices].sort((a, b) => a - b), 'the menu shows them in order');
+  assert.deepEqual(choices, [...new Set(choices)], 'a duplicated count would be two radio items for one value');
+  for (const n of choices.slice(1)) assert.ok(n <= cores, `${n} threads on ${cores} cores`);
+});
+
+test('effectiveThreads resolves the automatic setting to a real count', () => {
+  const root = fakeInstall({ models: ['ggml-base.bin'] });
+
+  // 0 is what settings.js stores for "let the app decide"; the server can only
+  // be told a number, and that number decides whether a large model keeps up.
+  assert.equal(new WhisperServer({ root, threads: 0 }).effectiveThreads, defaultThreads());
+  assert.equal(new WhisperServer({ root, threads: 12 }).effectiveThreads, 12, 'an explicit count wins');
 });
 
 // ------------------------------------------------------------- the /inference

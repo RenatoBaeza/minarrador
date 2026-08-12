@@ -21,6 +21,13 @@ for (const lang of window.transcript.languages) {
 
 langSelect.addEventListener('change', (e) => window.transcript.setLanguage(e.target.value));
 
+// The window is frameless, so closing it is this button's job — or Escape, the
+// habit for a panel that sits on top of whatever meeting is being recorded.
+document.getElementById('close').addEventListener('click', () => window.transcript.close());
+document.addEventListener('keydown', (e) => {
+  if (e.key === 'Escape') window.transcript.close();
+});
+
 /** True while the view is pinned to the newest line. */
 function atBottom() {
   return content.scrollHeight - content.scrollTop - content.clientHeight < 40;

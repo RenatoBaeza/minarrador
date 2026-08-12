@@ -1,0 +1,219 @@
+/* Quick-copy editor window. Same palette and frameless-header treatment as the
+   live transcript, kept in its own file so the page can run under a strict CSP
+   with no inline styles. */
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  /* The list is long enough to always carry a scrollbar; this is what keeps it
+     from being drawn in Chromium's default light grey against the dark page. */
+  color-scheme: dark;
+  font-family: 'Segoe UI', system-ui, sans-serif;
+  background: #16161a;
+  color: #eaeaea;
+  display: flex;
+  flex-direction: column;
+  height: 100vh;
+  overflow: hidden;
+  font-size: 14px;
+}
+
+/* The window is frameless, so this header is also its title bar: the only
+   region that drags the window. Anything clickable inside must opt back out. */
+header {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 12px 8px 12px 16px;
+  background: #1e1e24;
+  border-bottom: 1px solid #2c2c34;
+  user-select: none;
+  -webkit-app-region: drag;
+}
+
+.title {
+  font-weight: 600;
+  margin-right: auto;
+}
+
+.close {
+  -webkit-app-region: no-drag;
+  flex: none;
+  width: 28px;
+  height: 28px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: #9ca3af;
+  font: inherit;
+  font-size: 12px;
+  line-height: 1;
+  cursor: default;
+}
+
+.close:hover {
+  background: #e11d48;
+  color: #fff;
+}
+
+.status {
+  font-size: 12px;
+  color: #6b7280;
+}
+
+.status.dirty {
+  color: #fbbf24;
+}
+
+.controls {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 10px 16px;
+  border-bottom: 1px solid #2c2c34;
+}
+
+.controls-hint {
+  font-size: 12px;
+  color: #6b7280;
+}
+
+.button {
+  flex: none;
+  border: 1px solid #34343e;
+  border-radius: 6px;
+  background: #24242c;
+  color: #eaeaea;
+  font: inherit;
+  font-size: 13px;
+  padding: 6px 12px;
+  cursor: default;
+}
+
+.button:hover {
+  background: #2e2e38;
+}
+
+.button.primary {
+  background: #3b5bdb;
+  border-color: #3b5bdb;
+  color: #fff;
+}
+
+.button.primary:hover {
+  background: #4c6ef5;
+}
+
+.list {
+  flex: 1;
+  overflow-y: auto;
+  padding: 12px 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.card {
+  border: 1px solid #2c2c34;
+  border-radius: 8px;
+  background: #1b1b21;
+  padding: 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.card-top {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+input.name,
+textarea.text {
+  width: 100%;
+  background: #24242c;
+  color: #eaeaea;
+  border: 1px solid #34343e;
+  border-radius: 6px;
+  padding: 6px 8px;
+  font: inherit;
+}
+
+input.name {
+  font-weight: 600;
+}
+
+textarea.text {
+  resize: vertical;
+  min-height: 68px;
+  line-height: 1.5;
+  font-size: 13px;
+  white-space: pre-wrap;
+}
+
+input.name:focus,
+textarea.text:focus {
+  outline: none;
+  border-color: #4c6ef5;
+}
+
+.remove {
+  flex: none;
+  width: 28px;
+  height: 28px;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: #6b7280;
+  font: inherit;
+  font-size: 12px;
+  line-height: 1;
+  cursor: default;
+}
+
+.remove:hover {
+  background: #e11d48;
+  color: #fff;
+}
+
+/* Flagged after a save that dropped this card: an empty shorthand has nothing
+   to put on the clipboard, so the tray skips it. Say so rather than deleting
+   the card out from under someone who is still writing it. */
+.card.incomplete {
+  border-color: #b45309;
+}
+
+.card.incomplete::after {
+  content: 'Needs some text before it can appear in the tray.';
+  font-size: 11px;
+  color: #d97706;
+}
+
+.empty {
+  margin: 0;
+  padding: 4px 6px;
+  color: #6b7280;
+  font-style: italic;
+  line-height: 1.6;
+}
+
+footer {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 10px 16px;
+  border-top: 1px solid #2c2c34;
+}
+
+.foot-hint {
+  margin-right: auto;
+  color: #6b7280;
+  font-size: 11px;
+}

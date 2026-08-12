@@ -17,18 +17,45 @@ body {
   font-size: 14px;
 }
 
+/* The window is frameless, so this header is also its title bar: the only
+   region that drags the window. Anything clickable inside must opt back out. */
 header {
   display: flex;
   align-items: center;
-  justify-content: space-between;
   gap: 12px;
-  padding: 12px 16px;
+  padding: 12px 8px 12px 16px;
   background: #1e1e24;
   border-bottom: 1px solid #2c2c34;
+  user-select: none;
+  -webkit-app-region: drag;
 }
 
 .title {
   font-weight: 600;
+  margin-right: auto;
+}
+
+.close {
+  -webkit-app-region: no-drag;
+  flex: none;
+  width: 28px;
+  height: 28px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: #9ca3af;
+  font: inherit;
+  font-size: 12px;
+  line-height: 1;
+  cursor: default;
+}
+
+.close:hover {
+  background: #e11d48;
+  color: #fff;
 }
 
 .status {

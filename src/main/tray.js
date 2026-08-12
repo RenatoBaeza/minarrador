@@ -22,6 +22,25 @@ function clock(seconds) {
   return h ? `${h}:${pad(m % 60)}:${pad(s % 60)}` : `${m}:${pad(s % 60)}`;
 }
 
+/** How much of a shorthand fits on one menu row before it starts crowding the menu. */
+const SNIPPET_LABEL_CHARS = 44;
+
+/**
+ * The one-line name a shorthand wears in the menu.
+ *
+ * Falls back to the text itself, flattened, for anyone who could not be
+ * bothered to name it — which is most of them.
+ *
+ * @param {{ label: string, text: string }} snippet
+ */
+function snippetLabel(snippet) {
+  const raw = (snippet.label || snippet.text).replace(/\s+/g, ' ').trim();
+  const short = raw.length > SNIPPET_LABEL_CHARS ? `${raw.slice(0, SNIPPET_LABEL_CHARS - 1)}…` : raw;
+  // Windows reads '&' in a menu label as a mnemonic and eats it, so "R&D" would
+  // show up as "RD" with a underlined D.
+  return short.replace(/&/g, '&&');
+}
+
 /**
  * Owns the tray icon and its menu. All behaviour is injected so this file stays
  * a pure view over app state.
@@ -45,15 +64,30 @@ class AppTray {
    * @param {object} view.settings
    * @param {object} view.status capture source status
    * @param {boolean} view.ollamaUp
+   * @param {boolean} view.ollamaChecking a look-for-Ollama pass is in flight
    * @param {string[]} view.models installed Ollama models
    * @param {string[]} view.audioModels models that accept audio
    * @param {object|null} view.whisper WhisperServer.describe(), or null
    * @param {'whisper'|'ollama'} view.liveEngine the engine actually in use
    * @param {string|null} view.lastDir most recent finished meeting folder
+   * @param {{ label: string, text: string }[]} view.snippets quick-copy shorthands
    */
   update(view) {
-    const { state, elapsed, progress, settings, status, ollamaUp, models, audioModels, whisper, liveEngine, lastDir } =
-      view;
+    const {
+      state,
+      elapsed,
+      progress,
+      settings,
+      status,
+      ollamaUp,
+      ollamaChecking,
+      models,
+      audioModels,
+      whisper,
+      liveEngine,
+      lastDir,
+      snippets = [],
+    } = view;
     const a = this.actions;
 
     const iconState = state === 'recording' ? 'recording' : state === 'processing' ? 'processing' : 'idle';
@@ -105,7 +139,20 @@ class AppTray {
         : []),
     ];
 
+    // Quick copy sits above everything, including the recording controls: it is
+    // the one thing here reached mid-sentence in a meeting, and a menu item that
+    // never moves is one that can be clicked without reading.
     const template = [
+      { label: 'Quick copy', enabled: false },
+      ...(snippets.length
+        ? snippets.map((snippet) => ({
+            label: snippetLabel(snippet),
+            click: () => clipboard.writeText(snippet.text),
+          }))
+        : [{ label: 'No shorthands yet', enabled: false }]),
+      { label: 'Edit quick copy…', click: () => a.editSnippets() },
+      { type: 'separator' },
+
       { label: headline, enabled: false },
       { label: sources, enabled: false },
       ...(state === 'recording' && settings.liveTranscript
@@ -118,10 +165,21 @@ class AppTray {
             },
           ]
         : []),
-      ...(state === 'processing' && progress ? [{ label: progress, enabled: false }] : []),
+      // No separate progress line: the headline above is already the progress
+      // string while processing.
       // Ollama still writes the notes even when whisper.cpp handles the preview,
-      // so this stays a warning either way.
-      ...(!ollamaUp ? [{ label: '⚠ Ollama not reachable', enabled: false }] : []),
+      // so this stays a warning either way. The usual fix is to start the daemon
+      // and look again, which otherwise means waiting out the 60s poll.
+      ...(!ollamaUp
+        ? [
+            { label: '⚠ Ollama not reachable', enabled: false },
+            {
+              label: ollamaChecking ? 'Looking for Ollama…' : 'Try to find Ollama again',
+              enabled: !ollamaChecking,
+              click: () => a.retryOllama(),
+            },
+          ]
+        : []),
       ...(liveEngine === 'whisper' && whisper?.lastError
         ? [{ label: `⚠ whisper.cpp: ${whisper.lastError.slice(0, 60)}`, enabled: false }]
         : []),
@@ -189,6 +247,19 @@ class AppTray {
               'No GGML models — run npm run whisper:setup',
             ),
           },
+          {
+            // Worth reaching for: the large models need more than the automatic
+            // share of the CPU to transcribe faster than the room talks, and
+            // whichever way it is set the effect lands on the next segment.
+            label: 'Whisper decode threads',
+            enabled: whisperInstalled,
+            submenu: (whisper?.threadChoices ?? [0]).map((n) => ({
+              label: n === 0 ? `Automatic (${whisper?.effectiveThreads ?? 4})` : `${n} threads`,
+              type: 'radio',
+              checked: n === (whisper?.threads ?? 0),
+              click: () => a.setSetting({ whisperThreads: n }),
+            })),
+          },
           { type: 'separator' },
           {
             label: 'Transcription model',
@@ -225,4 +296,4 @@ class AppTray {
   }
 }
 
-module.exports = { AppTray, clock };
+module.exports = { AppTray, clock, snippetLabel };

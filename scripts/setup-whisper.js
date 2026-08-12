@@ -10,8 +10,13 @@
 //
 //   npm run whisper:setup                    # base model, plain CPU build
 //   npm run whisper:setup -- --model small   # a slower, more accurate model
+//   npm run whisper:setup -- --model large-v3-turbo-q5_0   # the accurate pick
 //   npm run whisper:setup -- --variant cublas-12.4
 //   npm run whisper:setup -- --force         # re-download over an existing tree
+//
+// Models accumulate: a second run with a different --model leaves the first one
+// in place and adds to what the tray offers under Settings -> Whisper model,
+// so switching back is a click rather than another download.
 //
 // Layout it produces:
 //   vendor/whisper/bin/whisper-server.exe (+ the ggml/whisper DLLs beside it)
@@ -44,6 +49,13 @@ const VARIANTS = {
  * Models, with the rough cost of each. Live captions are superseded by the
  * post-recording pass, so the trade is latency against how readable the preview
  * is while the meeting is happening.
+ *
+ * A `qN_M` suffix is a quantised copy of the model above it: same weights at
+ * lower precision, so it loads and decodes faster on a fraction of the memory
+ * for a small accuracy cost. That is what makes `large-v3-turbo-q5_0` the
+ * accurate pick here rather than `large-v3` — turbo's decoder is distilled down
+ * to 4 layers from 32, and the quantisation brings it under 600 MB, so it stays
+ * usable on CPU where the full model does not.
  */
 const MODELS = {
   tiny: '75 MB · fastest, visibly more errors',
@@ -53,7 +65,9 @@ const MODELS = {
   small: '466 MB · noticeably more accurate, ~3x realtime',
   'small.en': '466 MB · English only',
   medium: '1.5 GB · accurate, needs a strong CPU or GPU build',
-  'large-v3-turbo': '1.6 GB · best quality, GPU build recommended',
+  'large-v3-turbo': '1.6 GB · large-v3 accuracy, GPU build recommended',
+  'large-v3-turbo-q5_0': '547 MB · the accurate pick — near large-v3, runs on CPU',
+  'large-v3': '2.9 GB · most accurate; GPU build, not realtime on CPU',
 };
 
 const MODEL_BASE_URL = 'https://huggingface.co/ggerganov/whisper.cpp/resolve/main';
@@ -75,10 +89,14 @@ function parseArgs(argv) {
 }
 
 function usage() {
-  const rows = (obj) =>
-    Object.entries(obj)
-      .map(([name, note]) => `    ${name.padEnd(16)}${note}`)
+  // Width follows the longest name so a new entry cannot silently break the
+  // column, which is the whole reason this listing is readable.
+  const rows = (obj) => {
+    const width = Math.max(...Object.keys(obj).map((name) => name.length)) + 2;
+    return Object.entries(obj)
+      .map(([name, note]) => `    ${name.padEnd(width)}${note}`)
       .join('\n');
+  };
   console.log(`Usage: npm run whisper:setup -- [--model NAME] [--variant NAME] [--force]
 
   Models (default: base):

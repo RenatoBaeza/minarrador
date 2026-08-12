@@ -28,12 +28,15 @@ Local-only meeting notes app for Windows. Records mic + system audio, transcribe
 │   │   ├── pdf.js         # HTML → PDF via hidden BrowserWindow
 │   │   ├── paths.js       # Meeting folder naming, canonical file names
 │   │   ├── settings.js    # JSON settings store (%APPDATA%/Minarrador)
+│   │   ├── snippets.js    # Quick-copy shorthand store (%APPDATA%/Minarrador)
 │   │   └── logger.js      # File logger
 │   └── renderer/      # Hidden renderer for Web Audio capture
 │       ├── capture.html   # Minimal page loaded by the hidden window
 │       ├── capture.js     # Web Audio graph (mic + system loopback)
 │       ├── pcm-worklet.js # AudioWorklet that ships PCM to main
-│       └── preload.js     # contextBridge exposing IPC to renderer
+│       ├── preload.js     # contextBridge exposing IPC to renderer
+│       ├── transcript.*   # Live transcript window (page, styles, view, preload)
+│       └── snippets.*     # Quick-copy editor window (page, styles, view, preload)
 ├── vendor/whisper/    # whisper.cpp binaries + GGML models (gitignored, see setup)
 ├── dist/              # Build output (gitignored)
 └── package.json
@@ -68,9 +71,42 @@ meeting, always superseded by the full pass over the saved WAV.
 3. whisper.cpp runs ~7-8x realtime on CPU with `ggml-base`, so a caption lands
    about a second after the speaker stops.
 
-`LIVE_SEGMENT` in `capture.js` holds the per-engine timing. If whisper.cpp is not
-installed, `LiveTranscriber.engine` silently falls back to the Ollama audio model,
-which uses longer segments because a request costs ~1s regardless of clip length.
+`LIVE_SEGMENT` in `capture.js` holds the per-engine timing, tuned for `ggml-base`.
+A heavier model decodes slower, so captions trail further behind and
+`LIVE_MAX_SECONDS` drops the oldest buffered audio during a long unbroken stretch
+— by design, since the saved transcript comes from a separate pass. If whisper.cpp
+is not installed, `LiveTranscriber.engine` silently falls back to the Ollama audio
+model, which uses longer segments because a request costs ~1s regardless of clip
+length.
+
+**Decode threads decide whether a large model is usable at all.** whisper-server's
+own default is 4 threads, which is ample for `ggml-base` but leaves
+`ggml-large-v3-turbo-q5_0` (the accurate option `whisper:setup` offers) at ~0.7x
+realtime — below 1x the transcriber can never catch up and spends the meeting
+discarding audio. `defaultThreads()` in `whisper.js` therefore resolves the
+"automatic" setting to half the logical cores capped at 8 (~1.2x realtime on a
+24-thread i9) instead of deferring to the server, and `whisperThreads` overrides it
+from **Settings → Whisper decode threads**.
+
+### Quick copy (`snippets.js` + the editor window)
+
+The top section of the tray menu is a list of user-authored shorthands; clicking
+one puts its text on the clipboard, so a phrase typed several times a day costs
+two clicks. It sits above the recording controls deliberately — it is the one
+item here reached mid-meeting, and a row that never moves can be clicked without
+reading.
+
+Stored in `snippets.json` rather than `settings.json`: the settings store coerces
+every value against a scalar default and drops the rest, which is what keeps a
+hand-edited file from crashing startup, and a list of records does not fit that
+shape. `normalize()` is the single gate — it runs on both the file and the IPC
+payload, keeps only `{ label, text }`, and drops any entry with an empty body
+since that could only ever be a dead menu row.
+
+The editor (`src/renderer/snippets.*`) is the only renderer in the app that
+writes anything, so all three IPC channels check `event.sender.id` against the
+editor window. Saving refreshes the tray immediately, and closing saves first —
+the window is never a way to discard work.
 
 ### Post-recording pipeline (`pipeline.js`)
 
@@ -139,6 +175,9 @@ Each stage in `pipeline.js` is a standalone async function (`transcribe`, `summa
 | `capture:pcm` | renderer → main | `ArrayBuffer` (16 kHz mono PCM) |
 | `capture:level` | renderer → main | `{ mixed, mic, system }` RMS floats |
 | `capture:status` | renderer → main | `{ micOk, systemOk, micError, systemError }` |
+| `snippets:list` | editor → main (invoke) | → `{ label, text }[]` |
+| `snippets:save` | editor → main (invoke) | `{ label, text }[]` → the list as stored |
+| `snippets:close` | editor → main | — |
 
 ## Important notes
 

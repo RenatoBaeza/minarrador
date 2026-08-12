@@ -10,6 +10,7 @@ const path = require('node:path');
 
 const log = require('./logger');
 const settingsStore = require('./settings');
+const snippetsStore = require('./snippets');
 const { CaptureController } = require('./capture');
 const { AppTray } = require('./tray');
 const { Ollama } = require('./ollama');
@@ -18,6 +19,18 @@ const { runPipeline, fmtDuration } = require('./pipeline');
 const { createMeetingDir, FILES } = require('./paths');
 
 const APP_ID = 'com.rntbz.minarrador';
+
+/**
+ * The identity Windows files this process under.
+ *
+ * Windows keys an app's taskbar name and icon off the AppUserModelID, resolving
+ * it to whichever Start Menu shortcut claims that ID — not off the window icon
+ * or the .exe. Showing a toast makes Electron register such a shortcut, so a
+ * `npm start` run under the shipped ID plants an "Electron" shortcut pointing at
+ * node_modules that outranks the installed one, and the packaged app then wears
+ * the Electron logo. Dev keeps its own ID so it can only ever shadow itself.
+ */
+const USER_MODEL_ID = app.isPackaged ? APP_ID : `${APP_ID}.dev`;
 
 /** Launched by the login item, or otherwise asked to stay out of the way. */
 const startedHidden = process.argv.includes('--hidden');
@@ -30,6 +43,8 @@ const state = {
   recordingStartedAt: null,
   lastDir: null,
   ollamaUp: false,
+  /** True while a look-for-Ollama pass is in flight, so the menu can say so. */
+  ollamaChecking: false,
   models: [],
   audioModels: [],
   jobs: 0,
@@ -43,10 +58,30 @@ let whisper = null;
 let settings = null;
 let uiTimer = null;
 let transcriptionWindow = null;
+let snippetsWindow = null;
 
 // ------------------------------------------------------------------------ UI
 
 const RENDERER = path.join(__dirname, '..', 'renderer');
+const ASSETS = path.join(__dirname, '..', '..', 'assets');
+
+let appIconCache = null;
+
+/**
+ * The app icon, shared by every surface that shows one.
+ *
+ * On Windows the .ico is the same multi-size icon the installer puts on the
+ * shortcut, so the taskbar, Alt-Tab and the window thumbnail all pick the size
+ * they want instead of rescaling one PNG into something soft.
+ */
+function appIcon() {
+  if (appIconCache) return appIconCache;
+  const preferred = process.platform === 'win32' ? 'icon.ico' : 'icon.png';
+  let img = nativeImage.createFromPath(path.join(ASSETS, preferred));
+  if (img.isEmpty()) img = nativeImage.createFromPath(path.join(ASSETS, 'icon.png'));
+  appIconCache = img;
+  return img;
+}
 
 /**
  * The live transcript window: a read-only preview of what the model is hearing.
@@ -54,6 +89,9 @@ const RENDERER = path.join(__dirname, '..', 'renderer');
  * It loads transcript.html, never capture.html — the latter is the hidden audio
  * worker, and opening a second copy of it would build a second Web Audio graph
  * competing for the same microphone and loopback stream.
+ *
+ * Frameless: the header doubles as the drag handle and carries its own close
+ * button, so the page is the whole window with no OS chrome around it.
  */
 function showTranscriptWindow() {
   if (transcriptionWindow && !transcriptionWindow.isDestroyed()) {
@@ -66,10 +104,13 @@ function showTranscriptWindow() {
   transcriptionWindow = new BrowserWindow({
     width: 480,
     height: 640,
+    minWidth: 320,
+    minHeight: 240,
     show: false,
+    frame: false,
     title: 'Live Transcription',
     backgroundColor: '#16161a',
-    icon: nativeImage.createFromPath(path.join(__dirname, '..', '..', 'assets', 'icon.png')),
+    icon: appIcon(),
     webPreferences: {
       preload: path.join(RENDERER, 'transcript-preload.js'),
       contextIsolation: true,
@@ -78,7 +119,6 @@ function showTranscriptWindow() {
     },
   });
 
-  transcriptionWindow.setMenuBarVisibility(false);
   transcriptionWindow.once('ready-to-show', () => transcriptionWindow?.show());
   transcriptionWindow.on('closed', () => {
     transcriptionWindow = null;
@@ -96,6 +136,49 @@ function toggleTranscriptWindow() {
   }
   showTranscriptWindow();
   sendToTranscript('transcript:state', transcriptState());
+}
+
+/**
+ * The quick-copy editor: the list behind the tray's top section.
+ *
+ * Frameless and dark like the transcript window, and single-instance for the
+ * same reason every window here is — two copies of an editor over one file
+ * means whichever is saved last wins, silently.
+ */
+function showSnippetsWindow() {
+  if (snippetsWindow && !snippetsWindow.isDestroyed()) {
+    if (snippetsWindow.isMinimized()) snippetsWindow.restore();
+    snippetsWindow.show();
+    snippetsWindow.focus();
+    return snippetsWindow;
+  }
+
+  snippetsWindow = new BrowserWindow({
+    width: 520,
+    height: 620,
+    minWidth: 380,
+    minHeight: 320,
+    show: false,
+    frame: false,
+    title: 'Quick Copy',
+    backgroundColor: '#16161a',
+    icon: appIcon(),
+    webPreferences: {
+      preload: path.join(RENDERER, 'snippets-preload.js'),
+      contextIsolation: true,
+      nodeIntegration: false,
+      sandbox: true,
+    },
+  });
+
+  snippetsWindow.once('ready-to-show', () => snippetsWindow?.show());
+  snippetsWindow.on('closed', () => {
+    snippetsWindow = null;
+  });
+  snippetsWindow.loadFile(path.join(RENDERER, 'snippets.html')).catch((err) => {
+    log.error('quick copy window failed to load', err);
+  });
+  return snippetsWindow;
 }
 
 /** Posts to the transcript window when one is open; a no-op otherwise. */
@@ -126,11 +209,13 @@ function refreshTray() {
     settings,
     status: capture?.status ?? {},
     ollamaUp: state.ollamaUp,
+    ollamaChecking: state.ollamaChecking,
     models: state.models,
     audioModels: state.audioModels,
     whisper: whisper?.describe() ?? null,
     liveEngine: capture?.liveTranscriber.engine ?? settings?.liveEngine,
     lastDir: state.lastDir,
+    snippets: snippetsStore.load(),
   });
 }
 
@@ -142,7 +227,7 @@ function notify(title, body, onClick) {
   const n = new Notification({
     title,
     body,
-    icon: nativeImage.createFromPath(path.join(__dirname, '..', '..', 'assets', 'icon.png')),
+    icon: appIcon(),
     silent: false,
   });
   if (onClick) n.on('click', onClick);
@@ -328,6 +413,32 @@ async function refreshOllama() {
   refreshTray();
 }
 
+/**
+ * The manual version of the poll, behind "Try to find Ollama again".
+ *
+ * Someone who has just run `ollama serve` should not have to wait out the rest
+ * of the 60s interval to see the app notice. Clicking the item closes the menu,
+ * so the answer comes back as a notification rather than a menu label.
+ */
+async function retryOllama() {
+  if (state.ollamaChecking) return;
+  state.ollamaChecking = true;
+  refreshTray();
+  try {
+    await refreshOllama();
+  } catch (err) {
+    log.error('manual Ollama check failed', err);
+  } finally {
+    state.ollamaChecking = false;
+    refreshTray();
+  }
+  if (state.ollamaUp) {
+    notify('Ollama found', `${state.models.length} model(s) available at ${settings.ollamaHost}.`);
+  } else {
+    notify('Still no Ollama', `Nothing answered at ${settings.ollamaHost}. Start it with "ollama serve", then try again.`);
+  }
+}
+
 function applyLoginItem() {
   app.setLoginItemSettings({
     openAtLogin: settings.startAtLogin,
@@ -390,7 +501,7 @@ if (!app.requestSingleInstanceLock()) {
     notify('Minarrador is already running', 'Look for the waveform icon in your system tray.');
   });
 
-  app.setAppUserModelId(APP_ID);
+  app.setAppUserModelId(USER_MODEL_ID);
   // Tray-only app. Merely having a listener here stops Electron's default
   // "quit when the last window closes" behaviour.
   app.on('window-all-closed', () => {});
@@ -422,6 +533,35 @@ if (!app.requestSingleInstanceLock()) {
     if (event.sender.id !== transcriptionWindow?.webContents.id) return;
     capture?.configureLive({ language: typeof lang === 'string' ? lang : '' });
     log.info('live transcript language ->', lang || 'auto');
+  });
+
+  // Frameless windows have no system close button, so the page asks for one.
+  ipcMain.on('transcript:close', (event) => {
+    if (event.sender.id !== transcriptionWindow?.webContents.id) return;
+    transcriptionWindow.close();
+  });
+
+  // Quick copy is the only store a renderer can write to, so every channel below
+  // checks the sender: the editor window, or nothing. The store normalises the
+  // payload regardless — it also has to survive a hand-edited snippets.json.
+  ipcMain.handle('snippets:list', (event) => {
+    if (event.sender.id !== snippetsWindow?.webContents.id) return [];
+    return snippetsStore.load();
+  });
+
+  ipcMain.handle('snippets:save', (event, list) => {
+    if (event.sender.id !== snippetsWindow?.webContents.id) return [];
+    const saved = snippetsStore.save(list);
+    // The menu is rebuilt from the store, so a save is what makes a new
+    // shorthand clickable — no restart, no reopening the menu twice.
+    refreshTray();
+    log.info(`quick copy: ${saved.length} shorthand(s) saved`);
+    return saved;
+  });
+
+  ipcMain.on('snippets:close', (event) => {
+    if (event.sender.id !== snippetsWindow?.webContents.id) return;
+    snippetsWindow.close();
   });
 
   app.whenReady().then(async () => {
@@ -465,7 +605,9 @@ if (!app.requestSingleInstanceLock()) {
         shell.openPath(fs.existsSync(pdf) ? pdf : state.lastDir);
       },
       openLog: () => shell.openPath(log.path),
+      retryOllama,
       toggleTranscript: toggleTranscriptWindow,
+      editSnippets: showSnippetsWindow,
       diagnostics,
       restartCapture: () => {
         capture.setActive(false);

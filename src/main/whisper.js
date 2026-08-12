@@ -18,6 +18,7 @@ const { spawn } = require('node:child_process');
 const { EventEmitter } = require('node:events');
 const fs = require('node:fs');
 const net = require('node:net');
+const os = require('node:os');
 const path = require('node:path');
 
 const log = require('./logger');
@@ -34,6 +35,36 @@ const FIRST_PORT = 8178;
 const PORT_ATTEMPTS = 20;
 
 class WhisperError extends Error {}
+
+/**
+ * How many threads to decode with when the setting says "let whisper decide".
+ *
+ * whisper-server's own default is four, which is plenty for ggml-base — it clears
+ * realtime a dozen times over. It is not enough for the large models, and the
+ * difference decides whether the live preview works at all: measured on a
+ * 24-thread i9 with the CPU build, large-v3-turbo-q5_0 transcribes 8.7 s of
+ * speech at 0.7x realtime on four threads and 1.2x on eight. Below 1x the
+ * transcriber can never catch up with the room, so it spends the meeting
+ * discarding audio at the LIVE_MAX_SECONDS ceiling.
+ *
+ * Half the logical cores, capped at eight: enough for the heavy model, while
+ * leaving most of the machine to the call being recorded. Someone who wants to
+ * trade more of it sets whisperThreads explicitly.
+ */
+function defaultThreads() {
+  const cores = os.cpus()?.length || 4;
+  return Math.max(2, Math.min(8, Math.floor(cores / 2)));
+}
+
+/**
+ * Thread counts worth offering in the menu: the automatic choice, then powers of
+ * two the machine can actually field. A 4-core laptop should not be invited to
+ * ask for 16 threads.
+ */
+function threadChoices() {
+  const cores = os.cpus()?.length || 4;
+  return [0, ...[2, 4, 6, 8, 12, 16, 24, 32].filter((n) => n <= cores)];
+}
 
 /**
  * The labels the transcript window offers, mapped to whisper language codes.
@@ -135,6 +166,19 @@ async function freePort(start = FIRST_PORT, attempts = PORT_ATTEMPTS) {
 const delay = (ms) => new Promise((r) => setTimeout(r, ms));
 
 /**
+ * Servers with a live child process, so a normal quit cannot leave one behind
+ * holding a port and a few hundred MB of weights.
+ *
+ * One hook for the module rather than one per instance: a listener per
+ * constructed server trips Node's leak warning once a handful exist, and there
+ * is nothing for it to do on a server that never started.
+ */
+const withChild = new Set();
+process.once('exit', () => {
+  for (const server of withChild) server.stop();
+});
+
+/**
  * Supervises one whisper-server child process and talks to its /inference route.
  *
  * The process is started lazily on the first transcription (or an explicit
@@ -157,9 +201,6 @@ class WhisperServer extends EventEmitter {
     /** Tail of the child's stderr, so a failed start can say why. */
     this.stderrTail = [];
     this.configure(config);
-    // A packaged app that quits normally should not leave a server behind
-    // holding a port and a few hundred MB of weights.
-    process.once('exit', () => this.stop());
   }
 
   /**
@@ -202,6 +243,11 @@ class WhisperServer extends EventEmitter {
     return listModels(this.modelsDir);
   }
 
+  /** The thread count actually handed to the server, resolving 0 to a real one. */
+  get effectiveThreads() {
+    return this.threads > 0 ? this.threads : defaultThreads();
+  }
+
   get url() {
     return `http://127.0.0.1:${this.port}`;
   }
@@ -213,7 +259,10 @@ class WhisperServer extends EventEmitter {
       binary: this.binary,
       model: this.model ? path.basename(this.model) : '',
       models: this.models,
-      threads: this.threads || 'auto',
+      /** 0 means automatic; effectiveThreads is what the server was actually told. */
+      threads: this.threads,
+      effectiveThreads: this.effectiveThreads,
+      threadChoices: threadChoices(),
       available: this.available,
       running: this.running,
       port: this.port || null,
@@ -253,9 +302,9 @@ class WhisperServer extends EventEmitter {
       '--suppress-nst',
       '--language', 'auto',
     ];
-    // 0 means "whisper.cpp decides", which is the right default on an unknown
-    // machine; an explicit value is for leaving headroom during a call.
-    if (this.threads > 0) args.push('--threads', String(this.threads));
+    // 0 means "decide for me", which is not the same as letting whisper-server
+    // decide — its four-thread default cannot run the large models in realtime.
+    args.push('--threads', String(this.effectiveThreads));
 
     log.info(`whisper: starting ${path.basename(this.binary)} on ${path.basename(this.model)} (port ${port})`);
     const startedAt = Date.now();
@@ -270,6 +319,7 @@ class WhisperServer extends EventEmitter {
     this.proc = proc;
     this.port = port;
     this.ready = false;
+    withChild.add(this);
 
     // Both pipes must be drained or the child blocks once its buffers fill.
     proc.stdout.on('data', () => {});
@@ -287,6 +337,7 @@ class WhisperServer extends EventEmitter {
       if (this.proc !== proc) return; // already replaced by a restart
       this.proc = null;
       this.ready = false;
+      withChild.delete(this);
       if (this.wanted) {
         this.lastError = `whisper-server exited (${signal ?? code})`;
         log.warn(`whisper: ${this.lastError}: ${this.stderrTail.slice(-3).join(' | ')}`);
@@ -395,6 +446,7 @@ class WhisperServer extends EventEmitter {
     const proc = this.proc;
     this.proc = null;
     this.port = 0;
+    withChild.delete(this);
     if (!proc) return;
     try {
       proc.kill();
@@ -463,6 +515,8 @@ function cleanWhisperText(raw) {
 module.exports = {
   WhisperServer,
   WhisperError,
+  defaultThreads,
+  threadChoices,
   resolveInstall,
   listModels,
   cleanWhisperText,

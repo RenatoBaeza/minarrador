@@ -38,11 +38,16 @@ That downloads whisper.cpp v1.9.2 (8 MB) and the multilingual `base` model (142 
 
 ```bash
 npm run whisper:setup -- --model small      # slower, more accurate
+npm run whisper:setup -- --model large-v3-turbo-q5_0   # the accurate pick (547 MB)
 npm run whisper:setup -- --variant cublas-12.4   # NVIDIA GPU build
 npm run whisper:setup -- --help             # all models and variants
 ```
 
-Pick the model from the tray under **Settings → Whisper model**. Skip this step and the live preview falls back to your Ollama audio model, which works but lags noticeably — an audio LLM costs about a second per request no matter how short the clip.
+For fewer mistakes in the preview, use `--model large-v3-turbo-q5_0`. It is `large-v3-turbo` quantised to 5 bits — close to the accuracy of the full 2.9 GB `large-v3` at a fifth of the size, because turbo's decoder is distilled to 4 layers from 32.
+
+It is also far slower than `base`, and on the CPU build that matters more than the accuracy does. Measured on a 24-thread i9 against the same 8.7 s of speech: `base` decodes at about 20x realtime, this model at 1.2x. Above 1x it keeps up, but a caption lands a few seconds after the speaker stops rather than about one, and a long stretch with no pause in it can lose words from the preview. Two things buy that back — **Settings → Whisper decode threads** (about 1.8x with all 24) and a `--variant cublas-*` GPU build. On a 4-core laptop this model is below realtime whatever you do, so stay on `base` or `small` there. The saved transcript is unaffected either way: that is a separate pass over the recorded audio once you stop.
+
+Models accumulate rather than replace, so running setup again for a second model leaves the first in place. Pick between them in the tray under **Settings → Whisper model**. Skip this step and the live preview falls back to your Ollama audio model, which works but lags noticeably — an audio LLM costs about a second per request no matter how short the clip.
 
 ### Ollama model
 
@@ -106,6 +111,18 @@ Ollama runs a local HTTP server on `127.0.0.1:11434`. If a firewall prompt appea
 - Click **Start Recording** to begin, **Stop Recording** to finish
 - When processing completes, you'll get a notification — click it to open the PDF
 
+### Quick copy
+
+The top of the tray menu holds your shorthands — snippets of text you paste
+often. Click one and it goes straight to the clipboard, so it's two clicks from
+anywhere: tray icon, then the shorthand.
+
+Add and edit them with **Edit quick copy…**, which opens a small window: give
+each one an optional name (that's the label the tray shows — without one, it
+shows the start of the text) and the text to copy. **Save**, or `Ctrl+S`, and it
+appears in the menu straight away. Everything lives in `snippets.json` next to
+your settings.
+
 ### Meeting output
 
 Each recording creates a timestamped folder (e.g. `2026-08-11_14-32-05/`) in your notes directory containing:
@@ -146,6 +163,7 @@ All settings are accessible from the tray menu under **Settings**:
 | Record system audio        | ✓                      | Capture system audio (calls, videos, etc.)  |
 | Live transcript engine     | whisper.cpp            | What produces the live preview; falls back to Ollama when whisper.cpp is not installed |
 | Whisper model              | `ggml-base.bin`        | GGML weights under `vendor/whisper/models`  |
+| Whisper decode threads     | Automatic              | Automatic is half the logical cores, capped at 8; raise it if a large model cannot keep up |
 | Transcription model        | `gemma4:12b`           | Audio-capable model used for the saved transcript |
 | Notes model                | `gemma4:12b`           | Model used for summarisation and PDF layout |
 | Notes folder               | `Documents\Minarrador` | Where meeting folders are created           |
