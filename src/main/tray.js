@@ -123,14 +123,13 @@ class AppTray {
     const template = [
       { label: 'Quick copy', enabled: false },
       // The list stays here — it is the whole point of the section — but the
-      // editor behind it lives in the library's Settings, with everything else
-      // that is configured rather than used.
+      // editor behind it is the library window's Quick copy feature.
       ...(snippets.length
         ? snippets.map((snippet) => ({
             label: snippetLabel(snippet),
             click: () => clipboard.writeText(snippet.text),
           }))
-        : [{ label: 'No shorthands yet — add them in Settings', enabled: false }]),
+        : [{ label: 'No shorthands yet — add one…', click: () => a.openQuickCopy() }]),
       { type: 'separator' },
 
       { label: headline, enabled: false },

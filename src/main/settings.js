@@ -74,8 +74,12 @@ function defaults() {
      * a meeting where both sides are live, which is the trade this turns off.
      */
     separateChannels: true,
-    /** Watch levels while idle and offer to start recording. */
-    suggestOnAudio: true,
+    /**
+     * Watch levels while idle and offer to start recording. Off by default: any
+     * video or music playing counts as a meeting, so the offer arrives far more
+     * often than it is wanted. The recording hotkey covers the real case.
+     */
+    suggestOnAudio: false,
     /**
      * Stop a recording that has heard nothing for this many minutes; 0 never does.
      *

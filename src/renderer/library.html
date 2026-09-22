@@ -2,56 +2,92 @@
 <html lang="en">
   <head>
     <meta charset="utf-8" />
-    <meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self'; style-src 'self'" />
-    <title>Meetings</title>
+    <meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self'" />
+    <title>Minarrador</title>
     <link rel="stylesheet" href="library.css" />
   </head>
-  <body>
+  <body data-mode="reader">
     <header class="titlebar">
+      <img class="app-icon" src="../../assets/icon.png" alt="" draggable="false" />
       <span class="brand">Minarrador</span>
-      <span class="sub">Meetings</span>
-      <button id="record" class="record" type="button" title="Start recording a meeting">
-        <span class="record-glyph" aria-hidden="true">+</span>
-        <span id="record-label">New recording</span>
-      </button>
-      <button id="folder" class="ghost" type="button" title="Open the notes folder">Notes folder</button>
-      <button id="settings" class="ghost" type="button" title="Settings" aria-pressed="false">Settings</button>
+      <span id="section-name" class="sub">Recording</span>
       <button id="minimize" class="chrome" type="button" title="Minimise" aria-label="Minimise">&#8211;</button>
       <button id="close" class="chrome danger" type="button" title="Close" aria-label="Close">&#10005;</button>
     </header>
 
-    <main>
-      <aside class="rail">
-        <div class="search">
-          <input
-            id="query"
-            type="search"
-            autocomplete="off"
-            spellcheck="false"
-            placeholder="Search titles and transcripts…"
-            aria-label="Search meetings"
-          />
+    <div class="app">
+      <!-- One entry per feature, top to bottom; a new one goes at the end of
+           .nav-features. Settings is pinned to the bottom, apart from them. -->
+      <nav class="sidebar" aria-label="Features">
+        <div class="nav-features">
+          <button class="nav-item" data-mode="reader" type="button" title="Recording (Ctrl+1)" aria-current="page">
+            <svg viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+              <rect x="9" y="3" width="6" height="11" rx="3" />
+              <path d="M5 11a7 7 0 0 0 14 0M12 18v3" />
+            </svg>
+            <span>Recording</span>
+          </button>
+          <button class="nav-item" data-mode="quickcopy" type="button" title="Quick copy (Ctrl+2)">
+            <svg viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+              <rect x="8" y="8" width="12" height="12" rx="2" />
+              <path d="M16 8V6a2 2 0 0 0-2-2H6a2 2 0 0 0-2 2v8a2 2 0 0 0 2 2h2" />
+            </svg>
+            <span>Quick copy</span>
+          </button>
         </div>
-        <div class="filters" id="filters" aria-label="Filter the list">
-          <button class="filter" data-filter="all" type="button" aria-pressed="true">All</button>
-          <button class="filter" data-filter="needs" type="button" aria-pressed="false">Needs notes</button>
-          <button class="filter" data-filter="recent" type="button" aria-pressed="false">This week</button>
-        </div>
-        <div id="searching" class="count searching" hidden>Searching…</div>
-        <div id="count" class="count"></div>
-        <div id="list" class="list" role="listbox" aria-label="Recorded meetings" tabindex="-1"></div>
-      </aside>
+        <button class="nav-item" data-mode="settings" type="button" title="Settings (Ctrl+,)">
+          <svg viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+            <circle cx="12" cy="12" r="3" />
+            <path d="M19.4 15a1.7 1.7 0 0 0 .3 1.8l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.7 1.7 0 0 0-1.8-.3 1.7 1.7 0 0 0-1 1.5V21a2 2 0 1 1-4 0v-.1a1.7 1.7 0 0 0-1.1-1.5 1.7 1.7 0 0 0-1.8.3l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1a1.7 1.7 0 0 0 .3-1.8 1.7 1.7 0 0 0-1.5-1H3a2 2 0 1 1 0-4h.1a1.7 1.7 0 0 0 1.5-1.1 1.7 1.7 0 0 0-.3-1.8l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1a1.7 1.7 0 0 0 1.8.3H9a1.7 1.7 0 0 0 1-1.5V3a2 2 0 1 1 4 0v.1a1.7 1.7 0 0 0 1 1.5 1.7 1.7 0 0 0 1.8-.3l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.7 1.7 0 0 0-.3 1.8V9a1.7 1.7 0 0 0 1.5 1H21a2 2 0 1 1 0 4h-.1a1.7 1.7 0 0 0-1.5 1z" />
+          </svg>
+          <span>Settings</span>
+        </button>
+      </nav>
 
-      <section class="reader" id="reader" aria-live="polite">
-        <div id="placeholder" class="placeholder">
-          <h1>Your meetings live here</h1>
-          <p>
-            Every recording keeps its own folder of artefacts. Pick one on the left to read the notes and the full
-            transcript — or search across everything that has ever been said.
-          </p>
-        </div>
-      </section>
-    </main>
+      <main>
+        <aside class="rail">
+          <div class="rail-actions">
+            <button id="record" class="record" type="button" title="Start recording a meeting (Ctrl+N)">
+              <span class="record-glyph" aria-hidden="true">+</span>
+              <span id="record-label">New recording</span>
+            </button>
+            <button id="folder" class="icon-button" type="button" title="Open the meetings folder" aria-label="Open the meetings folder">
+              <svg viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round">
+                <path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z" />
+              </svg>
+            </button>
+          </div>
+          <div class="search">
+            <input
+              id="query"
+              type="search"
+              autocomplete="off"
+              spellcheck="false"
+              placeholder="Search titles and transcripts…"
+              aria-label="Search meetings"
+            />
+          </div>
+          <div class="filters" id="filters" aria-label="Filter the list">
+            <button class="filter" data-filter="all" type="button" aria-pressed="true">All</button>
+            <button class="filter" data-filter="needs" type="button" aria-pressed="false">Needs notes</button>
+            <button class="filter" data-filter="recent" type="button" aria-pressed="false">This week</button>
+          </div>
+          <div id="searching" class="count searching" hidden>Searching…</div>
+          <div id="count" class="count"></div>
+          <div id="list" class="list" role="listbox" aria-label="Recorded meetings" tabindex="-1"></div>
+        </aside>
+
+        <section class="reader" id="reader" aria-live="polite">
+          <div id="placeholder" class="placeholder">
+            <h1>Your meetings live here</h1>
+            <p>
+              Every recording keeps its own folder of artefacts. Pick one on the left to read the notes and the full
+              transcript — or search across everything that has ever been said.
+            </p>
+          </div>
+        </section>
+      </main>
+    </div>
 
     <script src="library.js"></script>
   </body>

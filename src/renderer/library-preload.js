@@ -10,6 +10,9 @@
 //   rename     write the title someone typed over the one the model guessed
 //   delete     move a meeting to the Recycle Bin, after main has confirmed it
 //
+// Quick copy goes through `quickCopy` below: the one list this window writes,
+// pinned to two strings per entry before it leaves the page.
+//
 // Settings go through `settings` below: a fixed vocabulary of keys, each
 // coerced to the type the store expects, with nothing that names a path or a
 // host among them.
@@ -54,6 +57,15 @@ const FIELDS = {
   transcribeModel: String,
   summaryModel: String,
 };
+
+/** The sidebar features main may open this window onto. Mirrors SECTIONS in library.js. */
+const SECTIONS = ['reader', 'quickcopy', 'settings'];
+
+const plainSnippets = (items) =>
+  (Array.isArray(items) ? items : []).map((item) => ({
+    label: String(item?.label ?? ''),
+    text: String(item?.text ?? ''),
+  }));
 
 const patch = (values) => {
   const out = {};
@@ -114,10 +126,19 @@ contextBridge.exposeInMainWorld('library', {
    * folder", which walks the notes directory and every transcript in it.
    */
   onProgress: (fn) => ipcRenderer.on('library:progress', (_e, activity) => fn(activity ?? {})),
-  /** The tray's Settings… item, landing in an already-open window. */
-  onShowSettings: (fn) => ipcRenderer.on('library:showSettings', () => fn()),
+  /** The tray asking for a feature — its Settings… item — landing in an already-open window. */
+  onShow: (fn) =>
+    ipcRenderer.on('library:show', (_e, section) => {
+      if (SECTIONS.includes(section)) fn(section);
+    }),
   minimize: () => ipcRenderer.send('library:minimize'),
   close: () => ipcRenderer.send('library:close'),
+
+  quickCopy: {
+    list: () => ipcRenderer.invoke('snippets:list'),
+    /** @returns {Promise<{label: string, text: string}[]>} the list as it was actually stored. */
+    save: (items) => ipcRenderer.invoke('snippets:save', plainSnippets(items)),
+  },
 
   settings: {
     get: () => ipcRenderer.invoke('settings:get'),
@@ -138,7 +159,6 @@ contextBridge.exposeInMainWorld('library', {
     testMicStop: () => ipcRenderer.invoke('settings:testMicStop'),
     /** A level (≈10/s), a mic status, or the end of the test. */
     onMicTest: (fn) => ipcRenderer.on('settings:micTest', (_e, payload) => fn(payload ?? {})),
-    editQuickCopy: () => ipcRenderer.send('settings:editQuickCopy'),
     /** Opens the dictations archive window, from the settings pane. */
     openDictations: () => ipcRenderer.send('settings:openDictations'),
     /** A setting changed elsewhere, or an Ollama poll found (or lost) the daemon. */

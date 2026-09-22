@@ -261,7 +261,6 @@ let micTestTimer = null;
 let lastProgressAt = 0;
 let lastSetupAt = 0;
 let transcriptionWindow = null;
-let snippetsWindow = null;
 let libraryWindow = null;
 let dictationsWindow = null;
 let dictateIndicator = null;
@@ -344,49 +343,6 @@ function toggleTranscriptWindow() {
   }
   showTranscriptWindow();
   sendToTranscript('transcript:state', transcriptState());
-}
-
-/**
- * The quick-copy editor: the list behind the tray's top section.
- *
- * Frameless and dark like the transcript window, and single-instance for the
- * same reason every window here is — two copies of an editor over one file
- * means whichever is saved last wins, silently.
- */
-function showSnippetsWindow() {
-  if (snippetsWindow && !snippetsWindow.isDestroyed()) {
-    if (snippetsWindow.isMinimized()) snippetsWindow.restore();
-    snippetsWindow.show();
-    snippetsWindow.focus();
-    return snippetsWindow;
-  }
-
-  snippetsWindow = new BrowserWindow({
-    width: 520,
-    height: 620,
-    minWidth: 380,
-    minHeight: 320,
-    show: false,
-    frame: false,
-    title: 'Quick Copy',
-    backgroundColor: '#16161a',
-    icon: appIcon(),
-    webPreferences: {
-      preload: path.join(RENDERER, 'snippets-preload.js'),
-      contextIsolation: true,
-      nodeIntegration: false,
-      sandbox: true,
-    },
-  });
-
-  snippetsWindow.once('ready-to-show', () => snippetsWindow?.show());
-  snippetsWindow.on('closed', () => {
-    snippetsWindow = null;
-  });
-  snippetsWindow.loadFile(path.join(RENDERER, 'snippets.html')).catch((err) => {
-    log.error('quick copy window failed to load', err);
-  });
-  return snippetsWindow;
 }
 
 /**
@@ -703,19 +659,20 @@ function sendMicTest(payload) {
  * which never writes. Settings are the exception, and they go through the same
  * store the tray used to write — see the `settings:*` channels below.
  *
- * @param {{ settings?: boolean }} [options] `settings` opens on the settings
- *   pane rather than the archive, which is how the tray's Settings… item lands.
+ * @param {{ section?: 'settings'|'quickcopy' }} [options] the sidebar feature
+ *   to open on rather than whatever was last showing — how the tray's
+ *   Settings… item and its empty quick-copy row land.
  */
-function showLibraryWindow({ settings: toSettings = false } = {}) {
-  const showSettings = (win) => {
-    if (toSettings) win.webContents.send('library:showSettings');
+function showLibraryWindow({ section = null } = {}) {
+  const showSection = (win) => {
+    if (section) win.webContents.send('library:show', section);
   };
 
   if (libraryWindow && !libraryWindow.isDestroyed()) {
     if (libraryWindow.isMinimized()) libraryWindow.restore();
     libraryWindow.show();
     libraryWindow.focus();
-    showSettings(libraryWindow);
+    showSection(libraryWindow);
     return libraryWindow;
   }
 
@@ -726,7 +683,7 @@ function showLibraryWindow({ settings: toSettings = false } = {}) {
     minHeight: 480,
     show: false,
     frame: false,
-    title: 'Meetings',
+    title: 'Minarrador',
     backgroundColor: '#16161a',
     icon: appIcon(),
     webPreferences: {
@@ -741,7 +698,7 @@ function showLibraryWindow({ settings: toSettings = false } = {}) {
   // The page has to exist before it can be told which pane to open on, so a
   // freshly built window waits for its script rather than sending into nothing.
   libraryWindow.webContents.once('did-finish-load', () => {
-    if (libraryWindow && !libraryWindow.isDestroyed()) showSettings(libraryWindow);
+    if (libraryWindow && !libraryWindow.isDestroyed()) showSection(libraryWindow);
   });
   libraryWindow.on('closed', () => {
     libraryWindow = null;
@@ -1980,16 +1937,17 @@ if (!app.requestSingleInstanceLock()) {
     clipboard.writeText(String(text ?? ''));
   });
 
-  // Quick copy is the only store a renderer can write to, so every channel below
-  // checks the sender: the editor window, or nothing. The store normalises the
-  // payload regardless — it also has to survive a hand-edited snippets.json.
+  // Quick copy is edited in the library window's Quick copy feature, so every
+  // channel below checks the sender: that window, or nothing. The store
+  // normalises the payload regardless — it also has to survive a hand-edited
+  // snippets.json.
   ipcMain.handle('snippets:list', (event) => {
-    if (event.sender.id !== snippetsWindow?.webContents.id) return [];
+    if (event.sender.id !== libraryWindow?.webContents.id) return [];
     return snippetsStore.load();
   });
 
   ipcMain.handle('snippets:save', (event, list) => {
-    if (event.sender.id !== snippetsWindow?.webContents.id) return [];
+    if (event.sender.id !== libraryWindow?.webContents.id) return [];
     const saved = snippetsStore.save(list);
     // The menu is rebuilt from the store, so a save is what makes a new
     // shorthand clickable — no restart, no reopening the menu twice.
@@ -1998,11 +1956,6 @@ if (!app.requestSingleInstanceLock()) {
     notifySettings();
     log.info(`quick copy: ${saved.length} shorthand(s) saved`);
     return saved;
-  });
-
-  ipcMain.on('snippets:close', (event) => {
-    if (event.sender.id !== snippetsWindow?.webContents.id) return;
-    snippetsWindow.close();
   });
 
   // The dictations archive is the other store a renderer can write to, so its
@@ -2182,13 +2135,6 @@ if (!app.requestSingleInstanceLock()) {
     if (!fromLibrary(event)) return null;
     await openOllama();
     return settingsState();
-  });
-
-  // Quick copy is edited from here, but the list itself stays in the tray: the
-  // editor is configuration, the list is the thing used mid-meeting.
-  ipcMain.on('settings:editQuickCopy', (event) => {
-    if (!fromLibrary(event)) return;
-    showSnippetsWindow();
   });
 
   // The dictations archive lives in the tray too; the settings pane is just
@@ -2408,7 +2354,8 @@ if (!app.requestSingleInstanceLock()) {
         if (!ok) notify('Cannot generate those notes', reason);
       },
       openLibrary: () => showLibraryWindow(),
-      openSettings: () => showLibraryWindow({ settings: true }),
+      openSettings: () => showLibraryWindow({ section: 'settings' }),
+      openQuickCopy: () => showLibraryWindow({ section: 'quickcopy' }),
       toggleTranscript: toggleTranscriptWindow,
       toggleDictation,
       openDictations: () => showDictationsWindow(),

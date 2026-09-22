@@ -119,14 +119,17 @@ Ollama runs a local HTTP server on `127.0.0.1:11434`. If a firewall prompt appea
   whether the room is being captured. Pick a different combination — or turn it
   off — under **Settings → Start and stop shortcut**
 - Or **left-click** the waveform icon in the system tray to open the meetings
-  window, then hit the green **+ New recording**. The same button stops it.
+  window, then hit the green **+ New recording** at the top of the meetings
+  list. The same button stops it.
 - Or **right-click** the icon and use **Start Recording** / **Stop Recording**
 - When processing completes, you'll get a notification — click it to open the PDF
 
 ### Your meetings
 
-**Left-click** the tray icon (or **Meetings…** in the menu) to open the library:
-every recording down the left, grouped by day, and whichever one you pick opened
+**Left-click** the tray icon (or **Meetings…** in the menu) to open the app
+window. A sidebar down its left edge picks the feature — **Recording**, **Quick
+copy**, and **Settings** pinned at the bottom (`Ctrl+1`, `Ctrl+2`, `Ctrl+,`).
+Recording is the library: every recording down the left, grouped by day, and whichever one you pick opened
 on the right. **Notes** shows the summary, the decisions and the action items;
 **Transcript** shows everything that was said, timestamped by the minute.
 
@@ -147,10 +150,10 @@ The top of the tray menu holds your shorthands — snippets of text you paste
 often. Click one and it goes straight to the clipboard, so it's two clicks from
 anywhere: tray icon, then the shorthand.
 
-The list stays in the tray; you edit it from **Settings → Quick copy → Edit quick copy…**, which opens a small window: give
-each one an optional name (that's the label the tray shows — without one, it
-shows the start of the text) and the text to copy. **Save**, or `Ctrl+S`, and it
-appears in the menu straight away. Everything lives in `snippets.json` next to
+The list stays in the tray; you edit it from **Quick copy** in the app window's
+sidebar: give each one an optional name (that's the label the tray shows —
+without one, it shows the start of the text) and the text to copy. It saves
+itself as you type and appears in the menu straight away. Everything lives in `snippets.json` next to
 your settings.
 
 ### Voice input (dictation)

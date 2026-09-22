@@ -16,7 +16,20 @@ const queryEl = document.getElementById('query');
 const recordEl = document.getElementById('record');
 const recordLabelEl = document.getElementById('record-label');
 const recordGlyphEl = recordEl.querySelector('.record-glyph');
-const settingsEl = document.getElementById('settings');
+const navEls = [...document.querySelectorAll('.nav-item')];
+const sectionNameEl = document.getElementById('section-name');
+
+/** The sidebar's features, by the mode each one puts the window in. */
+const SECTIONS = { reader: 'Recording', quickcopy: 'Quick copy', settings: 'Settings' };
+
+/**
+ * How long quick copy waits after the last keystroke before writing the list.
+ * The tray is rebuilt on every save, so this is about not doing that per key.
+ */
+const QUICK_COPY_SAVE_MS = 600;
+
+/** Mirrors LIMITS in src/main/snippets.js, so the store never has to truncate. */
+const QUICK_COPY_MAX = { label: 60, text: 20_000 };
 
 /** Keystrokes settle before the main process reads every transcript on disk. */
 const SEARCH_DEBOUNCE_MS = 180;
@@ -49,7 +62,10 @@ const view = {
    * change what someone is looking for, unlike a flat list of the whole archive.
    */
   filter: 'all',
-  /** 'reader' | 'settings' — which of the two the right-hand pane is showing. */
+  /**
+   * Which feature the sidebar has open: 'reader' (Recording — the rail and the
+   * meeting it has open), 'quickcopy' or 'settings'. Only the first shows the rail.
+   */
   mode: 'reader',
   /** settingsState() from the main process, or null before it has been asked for. */
   settings: null,
@@ -1396,7 +1412,7 @@ function storageSection(frag, s) {
         : 'Phrases you type all day, one click from the tray menu to the clipboard.',
       alert: s.snippetCount ? '' : 'Nothing saved yet — the tray section is empty until you add one.',
       label: 'Edit quick copy…',
-      onClick: () => window.library.settings.editQuickCopy(),
+      onClick: () => showSection('quickcopy'),
     }),
   ]);
 }
@@ -1500,21 +1516,38 @@ async function saveSetting(patch) {
   if (view.mode === 'settings') renderSettings();
 }
 
-async function openSettings() {
-  view.mode = 'settings';
-  settingsEl.setAttribute('aria-pressed', 'true');
-  renderSettings(); // whatever was last read, so the pane is never blank
-  view.settings = await window.library.settings.get();
-  if (view.mode === 'settings') renderSettings();
+/**
+ * Switches the sidebar feature. Leaving quick copy writes it first, so a
+ * shorthand typed a moment ago is never lost to a click on another feature.
+ */
+async function showSection(mode) {
+  if (!Object.hasOwn(SECTIONS, mode)) return;
+  if (view.mode === 'quickcopy' && mode !== 'quickcopy') await saveQuickCopy();
+  const entering = view.mode !== mode;
+  view.mode = mode;
+  document.body.dataset.mode = mode;
+  sectionNameEl.textContent = SECTIONS[mode];
+  for (const item of navEls) {
+    if (item.dataset.mode === mode) item.setAttribute('aria-current', 'page');
+    else item.removeAttribute('aria-current');
+  }
+  if (entering) readerEl.scrollTop = 0;
+
+  if (mode === 'settings') {
+    renderSettings(); // whatever was last read, so the pane is never blank
+    view.settings = await window.library.settings.get();
+    if (view.mode === 'settings') renderSettings();
+  } else if (mode === 'quickcopy') {
+    // Re-entering reloads from disk; staying put keeps what is being typed.
+    if (entering) renderQuickCopy();
+  } else if (view.meeting) {
+    renderReader(view.meeting);
+  } else {
+    renderPlaceholder();
+  }
 }
 
-/** Back to the archive, onto whichever meeting was open before. */
-function closeSettings() {
-  view.mode = 'reader';
-  settingsEl.setAttribute('aria-pressed', 'false');
-  if (view.meeting) renderReader(view.meeting);
-  else renderPlaceholder();
-}
+const openSettings = () => showSection('settings');
 
 // ------------------------------------------------------------------ first run
 
@@ -1551,7 +1584,7 @@ function setupGaps(s) {
 function renderPlaceholder() {
   const gaps = setupGaps(view.settings);
   if (!gaps.length) {
-    renderPlaceholder();
+    readerEl.replaceChildren(placeholder);
     return;
   }
 
@@ -1575,6 +1608,168 @@ function renderPlaceholder() {
 
   wrap.append(notice);
   readerEl.replaceChildren(wrap);
+}
+
+// ----------------------------------------------------------------- quick copy
+
+/**
+ * The quick-copy editor: the list behind the tray's top section.
+ *
+ * Edited as a whole and saved as a whole — there is no per-item identity to
+ * keep in sync, so deleting a card is simply not sending it. It saves itself a
+ * moment after the typing stops, and again on the way out of the feature or
+ * the window, so there is no state in which work on screen is not on its way
+ * to disk.
+ */
+const quickCopy = { dirty: false, saving: null, timer: null, listEl: null, statusEl: null };
+
+function setQuickCopyStatus(text, dirty) {
+  if (!quickCopy.statusEl) return;
+  quickCopy.statusEl.textContent = text;
+  quickCopy.statusEl.classList.toggle('dirty', dirty);
+}
+
+function markQuickCopyDirty() {
+  quickCopy.dirty = true;
+  setQuickCopyStatus('Unsaved changes', true);
+  clearTimeout(quickCopy.timer);
+  quickCopy.timer = setTimeout(() => saveQuickCopy(), QUICK_COPY_SAVE_MS);
+}
+
+function quickCopyCard(snippet = { label: '', text: '' }) {
+  const row = el('div', 'qc-card');
+
+  const name = el('input', 'qc-name');
+  name.type = 'text';
+  name.maxLength = QUICK_COPY_MAX.label;
+  name.placeholder = 'Name (optional) — this is what the tray shows';
+  name.value = snippet.label;
+
+  const remove = el('button', 'qc-remove', '✕');
+  remove.type = 'button';
+  remove.title = 'Delete';
+  remove.setAttribute('aria-label', 'Delete shorthand');
+  remove.addEventListener('click', () => {
+    row.remove();
+    refreshQuickCopyEmpty();
+    markQuickCopyDirty();
+  });
+
+  const text = el('textarea', 'qc-text');
+  text.rows = 3;
+  text.maxLength = QUICK_COPY_MAX.text;
+  text.placeholder = 'The text to put on the clipboard…';
+  text.value = snippet.text;
+
+  const top = el('div', 'qc-top');
+  top.append(name, remove);
+  row.append(top, text);
+  return row;
+}
+
+/** Shows the placeholder only while there is genuinely nothing to show. */
+function refreshQuickCopyEmpty() {
+  const list = quickCopy.listEl;
+  if (!list) return;
+  const empty = list.querySelector('.none');
+  if (list.querySelector('.qc-card')) empty?.remove();
+  else if (!empty) {
+    list.append(el('p', 'none', 'Nothing here yet. Add a shorthand and it appears at the top of the tray menu, ready to copy.'));
+  }
+}
+
+const collectQuickCopy = () =>
+  [...(quickCopy.listEl?.querySelectorAll('.qc-card') ?? [])].map((row) => ({
+    label: row.querySelector('.qc-name').value,
+    text: row.querySelector('.qc-text').value,
+  }));
+
+/**
+ * Writes the list and marks whatever the store refused to keep.
+ *
+ * Never re-renders from the result: a card with an empty body is dropped by the
+ * store, and making it vanish while someone is still filling it in would look
+ * like the editor eating their work. The card stays, flagged, and starts
+ * counting the moment it has text.
+ */
+async function saveQuickCopy() {
+  clearTimeout(quickCopy.timer);
+  if (quickCopy.saving) await quickCopy.saving;
+  if (!quickCopy.dirty || !quickCopy.listEl) return;
+  const cards = [...quickCopy.listEl.querySelectorAll('.qc-card')];
+  quickCopy.dirty = false;
+  setQuickCopyStatus('Saving…', false);
+  quickCopy.saving = (async () => {
+    try {
+      await window.library.quickCopy.save(collectQuickCopy());
+      if (!quickCopy.dirty) setQuickCopyStatus('Saved', false);
+      for (const row of cards) row.classList.toggle('incomplete', !row.querySelector('.qc-text').value.trim());
+    } catch {
+      // The store writes to disk; if that failed the work is still on screen,
+      // and saying so beats a silent "Saved".
+      quickCopy.dirty = true;
+      setQuickCopyStatus('Could not save', true);
+    } finally {
+      quickCopy.saving = null;
+    }
+  })();
+  await quickCopy.saving;
+}
+
+async function renderQuickCopy() {
+  const doc = el('div', 'doc');
+  doc.append(
+    el('h1', '', 'Quick copy'),
+    el('p', 'settings-lead', 'Phrases you type all day. Each one becomes an item at the top of the tray menu that copies it on click.'),
+  );
+
+  const toolbar = el('div', 'qc-toolbar');
+  const add = el('button', 'button primary', '+ New shorthand');
+  add.type = 'button';
+  const status = el('span', 'qc-status', 'Loading…');
+  toolbar.append(add, status);
+
+  const list = el('div', 'qc-list');
+  list.addEventListener('input', (e) => {
+    e.target.closest('.qc-card')?.classList.remove('incomplete');
+    markQuickCopyDirty();
+  });
+  // Leaving a field is as good a moment as any to put it on disk.
+  list.addEventListener('focusout', () => {
+    if (quickCopy.dirty) saveQuickCopy();
+  });
+  add.addEventListener('click', () => {
+    const row = quickCopyCard();
+    list.append(row);
+    refreshQuickCopyEmpty();
+    row.querySelector('.qc-name').focus();
+    row.scrollIntoView({ block: 'nearest' });
+  });
+
+  doc.append(toolbar, list);
+  quickCopy.listEl = list;
+  quickCopy.statusEl = status;
+  quickCopy.dirty = false;
+  readerEl.replaceChildren(doc);
+
+  let snippets;
+  try {
+    snippets = await window.library.quickCopy.list();
+  } catch {
+    setQuickCopyStatus('Could not read the list', true);
+    return;
+  }
+  // Someone clicked away, or back again, before the list arrived.
+  if (view.mode !== 'quickcopy' || quickCopy.listEl !== list) return;
+  list.replaceChildren(...snippets.map((snippet) => quickCopyCard(snippet)));
+  refreshQuickCopyEmpty();
+  setQuickCopyStatus('Saved', false);
+}
+
+/** Closing is not a way to discard: whatever is on screen goes to disk first. */
+async function closeWindow() {
+  await saveQuickCopy();
+  window.library.close();
 }
 
 // ------------------------------------------------------------------ recording
@@ -1698,12 +1893,8 @@ async function select(id) {
   renderReader(meeting);
 }
 
-/** A click in the rail. The archive is what the rail is for, so it takes the pane back. */
+/** A click in the rail, which is only on screen while Recording is. */
 function openMeeting(id) {
-  if (view.mode === 'settings') {
-    view.mode = 'reader';
-    settingsEl.setAttribute('aria-pressed', 'false');
-  }
   select(id);
 }
 
@@ -1759,10 +1950,11 @@ function step(delta) {
 
 document.addEventListener('keydown', (e) => {
   if (e.key === 'Escape') {
-    // Escape backs out one layer at a time — the settings pane, then a search,
-    // then the window itself. Closing outright would be the wrong guess twice.
-    if (view.mode === 'settings') {
-      closeSettings();
+    // Escape backs out one layer at a time — another feature back to
+    // Recording, then a search, then the window itself. Closing outright would
+    // be the wrong guess twice.
+    if (view.mode !== 'reader') {
+      showSection('reader');
       return;
     }
     if (queryEl.value) {
@@ -1771,17 +1963,32 @@ document.addEventListener('keydown', (e) => {
       refresh();
       return;
     }
-    window.library.close();
+    closeWindow();
+    return;
+  }
+  // Ctrl+1, Ctrl+2… follow the sidebar top to bottom.
+  if ((e.ctrlKey || e.metaKey) && /^[1-9]$/.test(e.key)) {
+    const item = document.querySelectorAll('.nav-features .nav-item')[Number(e.key) - 1];
+    if (item) {
+      e.preventDefault();
+      showSection(item.dataset.mode);
+    }
+    return;
+  }
+  if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 's' && view.mode === 'quickcopy') {
+    e.preventDefault();
+    saveQuickCopy();
     return;
   }
   if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'f') {
+    if (view.mode !== 'reader') return;
     e.preventDefault();
     queryEl.focus();
     queryEl.select();
     return;
   }
-  // The two things the header does, reachable without the mouse: start/stop the
-  // recording, and the settings pane that decides how the app can run.
+  // Start/stop the recording and the settings pane, reachable without the
+  // mouse from whichever feature is open.
   if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'n') {
     e.preventDefault();
     toggleRecord();
@@ -1789,7 +1996,7 @@ document.addEventListener('keydown', (e) => {
   }
   if ((e.ctrlKey || e.metaKey) && e.key === ',') {
     e.preventDefault();
-    toggleSettings();
+    showSection(view.mode === 'settings' ? 'reader' : 'settings');
     return;
   }
   if ((e.ctrlKey || e.metaKey) && e.shiftKey && e.key.toLowerCase() === 'c') {
@@ -1797,7 +2004,7 @@ document.addEventListener('keydown', (e) => {
     // with a selection in it has its own copy to do. Otherwise this is exactly
     // what the "Copy transcript" action button does — click it, so the "Copied"
     // feedback comes along for free.
-    if (e.target.closest('input, textarea')) return;
+    if (view.mode !== 'reader' || e.target.closest('input, textarea')) return;
     // Starts-with: the button reads "Copied" for a second after it copies, and
     // a repeat keystroke should still land.
     const copy = [...readerEl.querySelectorAll('.actions .button')].find((b) => b.textContent.startsWith('Copy transcript'));
@@ -1808,7 +2015,11 @@ document.addEventListener('keydown', (e) => {
     return;
   }
   // Arrows walk the list unless they are being used to move a text cursor.
-  if ((e.key === 'ArrowDown' || e.key === 'ArrowUp') && e.target !== queryEl) {
+  if (
+    (e.key === 'ArrowDown' || e.key === 'ArrowUp') &&
+    view.mode === 'reader' &&
+    !e.target.closest('input, textarea, select')
+  ) {
     e.preventDefault();
     step(e.key === 'ArrowDown' ? 1 : -1);
   }
@@ -1816,7 +2027,8 @@ document.addEventListener('keydown', (e) => {
 
 document.getElementById('folder').addEventListener('click', () => window.library.openNotesFolder());
 document.getElementById('minimize').addEventListener('click', () => window.library.minimize());
-document.getElementById('close').addEventListener('click', () => window.library.close());
+document.getElementById('close').addEventListener('click', () => closeWindow());
+for (const item of navEls) item.addEventListener('click', () => showSection(item.dataset.mode));
 // The rail filters narrow the whole archive down to the sets that actually
 // change what someone is looking for; the query still applies on top.
 for (const btn of document.querySelectorAll('.filter')) {
@@ -1826,12 +2038,6 @@ for (const btn of document.querySelectorAll('.filter')) {
     refresh();
   });
 }
-function toggleSettings() {
-  if (view.mode === 'settings') closeSettings();
-  else openSettings();
-}
-
-settingsEl.addEventListener('click', toggleSettings);
 
 // A run advancing is a number changing, not a folder changing: it updates what
 // is on screen without anything being re-read from disk.
@@ -1880,7 +2086,7 @@ window.library.settings.onMicTest((p) => {
 });
 
 // The tray's Settings… item, which opens this window straight onto the pane.
-window.library.onShowSettings(() => openSettings());
+window.library.onShow((section) => showSection(section));
 
 // The settings are read at launch rather than when the pane is opened, because
 // the placeholder is built from them: a first run with nothing installed opens

@@ -2,9 +2,10 @@
    live transcript and the quick-copy editor, kept in its own file so the page
    can run under a strict CSP with no inline styles.
 
-   Two panes: a rail of meetings on the left, a reading column on the right.
-   The reading column is the point of the window, so it gets the space, the
-   larger type and the only serif-free measure worth reading a transcript in. */
+   A permanent sidebar of features on the left, then whatever the chosen one
+   shows. Recording is two panes: a rail of meetings and a reading column. The
+   reading column is the point of the window, so it gets the space, the larger
+   type and the only serif-free measure worth reading a transcript in. */
 
 * {
   box-sizing: border-box;
@@ -40,7 +41,7 @@ body {
   display: flex;
   align-items: center;
   gap: 10px;
-  padding: 10px 8px 10px 16px;
+  padding: 6px 8px 6px 12px;
   background: #1e1e24;
   border-bottom: 1px solid #2c2c34;
   user-select: none;
@@ -52,31 +53,38 @@ body {
   letter-spacing: -0.01em;
 }
 
+.app-icon {
+  width: 20px;
+  height: 20px;
+  flex: none;
+}
+
 .sub {
   color: #6b7280;
   margin-right: auto;
 }
 
-.chrome,
-.ghost {
-  -webkit-app-region: no-drag;
-  flex: none;
-  border: 0;
-  border-radius: 6px;
-  background: transparent;
-  color: #9ca3af;
-  font: inherit;
-  line-height: 1;
-  cursor: default;
+.sub::before {
+  content: '·';
+  margin-right: 10px;
 }
 
 .chrome {
+  -webkit-app-region: no-drag;
+  flex: none;
   width: 28px;
   height: 28px;
   display: flex;
   align-items: center;
   justify-content: center;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: #9ca3af;
+  font: inherit;
   font-size: 12px;
+  line-height: 1;
+  cursor: default;
 }
 
 .chrome:hover {
@@ -89,34 +97,126 @@ body {
   color: #fff;
 }
 
-.ghost {
-  font-size: 12px;
-  padding: 6px 10px;
-  border: 1px solid #2c2c34;
+/* ----------------------------------------------------------------- sidebar */
+
+.app {
+  flex: 1;
+  display: flex;
+  min-height: 0;
 }
 
-.ghost:hover {
+/* Always there, whatever is open: one button per feature, stacked from the
+   top, and Settings pinned to the bottom where it never moves as features are
+   added above it. */
+.sidebar {
+  flex: none;
+  width: 76px;
+  display: flex;
+  flex-direction: column;
+  justify-content: space-between;
+  gap: 4px;
+  padding: 8px 6px;
+  background: #1e1e24;
+  border-right: 1px solid #2c2c34;
+}
+
+.nav-features {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.nav-item {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 4px;
+  width: 100%;
+  padding: 8px 2px 7px;
+  border: 0;
+  border-radius: 8px;
+  background: transparent;
+  color: #9ca3af;
+  font: inherit;
+  font-size: 11px;
+  line-height: 1.2;
+  text-align: center;
+  cursor: default;
+  position: relative;
+}
+
+.nav-item svg {
+  width: 22px;
+  height: 22px;
+}
+
+.nav-item:hover {
+  background: #2a2a32;
+  color: #eaeaea;
+}
+
+.nav-item[aria-current='page'] {
+  background: #2e2e38;
+  color: #fff;
+}
+
+.nav-item[aria-current='page']::before {
+  content: '';
+  position: absolute;
+  left: -6px;
+  top: 10px;
+  bottom: 10px;
+  width: 3px;
+  border-radius: 0 3px 3px 0;
+  background: #4c6ef5;
+}
+
+/* Everything but Recording takes the whole width: the meeting rail belongs to
+   the archive, not to the app. */
+body:not([data-mode='reader']) .rail {
+  display: none;
+}
+
+/* ------------------------------------------------------------ rail actions */
+
+.rail-actions {
+  display: flex;
+  gap: 8px;
+  padding: 12px 12px 0;
+}
+
+.icon-button {
+  flex: none;
+  width: 36px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border: 1px solid #34343e;
+  border-radius: 7px;
+  background: #24242c;
+  color: #9ca3af;
+  cursor: default;
+}
+
+.icon-button svg {
+  width: 18px;
+  height: 18px;
+}
+
+.icon-button:hover {
   background: #2e2e38;
   color: #eaeaea;
 }
 
-.ghost[aria-pressed='true'] {
-  background: #2e2e38;
-  border-color: #45454f;
-  color: #eaeaea;
-}
-
-/* The one thing this window does rather than reads, so it is the one control
-   that looks like a button in the plain sense: wide, green, and to the left of
-   the quiet ghost buttons it must not be mistaken for. */
+/* The one thing the archive does rather than reads, so it is the one control
+   that looks like a button in the plain sense: wide, green, and at the top of
+   the rail it adds to. */
 .record {
-  -webkit-app-region: no-drag;
   display: flex;
   align-items: center;
   justify-content: center;
   gap: 8px;
-  flex: none;
-  min-width: 178px;
+  flex: 1;
   padding: 8px 18px;
   border: 0;
   border-radius: 7px;
@@ -160,6 +260,7 @@ body {
 main {
   flex: 1;
   display: flex;
+  min-width: 0;
   min-height: 0;
 }
 
@@ -982,4 +1083,105 @@ label.row:hover {
   .mic-meter-bar {
     transition: none;
   }
+}
+
+/* -------------------------------------------------------------- quick copy */
+
+.qc-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin: 0 0 18px;
+}
+
+.qc-status {
+  font-size: 12px;
+  color: #6b7280;
+}
+
+.qc-status.dirty {
+  color: #fbbf24;
+}
+
+.qc-list {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.qc-card {
+  border: 1px solid #2c2c34;
+  border-radius: 8px;
+  background: #1b1b21;
+  padding: 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.qc-top {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.qc-name,
+.qc-text {
+  width: 100%;
+  background: #24242c;
+  color: #eaeaea;
+  border: 1px solid #34343e;
+  border-radius: 6px;
+  padding: 6px 8px;
+  font: inherit;
+}
+
+.qc-name {
+  font-weight: 600;
+}
+
+.qc-text {
+  resize: vertical;
+  min-height: 68px;
+  line-height: 1.5;
+  font-size: 13px;
+  white-space: pre-wrap;
+}
+
+.qc-name:focus,
+.qc-text:focus {
+  outline: none;
+  border-color: #4c6ef5;
+}
+
+.qc-remove {
+  flex: none;
+  width: 28px;
+  height: 28px;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: #6b7280;
+  font: inherit;
+  font-size: 12px;
+  line-height: 1;
+  cursor: default;
+}
+
+.qc-remove:hover {
+  background: #e11d48;
+  color: #fff;
+}
+
+/* Flagged after a save that dropped this card: an empty shorthand has nothing
+   to put on the clipboard, so the tray skips it. Say so rather than deleting
+   the card out from under someone who is still writing it. */
+.qc-card.incomplete {
+  border-color: #b45309;
+}
+
+.qc-card.incomplete::after {
+  content: 'Needs some text before it can appear in the tray.';
+  font-size: 11px;
+  color: #d97706;
 }

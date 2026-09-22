@@ -42,8 +42,7 @@ Local-only meeting notes app for Windows. Records mic + system audio, transcribe
 │       ├── pcm-worklet.js # AudioWorklet that ships PCM to main
 │       ├── preload.js     # contextBridge exposing IPC to renderer
 │       ├── transcript.*   # Live transcript window (page, styles, view, preload)
-│       ├── library.*      # Meeting library window (page, styles, view, preload)
-│       ├── snippets.*     # Quick-copy editor window (page, styles, view, preload)
+│       ├── library.*      # The app window: sidebar + Recording, Quick copy, Settings
 │       ├── dictate-capture.*   # Mic-only worker behind the dictation hotkey
 │       ├── dictate-indicator.* # Floating "listening" pill (page, styles, view, preload)
 │       └── dictations.*        # Dictation history window (page, styles, view, preload)
@@ -195,8 +194,19 @@ The archive: a rail of every recording on the left, the notes and the full
 transcript on the right, and a search box that reads across both. Left-clicking
 the tray icon lands here, which makes it the app's front door and the only
 window opened without a meeting in progress — so it also carries the two things
-a front door needs: the green **+ New recording** button in the header, and the
-settings pane behind the button beside it.
+a front door needs: the green **+ New recording** button at the top of the
+rail, and the settings pane.
+
+**The window is a sidebar of features.** A permanent `.sidebar` on the left
+picks what the rest of the window shows — Recording (the rail and the reader),
+Quick copy, and Settings pinned to the bottom. Each is a `view.mode`
+(`SECTIONS` in `library.js`: `reader`, `quickcopy`, `settings`) and
+`showSection()` is the one way between them; the rail is shown only for
+`reader`. A new feature is a button at the end of `.nav-features`, a key in
+`SECTIONS` (and in `SECTIONS` in the preload, if main should be able to open
+onto it) and a render function. The title bar carries only the app icon, the
+name, the current section and the window controls — the record button and the
+meetings-folder button sit at the top of the rail they act on.
 
 **The folder on disk is the source of truth, and the window only reads it.**
 There is no index and no database — `listMeetings()` walks the notes folder on
@@ -347,15 +357,14 @@ a meeting stopped with Ollama down keeps its audio and loses its notes.
 so the daemon outlives this process; the CLI as fallback) and `openOllama()` in
 main waits for it to answer before saying anything.
 
-### Quick copy (`snippets.js` + the editor window)
+### Quick copy (`snippets.js` + the library window's Quick copy feature)
 
 The top section of the tray menu is a list of user-authored shorthands; clicking
 one puts its text on the clipboard, so a phrase typed several times a day costs
 two clicks. It sits above the recording controls deliberately — it is the one
 item here reached mid-meeting, and a row that never moves can be clicked without
 reading. The **list** is the part that has to be there; the editor behind it is
-configuration, so it opens from the library's settings pane
-(`settings:editQuickCopy`) with everything else that is set rather than used.
+the app window's **Quick copy** feature, one click down the sidebar.
 
 Stored in `snippets.json` rather than `settings.json`: the settings store coerces
 every value against a scalar default and drops the rest, which is what keeps a
@@ -364,11 +373,10 @@ shape. `normalize()` is the single gate — it runs on both the file and the IPC
 payload, keeps only `{ label, text }`, and drops any entry with an empty body
 since that could only ever be a dead menu row.
 
-The editor (`src/renderer/snippets.*`) is one of only two renderers in the app
-that write anything (the other is the dictations archive); all of its IPC
-channels check `event.sender.id` against the editor window. Saving refreshes the
-tray immediately, and closing saves first — the window is never a way to discard
-work.
+The editor is `renderQuickCopy` in `library.js`; both `snippets:*` channels
+check `event.sender.id` against the library window. It saves itself shortly
+after typing stops, on blur, on leaving the feature and before the window
+closes — never a way to discard work — and each save refreshes the tray.
 
 ### Voice input (`dictation.js`, `dictations.js`, `paste.js`)
 
@@ -610,9 +618,8 @@ Each stage in `pipeline.js` is a standalone async function (`transcribe`, `summa
 | `transcript:setLanguage` | transcript window → main | a language from the window's fixed list |
 | `transcript:copy` | transcript window → main | `string` for the clipboard — the "copy so far" button |
 | `transcript:close` | transcript window → main | — |
-| `snippets:list` | editor → main (invoke) | → `{ label, text }[]` |
-| `snippets:save` | editor → main (invoke) | `{ label, text }[]` → the list as stored |
-| `snippets:close` | editor → main | — |
+| `snippets:list` | library → main (invoke) | → `{ label, text }[]` |
+| `snippets:save` | library → main (invoke) | `{ label, text }[]` → the list as stored |
 | `dictations:list` | dictations window → main (invoke) | → `{ id, text, createdAt }[]`, newest first |
 | `dictations:update` | dictations window → main (invoke) | `{ id, text }` → the list, or `null` if the id is gone |
 | `dictations:remove` | dictations window → main (invoke) | `id` → the list, or `null` |
@@ -630,7 +637,7 @@ Each stage in `pipeline.js` is a standalone async function (`transcribe`, `summa
 | `library:delete` | library → main (invoke) | `id` → `{ ok, reason }`; main raises the confirmation itself |
 | `library:changed` | main → library | — (the folder changed; re-list) |
 | `library:progress` | main → library | `libraryActivity()` — a run advanced; update in place, read nothing |
-| `library:showSettings` | main → library | — (the tray's Settings… item) |
+| `library:show` | main → library | `'settings'` \| `'quickcopy'` — open the window onto that feature |
 | `library:minimize` / `library:close` | library → main | — |
 | `settings:get` | library → main (invoke) | → `settingsState()` |
 | `settings:set` | library → main (invoke) | patch → `settingsState()` |
@@ -642,7 +649,6 @@ Each stage in `pipeline.js` is a standalone async function (`transcribe`, `summa
 | `settings:testMic` | library → main (invoke) | → `{ ok, reason }` — opens the mic via the dictation worker for the settings pane's meter; records nothing |
 | `settings:testMicStop` | library → main (invoke) | → `settingsState()`, after closing the test mic |
 | `settings:micTest` | main → library | `{ testing, level, micLabel, micError }` — levels (~10/s), a mic status, or the end of the test; auto-stops after `MIC_TEST_MAX_MS` |
-| `settings:editQuickCopy` | library → main | — (opens the shorthand editor) |
 | `settings:openDictations` | library → main | — (opens the dictations archive) |
 | `settings:changed` | main → library | — (a setting, a model list or Ollama changed) |
 
