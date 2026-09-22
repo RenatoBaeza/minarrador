@@ -301,36 +301,6 @@ main {
   color: #6b7280;
 }
 
-/* The rail filters — All / Needs notes / This week. A segmented row rather than
-   a dropdown: the three views of the archive are a toggle, not a form. */
-.filters {
-  display: flex;
-  gap: 4px;
-  padding: 10px 12px 0;
-}
-
-.filter {
-  flex: 1;
-  border: 1px solid transparent;
-  border-radius: 6px;
-  background: transparent;
-  color: #9ca3af;
-  font: inherit;
-  font-size: 11.5px;
-  padding: 4px 8px;
-  cursor: default;
-}
-
-.filter:hover {
-  color: #eaeaea;
-}
-
-.filter.active {
-  background: #24242c;
-  border-color: #34343e;
-  color: #eaeaea;
-}
-
 .count {
   padding: 8px 14px 4px;
   font-size: 11px;
@@ -1321,66 +1291,132 @@ label.row:hover {
 .qc-list {
   display: flex;
   flex-direction: column;
-  gap: 12px;
+  gap: 4px;
 }
 
+/* One shorthand, one row: name | text | edit | delete. The fields are
+   borderless until hovered or focused, so a list of them reads as a table
+   rather than a stack of forms. */
 .qc-card {
-  border: 1px solid #2c2c34;
-  border-radius: 8px;
+  display: grid;
+  grid-template-columns: minmax(110px, 190px) minmax(0, 1fr) auto auto;
+  align-items: start;
+  gap: 2px 6px;
+  border: 1px solid #26262e;
+  border-radius: 7px;
   background: #1b1b21;
-  padding: 10px;
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
+  padding: 3px 4px 3px 3px;
+  transition: border-color 0.12s;
 }
 
-.qc-top {
-  display: flex;
-  align-items: center;
-  gap: 8px;
+.qc-card:hover,
+.qc-card:focus-within {
+  border-color: #34343e;
 }
 
 .qc-name,
 .qc-text {
   width: 100%;
-  background: #24242c;
+  background: transparent;
   color: #eaeaea;
-  border: 1px solid #34343e;
-  border-radius: 6px;
-  padding: 6px 8px;
+  border: 1px solid transparent;
+  border-radius: 5px;
+  padding: 4px 7px;
   font: inherit;
+  font-size: 13px;
+  line-height: 20px;
 }
 
 .qc-name {
   font-weight: 600;
+  text-overflow: ellipsis;
 }
 
+.qc-field {
+  position: relative;
+  min-width: 0;
+}
+
+/* One line at rest; the whole text, up to a point, while it is being typed. */
 .qc-text {
-  resize: vertical;
-  min-height: 68px;
-  line-height: 1.5;
-  font-size: 13px;
+  display: block;
+  resize: none;
+  height: 30px;
+  overflow: hidden;
+  white-space: pre;
+  color: #c4c4cc;
+}
+
+.qc-text:focus {
+  field-sizing: content;
+  height: auto;
+  min-height: 30px;
+  max-height: 180px;
+  overflow: auto;
   white-space: pre-wrap;
+  color: #eaeaea;
+}
+
+.qc-name:hover,
+.qc-text:hover {
+  background: #202027;
 }
 
 .qc-name:focus,
 .qc-text:focus {
   outline: none;
+  background: #24242c;
   border-color: #4c6ef5;
 }
 
-.qc-remove {
+/* "+3 lines" — the part of a shorthand a one-line row cannot show. */
+.qc-more {
+  position: absolute;
+  top: 6px;
+  right: 6px;
+  padding: 1px 6px;
+  border-radius: 9px;
+  background: #2a2a33;
+  color: #9ca3af;
+  font-size: 10.5px;
+  line-height: 16px;
+  pointer-events: none;
+}
+
+.qc-text:focus + .qc-more {
+  display: none;
+}
+
+.qc-icon {
   flex: none;
   width: 28px;
   height: 28px;
+  margin-top: 1px;
   border: 0;
   border-radius: 6px;
   background: transparent;
   color: #6b7280;
   font: inherit;
-  font-size: 12px;
+  font-size: 13px;
   line-height: 1;
   cursor: default;
+}
+
+.qc-icon:hover {
+  background: #2e2e38;
+  color: #eaeaea;
+}
+
+.qc-icon:focus-visible {
+  outline: 1px solid #4c6ef5;
+}
+
+.qc-remove {
+  font-size: 11px;
+}
+
+.qc-edit {
+  font-size: 15px;
 }
 
 .qc-remove:hover {
@@ -1396,7 +1432,204 @@ label.row:hover {
 }
 
 .qc-card.incomplete::after {
+  grid-column: 1 / -1;
+  padding: 0 8px 3px;
   content: 'Needs some text before it can appear in the tray.';
   font-size: 11px;
   color: #d97706;
+}
+
+/* ------------------------------------------------------- quick copy editor */
+
+.qc-editor {
+  width: min(760px, calc(100vw - 48px));
+  height: min(620px, calc(100vh - 48px));
+  padding: 0;
+  border: 1px solid #34343e;
+  border-radius: 10px;
+  background: #1b1b21;
+  color: #eaeaea;
+  box-shadow: 0 24px 60px rgba(0, 0, 0, 0.55);
+  overflow: hidden;
+}
+
+.qc-editor[open] {
+  display: flex;
+  flex-direction: column;
+}
+
+.qc-editor::backdrop {
+  background: rgba(8, 8, 12, 0.6);
+}
+
+.qce-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 10px 8px 14px;
+  border-bottom: 1px solid #26262e;
+}
+
+.qce-name {
+  flex: 1;
+  min-width: 0;
+  background: transparent;
+  color: #eaeaea;
+  border: 1px solid transparent;
+  border-radius: 6px;
+  padding: 5px 8px;
+  font: inherit;
+  font-size: 15px;
+  font-weight: 600;
+}
+
+.qce-name:hover {
+  background: #202027;
+}
+
+.qce-name:focus {
+  outline: none;
+  background: #24242c;
+  border-color: #4c6ef5;
+}
+
+.qce-toolbar,
+.qce-find {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 10px;
+  border-bottom: 1px solid #26262e;
+  background: #19191e;
+}
+
+.qce-find[hidden] {
+  display: none;
+}
+
+.qce-group {
+  display: flex;
+  gap: 1px;
+  padding-right: 6px;
+  border-right: 1px solid #2c2c34;
+}
+
+.qce-group:last-child {
+  border-right: 0;
+}
+
+.qce-tool {
+  min-width: 28px;
+  height: 26px;
+  padding: 0 8px;
+  border: 1px solid transparent;
+  border-radius: 5px;
+  background: transparent;
+  color: #c4c4cc;
+  font: inherit;
+  font-size: 12px;
+  cursor: default;
+}
+
+/* Undo and redo are glyphs, which read small at the toolbar's text size. */
+.qce-group:first-child .qce-tool {
+  font-size: 16px;
+}
+
+.qce-tool:hover {
+  background: #2a2a33;
+  color: #fff;
+}
+
+.qce-tool[aria-pressed='true'] {
+  background: #26305a;
+  border-color: #3b5bdb;
+  color: #fff;
+}
+
+.qce-input {
+  flex: 1 1 140px;
+  min-width: 0;
+  height: 26px;
+  background: #24242c;
+  color: #eaeaea;
+  border: 1px solid #34343e;
+  border-radius: 5px;
+  padding: 0 8px;
+  font: inherit;
+  font-size: 12.5px;
+}
+
+.qce-input:focus {
+  outline: none;
+  border-color: #4c6ef5;
+}
+
+.qce-case {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 12px;
+  color: #9ca3af;
+}
+
+.qce-count {
+  min-width: 56px;
+  font-size: 11.5px;
+  color: #6b7280;
+}
+
+.qce-text {
+  flex: 1;
+  min-height: 0;
+  width: 100%;
+  resize: none;
+  border: 0;
+  padding: 14px 16px;
+  background: #1b1b21;
+  color: #eaeaea;
+  font: inherit;
+  font-size: 14px;
+  line-height: 1.6;
+  tab-size: 4;
+  white-space: pre-wrap;
+}
+
+.qce-text:focus {
+  outline: none;
+}
+
+.qce-text.nowrap {
+  white-space: pre;
+  overflow-x: auto;
+}
+
+.qce-text.mono {
+  font-family: 'Cascadia Mono', Consolas, 'Courier New', monospace;
+  font-size: 13px;
+}
+
+.qce-foot {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 10px 8px 16px;
+  border-top: 1px solid #26262e;
+  background: #19191e;
+}
+
+.qce-stats {
+  flex: 1;
+  min-width: 0;
+  font-size: 11.5px;
+  color: #6b7280;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.qce-stats.full {
+  color: #fbbf24;
 }

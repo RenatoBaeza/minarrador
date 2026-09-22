@@ -8,18 +8,6 @@ const hint = document.getElementById('hint');
 // Not `status`: that name is a built-in window property and assigning to it
 // would silently write to the browser status bar instead of this element.
 const statusEl = document.getElementById('status');
-const langSelect = document.getElementById('langSelect');
-
-const LANGUAGE_LABELS = { '': 'Auto-detect' };
-
-for (const lang of window.transcript.languages) {
-  const option = document.createElement('option');
-  option.value = lang;
-  option.textContent = LANGUAGE_LABELS[lang] ?? lang;
-  langSelect.append(option);
-}
-
-langSelect.addEventListener('change', (e) => window.transcript.setLanguage(e.target.value));
 
 // The window is frameless, so closing it is this button's job — or Escape, the
 // habit for a panel that sits on top of whatever meeting is being recorded.

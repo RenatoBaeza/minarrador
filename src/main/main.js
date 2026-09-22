@@ -1268,13 +1268,7 @@ function writeResumeNote(dir, reason) {
   }
 }
 
-/**
- * @param {{ reveal?: boolean }} [options] `reveal` opens the finished folder in
- *   Explorer. On by default for the tray, where there is nowhere else to land;
- *   off when the library stopped the recording, since that window is already
- *   showing the meeting and will fill in the notes on its own.
- */
-async function stopRecording({ reveal = true } = {}) {
+async function stopRecording() {
   const finished = await finalizeRecording();
   if (!finished) return;
 
@@ -1303,15 +1297,9 @@ async function stopRecording({ reveal = true } = {}) {
   }
   notify('Recording saved', `${fmtDuration(finished.meta.durationSeconds)} captured. ${plan}`, onClick);
 
-  // Opening Explorer is the "your notes are ready" signal, so it waits for the
-  // whole chain — transcription, notes, and the PDF export that ends it. A run
-  // that failed leaves a half-written folder with no brief in it; that case gets
-  // the failure notification, not a folder popped open as though it were done.
-  const out = await processMeeting(finished.dir, finished.meta);
-  if (!out || !reveal) return;
-
-  const err = await shell.openPath(finished.dir);
-  if (err) log.warn('could not open the notes folder:', err);
+  // The folder is never opened on its own: the completion notification is the
+  // "your notes are ready" signal, and clicking it is what opens the folder.
+  await processMeeting(finished.dir, finished.meta);
 }
 
 // --------------------------------------------------------------- post-process
@@ -1901,14 +1889,6 @@ if (!app.requestSingleInstanceLock()) {
     });
   });
 
-  // The transcript window is the only renderer allowed to change this, and the
-  // preload restricts it to a known list before it ever reaches here.
-  ipcMain.on('transcript:setLanguage', (event, lang) => {
-    if (event.sender.id !== transcriptionWindow?.webContents.id) return;
-    capture?.configureLive({ language: typeof lang === 'string' ? lang : '' });
-    log.info('live transcript language ->', lang || 'auto');
-  });
-
   // Frameless windows have no system close button, so the page asks for one.
   ipcMain.on('transcript:close', (event) => {
     if (event.sender.id !== transcriptionWindow?.webContents.id) return;
@@ -1984,8 +1964,7 @@ if (!app.requestSingleInstanceLock()) {
     if (!fromLibrary(event)) return { meetings: [], activity: libraryActivity() };
     try {
       const query = typeof req?.query === 'string' ? req.query : '';
-      const filter = typeof req?.filter === 'string' ? req.filter : 'all';
-      return { meetings: library.listMeetings(settings.notesDir, { query, filter }), activity: libraryActivity() };
+      return { meetings: library.listMeetings(settings.notesDir, { query }), activity: libraryActivity() };
     } catch (err) {
       log.error('library list failed', err);
       return { meetings: [], activity: libraryActivity() };
@@ -2065,7 +2044,7 @@ if (!app.requestSingleInstanceLock()) {
     if (on) {
       startRecording();
     } else {
-      stopRecording({ reveal: false }).catch((err) => log.error('stop from the library failed', err));
+      stopRecording().catch((err) => log.error('stop from the library failed', err));
     }
     return true;
   });
@@ -2347,6 +2326,9 @@ if (!app.requestSingleInstanceLock()) {
       toggleDictation,
       openLibrary: () => showLibraryWindow(),
       openQuickCopy: () => showLibraryWindow({ section: 'quickcopy' }),
+      // before-quit does the careful part: a meeting mid-recording is closed and
+      // left with a resume note rather than lost.
+      quit: () => app.quit(),
     });
 
     await capture.init();

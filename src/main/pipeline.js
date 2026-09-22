@@ -436,6 +436,7 @@ async function renderPdf(dir, config, { onProgress, signal, ollama, notes, meta 
   if (!/<html[\s>]/i.test(html) || !/<\/html>/i.test(html)) {
     html = fallbackHtml(notes, meta); // Model went off-script; ship a clean document anyway.
   }
+  html = withTranscript(html, transcriptHtml(dir));
 
   const htmlPath = path.join(dir, FILES.html);
   const pdfPath = path.join(dir, FILES.pdf);
@@ -470,6 +471,77 @@ function cleanHtml(raw) {
 }
 
 const esc = (s) => String(s).replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' })[c]);
+
+/** m:ss, or h:mm:ss past the hour — where in the recording a line was said. */
+function fmtOffset(seconds) {
+  const t = Math.max(0, Math.floor(seconds || 0));
+  const h = Math.floor(t / 3600);
+  const m = Math.floor((t % 3600) / 60);
+  const s = String(t % 60).padStart(2, '0');
+  return h ? `${h}:${String(m).padStart(2, '0')}:${s}` : `${m}:${s}`;
+}
+
+/**
+ * The full transcript as an HTML section for the end of the PDF.
+ *
+ * Built here rather than handed to the model: an hour of speech is far more
+ * than a design prompt should carry, and a transcript that went through a model
+ * again could come back paraphrased. Reads transcript.json for timestamps and
+ * speakers, and falls back to transcript.txt for a folder that only has that.
+ *
+ * @returns {string} the section, or '' when there is no transcript to add
+ */
+function transcriptHtml(dir) {
+  let lines = [];
+  try {
+    const { segments } = JSON.parse(fs.readFileSync(path.join(dir, FILES.transcriptJson), 'utf8'));
+    lines = (segments ?? [])
+      .filter((s) => String(s.text ?? '').trim())
+      .map((s) => ({ at: fmtOffset(s.startSeconds), who: SPEAKERS[s.speaker] ?? '', text: String(s.text).trim() }));
+  } catch {
+    try {
+      lines = fs
+        .readFileSync(path.join(dir, FILES.transcript), 'utf8')
+        .split(/\n\s*\n/)
+        .map((t) => t.trim())
+        .filter(Boolean)
+        .map((text) => ({ at: '', who: '', text }));
+    } catch {}
+  }
+  if (!lines.length) return '';
+
+  const rows = lines
+    .map(
+      (l) =>
+        `<p>${l.at ? `<span class="mn-at">${esc(l.at)}</span>` : ''}` +
+        `${l.who ? `<span class="mn-who">${esc(l.who)}</span>` : ''}${esc(l.text)}</p>`,
+    )
+    .join('\n    ');
+
+  // Scoped class names, so the section reads the same under whatever styles the
+  // model gave the brief above it.
+  return `
+<section class="mn-transcript">
+  <style>
+    .mn-transcript { page-break-before: always; break-before: page; font-family: "Segoe UI", system-ui, sans-serif; color: #1e1b30; font-size: 10pt; line-height: 1.5; }
+    .mn-transcript h2 { font-size: 12pt; text-transform: uppercase; letter-spacing: .09em; color: #4F46E5; margin: 0 0 14px; padding-bottom: 8px; border-bottom: 2px solid #e5e7eb; }
+    .mn-transcript p { margin: 0 0 8px; }
+    .mn-transcript .mn-at { color: #9ca3af; font-size: 8.5pt; font-variant-numeric: tabular-nums; margin-right: 8px; }
+    .mn-transcript .mn-who { font-weight: 600; color: #312e81; margin-right: 6px; }
+    .mn-transcript .mn-who::after { content: ":"; }
+  </style>
+  <h2>Full transcript</h2>
+    ${rows}
+</section>
+`;
+}
+
+/** Appends the transcript section to a brief, just before its closing body tag. */
+function withTranscript(html, section) {
+  if (!section) return html;
+  const at = html.search(/<\/body>(?![\s\S]*<\/body>)/i);
+  return at === -1 ? html.replace(/<\/html>\s*$/i, `${section}</html>`) : html.slice(0, at) + section + html.slice(at);
+}
 
 function fallbackHtml(notes, meta) {
   const rows = notes.action_items.length

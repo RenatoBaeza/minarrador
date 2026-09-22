@@ -86,21 +86,12 @@ header {
 .controls {
   display: flex;
   align-items: center;
+  justify-content: flex-end;
   gap: 8px;
   padding: 10px 16px;
   border-bottom: 1px solid #2c2c34;
   font-size: 12px;
   color: #9ca3af;
-}
-
-select {
-  flex: 1;
-  background: #24242c;
-  color: #eaeaea;
-  border: 1px solid #34343e;
-  border-radius: 6px;
-  padding: 5px 8px;
-  font: inherit;
 }
 
 /* The copy-so-far button: quiet, like the window it lives in, and it says what

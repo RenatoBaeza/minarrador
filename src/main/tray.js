@@ -100,9 +100,10 @@ class AppTray {
     // The shortcut rides on the label, so the menu doubles as a reminder of it.
     const withKey = (label, key) => (key ? `${label} (${key})` : label);
 
-    // Three things, nothing else: the shorthands, and the two ways to capture
-    // speech. Everything configured or browsed lives in the library window,
-    // which a left-click opens.
+    // The shorthands, the two ways to capture speech, and the way out.
+    // Everything configured or browsed lives in the library window, which a
+    // left-click opens. A tray-only app has no window whose close means "quit",
+    // so without the last item the only exit is Task Manager.
     const template = [
       { label: 'Quick copy', enabled: false },
       ...(snippets.length
@@ -122,6 +123,13 @@ class AppTray {
             label: withKey(dictation.active ? 'Stop dictation' : 'Start dictation', dictation.hotkey),
             click: () => a.toggleDictation(),
           },
+      { type: 'separator' },
+      {
+        // Quitting mid-meeting saves the audio and skips the notes, so say so
+        // where the click happens rather than only afterwards.
+        label: state === 'recording' ? 'Quit Minarrador (saves the recording)' : 'Quit Minarrador',
+        click: () => a.quit(),
+      },
     ];
 
     this.tray.setContextMenu(Menu.buildFromTemplate(template));

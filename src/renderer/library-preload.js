@@ -79,10 +79,8 @@ contextBridge.exposeInMainWorld('library', {
   speakers: SPEAKERS,
   /**
    * @param {string} query filters by title and transcript text; '' lists everything
-   * @param {'all'|'needs'|'recent'} filter narrows the archive: meetings still
-   *   owed notes, or this week's. main checks the value, as it checks everything.
    */
-  list: (query, filter) => ipcRenderer.invoke('library:list', { query: String(query ?? ''), filter }),
+  list: (query) => ipcRenderer.invoke('library:list', { query: String(query ?? '') }),
   read: (id) => ipcRenderer.invoke('library:read', String(id ?? '')),
   /** @returns {Promise<boolean>} false when the file is not there to open. */
   open: (id, target) =>

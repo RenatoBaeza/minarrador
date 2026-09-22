@@ -58,7 +58,8 @@ Local-only meeting notes app for Windows. Records mic + system audio, transcribe
 No main window is shown at startup. A hidden `BrowserWindow` exists solely to run the Web Audio API (unavailable in the main process). The tray icon is the app: **left-click opens the meeting library, right-click opens the menu.** Nothing is bound to double-click — Windows sends a plain click first, so a second action there would always arrive with the library already opening. Every other window (library, live transcript, quick-copy editor, dictations archive) is opened on demand, frameless, dark, and single-instance.
 
 The menu is deliberately short: the quick-copy list, *Record meeting* and
-*Start dictation*, each labelled with its shortcut. The recording clock and
+*Start dictation*, each labelled with its shortcut, and *Quit Minarrador* at the
+bottom — the only way out of a tray-only app short of Task Manager. The recording clock and
 pipeline progress are in the icon's tooltip.
 Everything that is *configured* rather than *done* lives in the library window —
 a menu is a poor place to be told that a model is not installed.
@@ -373,7 +374,12 @@ shape. `normalize()` is the single gate — it runs on both the file and the IPC
 payload, keeps only `{ label, text }`, and drops any entry with an empty body
 since that could only ever be a dead menu row.
 
-The editor is `renderQuickCopy` in `library.js`; both `snippets:*` channels
+The editor is `renderQuickCopy` in `library.js`: one compact row per shorthand
+(name, first line of text, edit, delete), with the pencil opening a modal
+`<dialog>` editor (`openQuickCopyEditor`) — case, trim, join, bullets, date/time,
+find and replace, wrap/mono toggles and a live count against the store's limit.
+Every tool edits through `execCommand('insertText')` so Ctrl+Z undoes it, and
+closing keeps the edit; only *Discard changes* throws it away. Both `snippets:*` channels
 check `event.sender.id` against the library window. It saves itself shortly
 after typing stops, on blur, on leaving the feature and before the window
 closes — never a way to discard work — and each save refreshes the tray.
@@ -438,7 +444,7 @@ with a notification.
    The tail of each chunk is passed to the next as `prompt`, exactly as the live
    preview does
 2. **Summarise** — sends full transcript (or condensed version for long meetings) to Ollama, outputs structured JSON: title, 5-bullet summary, decisions, action items
-3. **Render PDF** — asks Ollama to generate a print-ready HTML brief, converts to PDF via a headless `BrowserWindow`, deletes the intermediate HTML
+3. **Render PDF** — asks Ollama to generate a print-ready HTML brief, converts to PDF via a headless `BrowserWindow`, deletes the intermediate HTML. The full transcript (timestamped, speaker-labelled) is appended on its own pages by `transcriptHtml()` — built in code from `transcript.json`, never passed through the model, so it is neither paraphrased nor a burden on the design prompt
 
 Each step writes its artefact immediately, so a late failure never loses earlier work.
 
@@ -615,7 +621,6 @@ Each stage in `pipeline.js` is a standalone async function (`transcribe`, `summa
 | `dictate:state` | main → indicator | `{ state, text, error }` — listening / transcribing / done / error |
 | `transcript:clear` / `transcript:line` | main → transcript window | — \| `{ text, speaker }` — the live preview, line by line |
 | `transcript:state` | main → transcript window | `{ recording, label, engine }` |
-| `transcript:setLanguage` | transcript window → main | a language from the window's fixed list |
 | `transcript:copy` | transcript window → main | `string` for the clipboard — the "copy so far" button |
 | `transcript:close` | transcript window → main | — |
 | `snippets:list` | library → main (invoke) | → `{ label, text }[]` |
@@ -626,7 +631,7 @@ Each stage in `pipeline.js` is a standalone async function (`transcribe`, `summa
 | `dictations:copy` | dictations window → main | `string` for the clipboard |
 | `dictations:close` | dictations window → main | — |
 | `dictations:changed` | main → dictations window | — (a dictation landed; re-list) |
-| `library:list` | library → main (invoke) | `{ query, filter }` → `{ meetings, activity }` — `filter` is `'all'` \| `'needs'` (meetings still owed notes) \| `'recent'` (this week) |
+| `library:list` | library → main (invoke) | `{ query }` → `{ meetings, activity }` |
 | `library:read` | library → main (invoke) | `id` → the meeting, or `null` |
 | `library:open` | library → main (invoke) | `{ id, target }` → opened? |
 | `library:openNotesFolder` | library → main (invoke) | → opened? |
