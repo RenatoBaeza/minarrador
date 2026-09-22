@@ -375,7 +375,8 @@ payload, keeps only `{ label, text }`, and drops any entry with an empty body
 since that could only ever be a dead menu row.
 
 The editor is `renderQuickCopy` in `library.js`: one compact row per shorthand
-(name, first line of text, edit, delete), with the pencil opening a modal
+(grip, name, first line of text, edit, delete) — the grip drags a row to a new
+place (or Alt+↑/↓ from the keyboard), and the order saved is the tray's order — with the pencil opening a modal
 `<dialog>` editor (`openQuickCopyEditor`) — case, trim, join, bullets, date/time,
 find and replace, wrap/mono toggles and a live count against the store's limit.
 Every tool edits through `execCommand('insertText')` so Ctrl+Z undoes it, and

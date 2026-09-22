@@ -1791,6 +1791,29 @@ function refreshCardMore(row) {
 function quickCopyCard(snippet = { label: '', text: '' }) {
   const row = el('div', 'qc-card');
 
+  // The row is draggable only while the grip is held: a draggable ancestor
+  // would otherwise swallow the mouse gestures that select text in the fields.
+  const grip = el('button', 'qc-grip', '⋮⋮');
+  grip.type = 'button';
+  grip.title = 'Drag to reorder (or Alt+↑ / Alt+↓)';
+  grip.setAttribute('aria-label', 'Reorder shorthand');
+  grip.addEventListener('pointerdown', () => {
+    row.draggable = true;
+  });
+  grip.addEventListener('pointerup', () => {
+    row.draggable = false;
+  });
+  grip.addEventListener('keydown', (e) => {
+    if (!e.altKey || (e.key !== 'ArrowUp' && e.key !== 'ArrowDown')) return;
+    e.preventDefault();
+    const sibling = e.key === 'ArrowUp' ? row.previousElementSibling : row.nextElementSibling;
+    if (!sibling?.classList.contains('qc-card')) return;
+    if (e.key === 'ArrowUp') sibling.before(row);
+    else sibling.after(row);
+    grip.focus();
+    markQuickCopyDirty();
+  });
+
   const name = el('input', 'qc-name');
   name.type = 'text';
   name.maxLength = QUICK_COPY_MAX.label;
@@ -1826,7 +1849,7 @@ function quickCopyCard(snippet = { label: '', text: '' }) {
 
   const field = el('div', 'qc-field');
   field.append(text, more);
-  row.append(name, field, edit, remove);
+  row.append(grip, name, field, edit, remove);
   text.addEventListener('input', () => refreshCardMore(row));
   refreshCardMore(row);
   return row;
@@ -2268,6 +2291,49 @@ async function renderQuickCopy() {
   // Leaving a field is as good a moment as any to put it on disk.
   list.addEventListener('focusout', () => {
     if (quickCopy.dirty) saveQuickCopy();
+  });
+  // Drag to reorder. The card moves live under the pointer, so the drop is
+  // only a confirmation; the order on screen is the order saved, and the tray
+  // menu is rebuilt from that save.
+  let dragged = null;
+  let startIndex = -1;
+  const cardsOf = () => [...list.querySelectorAll('.qc-card')];
+  list.addEventListener('dragstart', (e) => {
+    dragged = e.target.closest?.('.qc-card');
+    if (!dragged) return;
+    startIndex = cardsOf().indexOf(dragged);
+    e.dataTransfer.effectAllowed = 'move';
+    e.dataTransfer.setData('text/plain', '');
+    dragged.classList.add('dragging');
+  });
+  list.addEventListener('dragover', (e) => {
+    if (!dragged) return;
+    e.preventDefault();
+    e.dataTransfer.dropEffect = 'move';
+    const after = cardsOf().find((card) => {
+      if (card === dragged) return false;
+      const box = card.getBoundingClientRect();
+      return e.clientY < box.top + box.height / 2;
+    });
+    if (after) {
+      if (after !== dragged.nextElementSibling) after.before(dragged);
+    } else if (list.lastElementChild !== dragged) {
+      list.append(dragged);
+    }
+  });
+  list.addEventListener('drop', (e) => {
+    if (dragged) e.preventDefault();
+  });
+  list.addEventListener('dragend', () => {
+    if (!dragged) return;
+    dragged.classList.remove('dragging');
+    dragged.draggable = false;
+    const moved = cardsOf().indexOf(dragged) !== startIndex;
+    dragged = null;
+    if (moved) {
+      markQuickCopyDirty();
+      saveQuickCopy();
+    }
   });
   add.addEventListener('click', () => {
     const row = quickCopyCard();
