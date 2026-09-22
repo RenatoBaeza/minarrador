@@ -57,8 +57,9 @@ Local-only meeting notes app for Windows. Records mic + system audio, transcribe
 
 No main window is shown at startup. A hidden `BrowserWindow` exists solely to run the Web Audio API (unavailable in the main process). The tray icon is the app: **left-click opens the meeting library, right-click opens the menu.** Nothing is bound to double-click — Windows sends a plain click first, so a second action there would always arrive with the library already opening. Every other window (library, live transcript, quick-copy editor, dictations archive) is opened on demand, frameless, dark, and single-instance.
 
-The menu is deliberately short: the quick-copy list, what is happening now,
-Start/Stop and *Generate Notes*, the four things to open, and Troubleshooting.
+The menu is deliberately short: the quick-copy list, *Record meeting* and
+*Start dictation*, each labelled with its shortcut. The recording clock and
+pipeline progress are in the icon's tooltip.
 Everything that is *configured* rather than *done* lives in the library window —
 a menu is a poor place to be told that a model is not installed.
 
@@ -239,8 +240,7 @@ checkout, npm and a terminal — none of which exist for anyone who installed th
 build, so the app's most likely failure (Ollama down at Stop) left a permanently
 dead folder. It now sends `library:reprocess`, and `reprocessMeeting()` in main
 re-runs `processMeeting`, which is re-runnable because every stage overwrites
-its own artefact. The same run is one click away in the tray, on the newest
-meeting still owed its notes (`state.retry`). Failures explain themselves in
+its own artefact. Failures explain themselves in
 place: `readMeeting` quotes the first line of `ERROR.txt` rather than telling
 someone to go and open it.
 
@@ -518,7 +518,7 @@ exists to make sure a folder either holds finished notes or explains itself:
   recording, which is the case that actually happens; a lid close suspends the
   machine regardless, so `powerMonitor.on('resume')` rebuilds the audio graph and
   re-arms it into the same file. `CaptureController.restart()` is the one path
-  for that, shared with the tray's *Restart Audio Capture*.
+  for that, shared with **Settings → Restart audio capture**.
 - **Only one caller can end a meeting.** There are now seven things that might —
   the tray, the shortcut, the library, silence, the duration cap, a full disk, a
   quit — and two arriving together used to mean two pipeline runs over one
@@ -650,6 +650,9 @@ Each stage in `pipeline.js` is a standalone async function (`transcribe`, `summa
 | `settings:testMicStop` | library → main (invoke) | → `settingsState()`, after closing the test mic |
 | `settings:micTest` | main → library | `{ testing, level, micLabel, micError }` — levels (~10/s), a mic status, or the end of the test; auto-stops after `MIC_TEST_MAX_MS` |
 | `settings:openDictations` | library → main | — (opens the dictations archive) |
+| `settings:openLog` | library → main (invoke) | → opened? |
+| `settings:copyDiagnostics` | library → main (invoke) | → `true`; main writes the diagnostics JSON to the clipboard |
+| `settings:restartCapture` | library → main (invoke) | → `true`, after `CaptureController.restart()` |
 | `settings:changed` | main → library | — (a setting, a model list or Ollama changed) |
 
 ## Important notes

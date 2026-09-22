@@ -161,6 +161,10 @@ contextBridge.exposeInMainWorld('library', {
     onMicTest: (fn) => ipcRenderer.on('settings:micTest', (_e, payload) => fn(payload ?? {})),
     /** Opens the dictations archive window, from the settings pane. */
     openDictations: () => ipcRenderer.send('settings:openDictations'),
+    /** Troubleshooting: each resolves true when it did what it says. */
+    openLog: () => ipcRenderer.invoke('settings:openLog'),
+    copyDiagnostics: () => ipcRenderer.invoke('settings:copyDiagnostics'),
+    restartCapture: () => ipcRenderer.invoke('settings:restartCapture'),
     /** A setting changed elsewhere, or an Ollama poll found (or lost) the daemon. */
     onChanged: (fn) => ipcRenderer.on('settings:changed', () => fn()),
   },

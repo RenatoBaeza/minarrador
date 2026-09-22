@@ -1,6 +1,6 @@
 'use strict';
 
-// File logger. The tray menu's "Open Log File" points here, so this is the one
+// File logger. Settings → "Open log file" points here, so this is the one
 // artefact a bug report is built from — which is precisely why it must never be
 // the thing that breaks. Every path below fails soft.
 

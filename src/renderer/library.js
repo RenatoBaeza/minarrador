@@ -405,58 +405,170 @@ function notesMarkdown(meeting) {
  * The clipboard gives no feedback of its own, and a button that does nothing
  * visible reads as one that did not work.
  */
-function copyButton(label, enabled, text) {
-  const button = el('button', 'button', label);
-  button.type = 'button';
-  button.disabled = !enabled;
-  if (enabled) {
-    button.addEventListener('click', () => {
-      window.library.copy(text());
-      button.textContent = 'Copied';
-      setTimeout(() => {
-        button.textContent = label;
-      }, 1200);
-    });
+/**
+ * Stroke paths for the side panel's icons, drawn on a 24-unit grid. Fixed
+ * strings built with createElementNS — nothing here is ever parsed as markup.
+ */
+const ICONS = {
+  pdf: ['M14 3H7a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V8z', 'M14 3v5h5', 'M9 13h6M9 17h4'],
+  folder: ['M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z'],
+  audio: ['M8 5v14l11-7z'],
+  copy: ['M8 8h12v12H8z', 'M16 8V6a2 2 0 0 0-2-2H6a2 2 0 0 0-2 2v8a2 2 0 0 0 2 2h2'],
+  check: ['M5 12l5 5L20 7'],
+  list: ['M9 6h11M9 12h11M9 18h11', 'M4 6l1 1 2-2M4 12l1 1 2-2M4 18l1 1 2-2'],
+  clock: ['M12 21a9 9 0 1 0 0-18 9 9 0 0 0 0 18z', 'M12 7v5l3 2'],
+  rename: ['M4 20h4L19 9l-4-4L4 16z', 'M13 7l4 4'],
+  trash: ['M4 7h16', 'M9 7V4h6v3', 'M6 7l1 13h10l1-13'],
+};
+
+function icon(name) {
+  const NS = 'http://www.w3.org/2000/svg';
+  const svg = document.createElementNS(NS, 'svg');
+  svg.setAttribute('viewBox', '0 0 24 24');
+  svg.setAttribute('aria-hidden', 'true');
+  svg.classList.add('icon');
+  for (const d of ICONS[name]) {
+    const path = document.createElementNS(NS, 'path');
+    path.setAttribute('d', d);
+    svg.append(path);
   }
+  return svg;
+}
+
+/**
+ * One row of the side panel: an icon and a label, with a tooltip that says why
+ * it is greyed out when it is. A disabled button that does not explain itself
+ * reads as a broken one.
+ */
+function panelButton({ label, tip = label, iconName, className = '', enabled = true, why, action, onClick }) {
+  const button = el('button', `panel-button${className ? ` ${className}` : ''}`);
+  button.type = 'button';
+  if (action) button.dataset.action = action;
+  const text = el('span', 'panel-label', label);
+  button.append(icon(iconName), text);
+  button.disabled = !enabled;
+  // The label can be hidden when the panel folds to a row of icons, so the
+  // tooltip always says the whole thing.
+  button.title = !enabled && why ? why : tip;
+  if (enabled) button.addEventListener('click', () => onClick(button, text));
   return button;
 }
 
-function actionBar(meeting) {
-  const bar = el('div', 'actions');
+/**
+ * A button that copies, and says so.
+ *
+ * The clipboard gives no feedback of its own, and a button that does nothing
+ * visible reads as one that did not work.
+ */
+function copyButton(label, enabled, text, { why, action, iconName = 'copy' } = {}) {
+  return panelButton({
+    label,
+    tip: `Copy ${label.toLowerCase()}`,
+    iconName,
+    enabled,
+    why,
+    action,
+    onClick: (button, labelEl) => {
+      window.library.copy(text());
+      labelEl.textContent = 'Copied';
+      button.classList.add('copied');
+      button.firstChild.replaceWith(icon('check'));
+      setTimeout(() => {
+        labelEl.textContent = label;
+        button.classList.remove('copied');
+        button.firstChild.replaceWith(icon(iconName));
+      }, 1200);
+    },
+  });
+}
 
-  const act = (label, className, enabled, onClick) => {
-    const button = el('button', className, label);
-    button.type = 'button';
-    button.disabled = !enabled;
-    if (enabled) button.addEventListener('click', () => onClick(button));
-    bar.append(button);
-    return button;
+/**
+ * The meeting's actions, as a panel beside the reading column rather than a
+ * row of buttons above it.
+ *
+ * Grouped by what they do — open a file, copy text out, change the archive —
+ * so the eye finds a verb before it reads a label, and pinned while the page
+ * scrolls so a transcript read to the end still has its copy button in reach.
+ * The destructive group sits last and apart, where it is never clicked on the
+ * way to something else.
+ */
+function actionPanel(meeting) {
+  const panel = el('aside', 'doc-panel');
+  panel.setAttribute('aria-label', 'Meeting actions');
+
+  const group = (heading, ...buttons) => {
+    const section = el('div', 'panel-group');
+    section.setAttribute('role', 'group');
+    section.setAttribute('aria-label', heading);
+    section.append(el('div', 'panel-heading', heading), ...buttons);
+    panel.append(section);
   };
 
-  act('Open PDF brief', 'button primary', meeting.files.pdf, () => window.library.open(meeting.id, 'pdf'));
-  act('Open folder', 'button', true, () => window.library.open(meeting.id, 'folder'));
-  act('Play audio', 'button', meeting.files.audio, () => window.library.open(meeting.id, 'audio'));
+  const noNotes = meeting.status === 'ready' ? '' : 'Available once the notes are written.';
+  const noTranscript = 'Available once there is a transcript.';
 
-  bar.append(
-    copyButton('Copy notes', meeting.status === 'ready', () => notesMarkdown(meeting)),
+  group(
+    'Open',
+    panelButton({
+      label: 'PDF brief',
+      tip: 'Open the PDF brief',
+      iconName: 'pdf',
+      className: 'primary',
+      enabled: meeting.files.pdf,
+      why: 'The PDF is written with the notes.',
+      onClick: () => window.library.open(meeting.id, 'pdf'),
+    }),
+    panelButton({
+      label: 'Play audio',
+      iconName: 'audio',
+      enabled: meeting.files.audio,
+      why: 'This meeting has no audio file.',
+      onClick: () => window.library.open(meeting.id, 'audio'),
+    }),
+    panelButton({
+      label: 'Show folder',
+      tip: 'Open the meeting folder',
+      iconName: 'folder',
+      onClick: () => window.library.open(meeting.id, 'folder'),
+    }),
+  );
+
+  group(
+    'Copy',
+    copyButton('Notes', meeting.status === 'ready', () => notesMarkdown(meeting), { why: noNotes }),
     // The single most-pasted thing a meeting produces, and until now the only
     // way at it was to open the PDF and retype it.
-    copyButton('Copy action items', meeting.actionItems.length > 0, () => actionItemsMarkdown(meeting)),
-    copyButton('Copy transcript', meeting.transcript.length > 0, () => transcriptText(meeting)),
+    copyButton('Action items', meeting.actionItems.length > 0, () => actionItemsMarkdown(meeting), {
+      why: 'No action items in this meeting.',
+      iconName: 'list',
+    }),
+    copyButton('Transcript', meeting.transcript.length > 0, () => transcriptText(meeting), {
+      why: noTranscript,
+      action: 'copy-transcript',
+    }),
     // The quote-able version: the same words with each line's [mm:ss] in front.
     // Only offered when the transcript actually has times to quote.
     copyButton(
-      'Copy with timestamps',
+      'With timestamps',
       meeting.transcript.some((line) => line.startSeconds !== null),
       () => transcriptText(meeting, true),
+      { why: 'This transcript has no timestamps.', iconName: 'clock' },
     ),
   );
 
-  // Editing the archive sits apart from reading it, at the other end of the row.
-  bar.append(el('span', 'spacer'));
-  act('Rename', 'button', true, () => startRename(meeting));
-  act('Delete', 'button danger', true, (button) => removeMeeting(meeting, button));
-  return bar;
+  // Editing the archive sits apart from reading it, at the bottom of the panel.
+  group(
+    'Manage',
+    panelButton({ label: 'Rename', tip: 'Rename this meeting', iconName: 'rename', onClick: () => startRename(meeting) }),
+    panelButton({
+      label: 'Delete',
+      tip: 'Move this meeting to the Recycle Bin',
+      iconName: 'trash',
+      className: 'danger',
+      onClick: (button) => removeMeeting(meeting, button),
+    }),
+  );
+  return panel;
 }
 
 /**
@@ -468,7 +580,7 @@ function actionBar(meeting) {
  * is a better permanent name than anything typed in a hurry.
  */
 function startRename(meeting) {
-  const heading = readerEl.querySelector('.doc h1');
+  const heading = readerEl.querySelector('.doc-header h1');
   if (!heading || view.renaming) return;
   view.renaming = true;
 
@@ -817,12 +929,23 @@ function transcriptView(meeting) {
 }
 
 function renderReader(meeting) {
-  const doc = el('div', 'doc');
+  // The heading spans the page; below it the reading column and the actions
+  // panel sit side by side, so nothing but the meeting stands between the
+  // title and what was said.
+  const page = el('div', 'doc-page');
+  const header = el('header', 'doc-header');
   const title = el('h1');
   title.append(highlighted(meeting.title, view.query));
-  doc.append(title, metaRow(meeting), actionBar(meeting), tabs(meeting));
+  header.append(title, metaRow(meeting));
+
+  const doc = el('div', 'doc');
+  doc.append(tabs(meeting));
   doc.append(view.tab === 'transcript' ? transcriptView(meeting) : notesView(meeting));
-  readerEl.replaceChildren(doc);
+
+  const body = el('div', 'doc-body');
+  body.append(doc, actionPanel(meeting));
+  page.append(header, body);
+  readerEl.replaceChildren(page);
 }
 
 // --------------------------------------------------------------- the settings
@@ -1417,6 +1540,45 @@ function storageSection(frag, s) {
   ]);
 }
 
+/**
+ * A button that says whether it worked, in place, then goes back to its label.
+ * A diagnostics copy or a capture restart otherwise has no visible result.
+ */
+async function runAction(button, busy, done, action) {
+  const label = button.textContent;
+  button.disabled = true;
+  button.textContent = busy;
+  const ok = await action().catch(() => false);
+  button.textContent = ok ? done : 'Failed';
+  setTimeout(() => {
+    button.textContent = label;
+    button.disabled = false;
+  }, 1500);
+}
+
+function troubleshootingSection(frag) {
+  group(frag, 'Troubleshooting', [
+    buttonRow({
+      title: 'Log file',
+      hint: 'What Minarrador has been doing, kept on this machine. The first thing to look at when something failed.',
+      label: 'Open log file',
+      onClick: (button) => runAction(button, 'Opening…', 'Opened', () => window.library.settings.openLog()),
+    }),
+    buttonRow({
+      title: 'Diagnostics',
+      hint: 'Versions, engines, devices and settings as text on the clipboard — no audio or transcripts.',
+      label: 'Copy diagnostics',
+      onClick: (button) => runAction(button, 'Copying…', 'Copied', () => window.library.settings.copyDiagnostics()),
+    }),
+    buttonRow({
+      title: 'Audio capture',
+      hint: 'Rebuilds the microphone and system-audio capture. A recording in progress continues into the same file.',
+      label: 'Restart audio capture',
+      onClick: (button) => runAction(button, 'Restarting…', 'Restarted', () => window.library.settings.restartCapture()),
+    }),
+  ]);
+}
+
 function voiceSection(frag, s) {
   const dh = s.dictateHotkey ?? { value: 'off', registered: false, choices: [] };
   const whisperInstalled = Boolean(s.whisper?.available);
@@ -1498,13 +1660,15 @@ function renderSettings() {
   liveSection(frag, s);
   voiceSection(frag, s);
   storageSection(frag, s);
+  troubleshootingSection(frag);
   doc.append(frag);
   // The whole pitch of the app, said where the privacy-sensitive settings live.
   doc.append(
     el(
       'p',
       'settings-foot',
-      'Everything Minarrador does runs on this machine — audio, transcripts and notes never leave it.',
+      'Everything Minarrador does runs on this machine — audio, transcripts and notes never leave it.' +
+        (s.version ? ` Version ${s.version}.` : ''),
     ),
   );
   readerEl.replaceChildren(doc);
@@ -2005,9 +2169,7 @@ document.addEventListener('keydown', (e) => {
     // what the "Copy transcript" action button does — click it, so the "Copied"
     // feedback comes along for free.
     if (view.mode !== 'reader' || e.target.closest('input, textarea')) return;
-    // Starts-with: the button reads "Copied" for a second after it copies, and
-    // a repeat keystroke should still land.
-    const copy = [...readerEl.querySelectorAll('.actions .button')].find((b) => b.textContent.startsWith('Copy transcript'));
+    const copy = readerEl.querySelector('[data-action="copy-transcript"]');
     if (copy && !copy.disabled) {
       e.preventDefault();
       copy.click();
@@ -2085,7 +2247,7 @@ window.library.settings.onMicTest((p) => {
   if (els.note && view.micTest.note) els.note.textContent = view.micTest.note;
 });
 
-// The tray's Settings… item, which opens this window straight onto the pane.
+// Main asking for a section, e.g. the tray's quick-copy "add one…" item.
 window.library.onShow((section) => showSection(section));
 
 // The settings are read at launch rather than when the pane is opened, because

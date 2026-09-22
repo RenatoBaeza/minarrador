@@ -491,7 +491,38 @@ main {
   margin: 0 auto;
 }
 
-.doc h1 {
+/* A meeting is a heading across the page, then the reading column with its
+   actions panel beside it. The reader is a size container so the panel can
+   fold above the text when the window is dragged narrow, whatever the rail
+   is doing. */
+.reader {
+  container-type: inline-size;
+}
+
+.doc-page {
+  max-width: 948px;
+  margin: 0 auto;
+}
+
+.doc-header {
+  margin-bottom: 4px;
+}
+
+.doc-body {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 196px;
+  gap: 36px;
+  align-items: start;
+}
+
+.doc-body > .doc {
+  max-width: 720px;
+  margin: 0;
+  min-width: 0;
+}
+
+.doc h1,
+.doc-header h1 {
   font-size: 26px;
   line-height: 1.2;
   letter-spacing: -0.02em;
@@ -511,11 +542,202 @@ main {
   color: #45454f;
 }
 
-.actions {
+/* ------------------------------------------------------------ actions panel */
+
+/* Pinned beside the text while it scrolls — the tabs sit 22px down the column,
+   so the panel starts level with them and stays there. */
+.doc-panel {
+  position: sticky;
+  top: 16px;
+  margin-top: 22px;
   display: flex;
-  flex-wrap: wrap;
-  gap: 8px;
-  margin: 18px 0 4px;
+  flex-direction: column;
+  gap: 18px;
+  padding-left: 20px;
+  border-left: 1px solid #24242c;
+}
+
+.panel-group {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+/* Last and apart: nothing destructive is on the way to anything else. */
+.panel-group:last-child {
+  padding-top: 14px;
+  border-top: 1px solid #24242c;
+}
+
+.panel-heading {
+  font-size: 10.5px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.09em;
+  color: #6b7280;
+  margin: 0 0 6px 8px;
+}
+
+.panel-button {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  border: 1px solid transparent;
+  border-radius: 6px;
+  background: transparent;
+  color: #c9c9d1;
+  font: inherit;
+  font-size: 13px;
+  text-align: left;
+  padding: 7px 8px;
+  cursor: default;
+}
+
+.panel-button .icon {
+  flex: none;
+  width: 16px;
+  height: 16px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.8;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  color: #8b8b98;
+}
+
+.panel-button:hover:not(:disabled) {
+  background: #24242c;
+  color: #fff;
+}
+
+.panel-button:hover:not(:disabled) .icon {
+  color: inherit;
+}
+
+.panel-button:disabled {
+  opacity: 0.4;
+}
+
+/* The one thing most people came to this meeting for. */
+.panel-button.primary {
+  background: #3b5bdb;
+  color: #fff;
+  margin-bottom: 4px;
+}
+
+.panel-button.primary .icon {
+  color: inherit;
+}
+
+.panel-button.primary:hover:not(:disabled) {
+  background: #4c6ef5;
+}
+
+.panel-button.copied,
+.panel-button.copied .icon {
+  color: #6ee7a0;
+}
+
+.panel-button.danger {
+  color: #e0808f;
+}
+
+.panel-button.danger .icon {
+  color: inherit;
+}
+
+.panel-button.danger:hover:not(:disabled) {
+  background: #e11d48;
+  color: #fff;
+}
+
+.doc-panel .notice-warn {
+  padding: 4px 8px 0;
+  line-height: 1.45;
+}
+
+/* Too narrow for two columns: the panel folds into a single toolbar of icons
+   above the text — rows of labelled buttons there would be exactly the clutter
+   the panel exists to avoid. The labels stay in the DOM for screen readers and
+   every button carries a tooltip; only the PDF, the primary action, keeps its
+   words. Groups become dividers. */
+@container (max-width: 620px) {
+  .doc-body {
+    grid-template-columns: minmax(0, 1fr);
+    gap: 0;
+  }
+
+  .doc-panel {
+    order: -1;
+    position: static;
+    flex-direction: row;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 6px;
+    margin-top: 16px;
+    padding-left: 0;
+    border-left: 0;
+  }
+
+  .panel-group,
+  .panel-group:last-child {
+    flex-direction: row;
+    gap: 2px;
+    padding: 0 0 0 6px;
+    border-top: 0;
+    border-left: 1px solid #2c2c34;
+  }
+
+  .panel-group:first-child {
+    padding-left: 0;
+    border-left: 0;
+  }
+
+  .panel-group:last-child {
+    margin-left: auto;
+  }
+
+  .panel-heading {
+    display: none;
+  }
+
+  .panel-button {
+    width: auto;
+    padding: 6px;
+  }
+
+  .panel-button:not(.primary) .panel-label {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    overflow: hidden;
+    clip-path: inset(50%);
+    white-space: nowrap;
+  }
+
+  .panel-button.primary {
+    margin: 0 4px 0 0;
+    padding: 6px 12px 6px 10px;
+  }
+}
+
+/* The window at its narrowest: even the PDF becomes an icon, so the toolbar
+   stays one row. */
+@container (max-width: 470px) {
+  .panel-button.primary {
+    padding: 6px;
+    margin: 0;
+  }
+
+  .panel-button.primary .panel-label {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    overflow: hidden;
+    clip-path: inset(50%);
+    white-space: nowrap;
+  }
 }
 
 .button {
@@ -559,13 +781,6 @@ main {
   background: #e11d48;
   border-color: #e11d48;
   color: #fff;
-}
-
-/* Pushes rename and delete to the far end of the action row, away from the
-   buttons that only ever read something. */
-.actions .spacer {
-  flex: 1;
-  min-width: 12px;
 }
 
 /* The title, while it is being typed. Sized to sit exactly where the heading

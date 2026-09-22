@@ -336,15 +336,6 @@ function showTranscriptWindow() {
   return transcriptionWindow;
 }
 
-function toggleTranscriptWindow() {
-  if (transcriptionWindow && !transcriptionWindow.isDestroyed() && transcriptionWindow.isVisible()) {
-    transcriptionWindow.close();
-    return;
-  }
-  showTranscriptWindow();
-  sendToTranscript('transcript:state', transcriptState());
-}
-
 /**
  * The dictations archive: everything the voice-input hotkey has transcribed.
  *
@@ -780,6 +771,7 @@ function notifySettings() {
  */
 function settingsState() {
   return {
+    version: app.getVersion(),
     settings,
     defaults: settingsStore.defaults(),
     models: state.models,
@@ -951,18 +943,11 @@ function refreshTray() {
     state: state.phase,
     elapsed: capture?.elapsedSeconds ?? 0,
     progress: state.progress,
-    settings,
-    status: capture?.status ?? {},
-    ollamaUp: state.ollamaUp,
-    ollamaChecking: state.ollamaChecking,
-    whisper: whisper?.describe() ?? null,
-    liveEngine: capture?.liveTranscriber.engine ?? settings?.liveEngine,
     // The target folder, so a hover over the tray can name the meeting being
     // captured rather than only count its minutes.
     currentDir: state.phase === 'recording' && state.currentDir ? path.basename(state.currentDir) : '',
-    lastDir: state.lastDir,
-    retry: state.retry,
     snippets: snippetsStore.load(),
+    hotkey: settings.hotkey === 'off' ? '' : hotkeyLabel(settings.hotkey),
     dictation: {
       active: Boolean(dictation?.active),
       transcribing: Boolean(dictation?.transcribing),
@@ -2144,6 +2129,26 @@ if (!app.requestSingleInstanceLock()) {
     showDictationsWindow();
   });
 
+  // Troubleshooting. None of the three takes anything from the page: the log
+  // path, the diagnostics and the capture worker are all main's own.
+  ipcMain.handle('settings:openLog', async (event) => {
+    if (!fromLibrary(event)) return false;
+    return (await shell.openPath(log.path)) === '';
+  });
+  ipcMain.handle('settings:copyDiagnostics', (event) => {
+    if (!fromLibrary(event)) return false;
+    clipboard.writeText(diagnostics());
+    return true;
+  });
+  // Rebuilding is the controller's job, because a recording in progress has to
+  // be re-armed into the same file afterwards — this and the wake-from-sleep
+  // handler both want exactly that.
+  ipcMain.handle('settings:restartCapture', async (event) => {
+    if (!fromLibrary(event)) return false;
+    await capture.restart();
+    return true;
+  });
+
   // The way out of an install that cannot transcribe anything. Both take
   // minutes, so both report progress through settings:changed rather than
   // leaving the pane on a spinner, and both can be called off.
@@ -2295,7 +2300,7 @@ if (!app.requestSingleInstanceLock()) {
           'Audio capture has stopped',
           wasRecording
             ? 'The capture worker keeps crashing. Stop the recording to keep what was captured so far.'
-            : 'The capture worker keeps crashing. Try Troubleshooting → Restart Audio Capture.',
+            : 'The capture worker keeps crashing. Try Settings → Restart audio capture.',
         );
       } else if (wasRecording) {
         notify('Audio capture restarted', 'A few seconds of the meeting were lost. Recording continues into the same file.');
@@ -2339,33 +2344,9 @@ if (!app.requestSingleInstanceLock()) {
     tray = new AppTray({
       startRecording,
       stopRecording,
-      openLast: () => {
-        if (!state.lastDir) return;
-        const pdf = path.join(state.lastDir, FILES.pdf);
-        shell.openPath(fs.existsSync(pdf) ? pdf : state.lastDir);
-      },
-      openLog: () => shell.openPath(log.path),
-      openOllama,
-      // The tray's way out of a meeting that lost its notes, for someone who is
-      // not going to open a window to find the same button.
-      retryNotes: () => {
-        if (!state.retry) return;
-        const { ok, reason } = reprocessMeeting(state.retry.id);
-        if (!ok) notify('Cannot generate those notes', reason);
-      },
-      openLibrary: () => showLibraryWindow(),
-      openSettings: () => showLibraryWindow({ section: 'settings' }),
-      openQuickCopy: () => showLibraryWindow({ section: 'quickcopy' }),
-      toggleTranscript: toggleTranscriptWindow,
       toggleDictation,
-      openDictations: () => showDictationsWindow(),
-      diagnostics,
-      // Rebuilding is the controller's job now, because a recording in progress
-      // has to be re-armed into the same file afterwards — the tray and the
-      // wake-from-sleep handler both want exactly that.
-      restartCapture: () => capture.restart(),
-      // before-quit owns the shutdown sequence, including its re-entrancy guard.
-      quit: () => app.quit(),
+      openLibrary: () => showLibraryWindow(),
+      openQuickCopy: () => showLibraryWindow({ section: 'quickcopy' }),
     });
 
     await capture.init();

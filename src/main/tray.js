@@ -1,6 +1,6 @@
 'use strict';
 
-const { Tray, Menu, nativeImage, shell, app, clipboard } = require('electron');
+const { Tray, Menu, nativeImage, clipboard } = require('electron');
 const path = require('node:path');
 
 const ASSETS = path.join(__dirname, '..', '..', 'assets');
@@ -65,33 +65,18 @@ class AppTray {
    * @param {'idle'|'recording'|'processing'} view.state
    * @param {number} view.elapsed seconds recorded so far
    * @param {string} view.progress human-readable pipeline progress
-   * @param {object} view.settings
-   * @param {object} view.status capture source status
-   * @param {boolean} view.ollamaUp
-   * @param {boolean} view.ollamaChecking Ollama is being started or looked for
-   * @param {object|null} view.whisper WhisperServer.describe(), or null
-   * @param {'whisper'|'ollama'} view.liveEngine the engine actually in use
-   * @param {string|null} view.lastDir most recent finished meeting folder
-   * @param {{ id: string, label: string }|null} view.retry newest meeting still
-   *   owed its notes, which the Retry item would run
+   * @param {string} view.currentDir the folder being recorded into, if any
    * @param {{ label: string, text: string }[]} view.snippets quick-copy shorthands
+   * @param {string} view.hotkey the recording shortcut, '' when off
    * @param {{ active: boolean, transcribing: boolean, hotkey: string }} view.dictation
-   *   voice-input state for the section below the recording controls
    */
   update(view) {
     const {
       state,
       elapsed,
       progress,
-      settings,
-      status,
-      ollamaUp,
-      ollamaChecking,
-      whisper,
-      liveEngine,
-      lastDir,
-      retry = null,
       snippets = [],
+      hotkey = '',
       dictation = { active: false, transcribing: false, hotkey: '' },
     } = view;
     const a = this.actions;
@@ -108,22 +93,18 @@ class AppTray {
         : state === 'processing'
           ? progress || 'Processing…'
           : 'Idle';
-    // The tooltip names the meeting being captured, so a hover over the icon is
-    // the one glance that says which folder will hold the notes.
+    // The menu no longer carries a status line, so the tooltip is where the
+    // clock and the meeting's folder are read.
     this.tray.setToolTip(`Minarrador — ${headline}${view.currentDir ? ` — ${view.currentDir}` : ''}`);
 
-    const sources = [
-      status.micOk ? 'Mic ✓' : settings.captureMic ? 'Mic ✗' : 'Mic off',
-      status.systemOk ? 'System audio ✓' : settings.captureSystem ? 'System audio ✗' : 'System audio off',
-    ].join('   ');
+    // The shortcut rides on the label, so the menu doubles as a reminder of it.
+    const withKey = (label, key) => (key ? `${label} (${key})` : label);
 
-    // Quick copy sits above everything, including the recording controls: it is
-    // the one thing here reached mid-sentence in a meeting, and a menu item that
-    // never moves is one that can be clicked without reading.
+    // Three things, nothing else: the shorthands, and the two ways to capture
+    // speech. Everything configured or browsed lives in the library window,
+    // which a left-click opens.
     const template = [
       { label: 'Quick copy', enabled: false },
-      // The list stays here — it is the whole point of the section — but the
-      // editor behind it is the library window's Quick copy feature.
       ...(snippets.length
         ? snippets.map((snippet) => ({
             label: snippetLabel(snippet),
@@ -131,101 +112,16 @@ class AppTray {
           }))
         : [{ label: 'No shorthands yet — add one…', click: () => a.openQuickCopy() }]),
       { type: 'separator' },
-
-      { label: headline, enabled: false },
-      { label: sources, enabled: false },
-      ...(state === 'recording' && settings.liveTranscript
-        ? [
-            {
-              label: `Live: ${
-                liveEngine === 'whisper' && whisper ? `whisper.cpp (${whisper.model})` : settings.transcribeModel
-              }`,
-              enabled: false,
-            },
-          ]
-        : []),
-      // No separate progress line: the headline above is already the progress
-      // string while processing.
-      // Ollama still writes the notes even when whisper.cpp handles the preview,
-      // so this stays a warning either way. The fix is to start the daemon, so
-      // the menu does that rather than offering to look again and leaving the
-      // starting to the user.
-      ...(!ollamaUp
-        ? [
-            { label: '⚠ Ollama not reachable', enabled: false },
-            {
-              label: ollamaChecking ? 'Starting Ollama…' : 'Open Ollama',
-              enabled: !ollamaChecking,
-              click: () => a.openOllama(),
-            },
-          ]
-        : []),
-      ...(liveEngine === 'whisper' && whisper?.lastError
-        ? [{ label: `⚠ whisper.cpp: ${whisper.lastError.slice(0, 60)}`, enabled: false }]
-        : []),
-      { type: 'separator' },
-
       state === 'recording'
-        ? { label: 'Stop Recording', click: () => a.stopRecording() }
+        ? { label: withKey('Stop recording', hotkey), click: () => a.stopRecording() }
         // Starting a new meeting while the previous one is still processing is fine.
-        : { label: 'Start Recording', click: () => a.startRecording() },
-      // A meeting whose notes never got written — almost always because Ollama
-      // was down at Stop — is one click from being finished. It sits with the
-      // recording controls rather than with the things to open because it is
-      // the same kind of item: something the app does, not somewhere to go.
-      {
-        label: retry ? `Generate Notes for ${retry.label}` : 'Generate Missing Notes',
-        enabled: Boolean(retry),
-        click: () => a.retryNotes(),
-      },
-
-      { type: 'separator' },
-      // Voice input is the other thing this app can do, and it is reached
-      // mid-sentence: a global shortcut, or this. The hotkey name rides along
-      // so the menu doubles as a reminder of it.
-      { label: 'Voice input', enabled: false },
-      dictation.active || dictation.transcribing
-        ? {
-            label: dictation.transcribing
-              ? 'Voice input — transcribing…'
-              : 'Voice input — recording. Press again to stop',
-            click: () => a.toggleDictation(),
-          }
+        : { label: withKey('Record meeting', hotkey), click: () => a.startRecording() },
+      dictation.transcribing
+        ? { label: 'Transcribing dictation…', enabled: false }
         : {
-            label: dictation.hotkey ? `Dictate (${dictation.hotkey})` : 'Dictate',
+            label: withKey(dictation.active ? 'Stop dictation' : 'Start dictation', dictation.hotkey),
             click: () => a.toggleDictation(),
           },
-      { label: 'Dictations…', click: () => a.openDictations() },
-
-      { type: 'separator' },
-      // Also what a left-click on the icon does; listed anyway, because a
-      // shortcut nobody is told about is one nobody uses.
-      { label: 'Meetings…', click: () => a.openLibrary() },
-      { label: 'Show Live Transcript', click: () => a.toggleTranscript() },
-      { label: 'Open Notes Folder', click: () => shell.openPath(settings.notesDir) },
-      {
-        label: 'Open Last Meeting',
-        enabled: Boolean(lastDir),
-        click: () => a.openLast(),
-      },
-      { type: 'separator' },
-      // Every setting lives in the library window now. A submenu of radio lists
-      // could never say which model is missing or which engine is silently
-      // falling back, and those are the two things worth knowing about a setup
-      // that is not working.
-      { label: 'Settings…', click: () => a.openSettings() },
-      {
-        label: 'Troubleshooting',
-        submenu: [
-          { label: 'Open Log File', click: () => a.openLog() },
-          { label: 'Copy Diagnostics', click: () => clipboard.writeText(a.diagnostics()) },
-          { label: 'Restart Audio Capture', click: () => a.restartCapture() },
-          { type: 'separator' },
-          { label: `Version ${app.getVersion()}`, enabled: false },
-        ],
-      },
-      { type: 'separator' },
-      { label: 'Quit Minarrador', click: () => a.quit() },
     ];
 
     this.tray.setContextMenu(Menu.buildFromTemplate(template));
