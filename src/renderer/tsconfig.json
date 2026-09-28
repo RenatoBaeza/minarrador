@@ -1,0 +1,16 @@
+{
+  "// note": "Pages: browser only, no Node. Emitted as ES modules and loaded with <script type=\"module\">; each reaches its preload through window.<name>.",
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    "rootDir": "../..",
+    "outDir": "../../out",
+    "module": "ES2022",
+    "moduleResolution": "Bundler",
+    "moduleDetection": "force",
+    "lib": ["ES2023", "DOM", "DOM.Iterable"],
+    "types": []
+  },
+  "files": ["bridges.d.ts", "../shared/types.d.ts"],
+  "include": ["*.ts"],
+  "exclude": ["*preload.ts", "*worklet.ts", "*.d.ts"]
+}

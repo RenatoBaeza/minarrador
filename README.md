@@ -27,7 +27,7 @@ The app also listens for sustained audio in the background and can suggest start
 | Requirement     | Details                                                       |
 | --------------- | ------------------------------------------------------------- |
 | **Windows**     | 10 or 11 (x64)                                                |
-| **Node.js**     | v18 or later — [download](https://nodejs.org)                 |
+| **Node.js**     | v20.11 or later — [download](https://nodejs.org)              |
 | **Ollama**      | Latest release — [download](https://ollama.com/download)      |
 | **whisper.cpp** | Optional, for live captions and a far faster saved transcript — `npm run whisper:setup` |
 
@@ -282,7 +282,9 @@ You can also copy full diagnostics to your clipboard: **Troubleshooting → Copy
 
 | Command                      | Description                                              |
 | ---------------------------- | -------------------------------------------------------- |
-| `npm start`                  | Launch the app                                           |
+| `npm run build`              | Compile the TypeScript into `out/`                       |
+| `npm start`                  | Build and launch the app                                 |
+| `npm test`                   | Build and run the test suite                             |
 | `npm run dist`               | Build the NSIS installer for Windows x64                 |
 | `npm run icons`              | Regenerate app and tray icons                            |
 | `npm run whisper:setup`      | Download whisper.cpp and a model into `vendor/whisper`   |

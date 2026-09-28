@@ -1,0 +1,45 @@
+// View layer for the dictation indicator. It renders whatever the main process
+// sends over dictate:state and nothing else — no buttons, no input, because the
+// window is focusable:false and must never steal the cursor.
+
+import type { DictateIndicatorState } from '../shared/types';
+
+const body = document.body;
+const label = document.getElementById('label') as HTMLElement;
+const caption = document.getElementById('caption') as HTMLElement;
+
+const TITLES: Record<DictateIndicatorState['state'], string> = {
+  listening: 'Listening',
+  transcribing: 'Transcribing…',
+  done: 'Pasted',
+  error: 'Could not transcribe',
+};
+
+/** A momentary flash of the live caption, so "is it hearing me" has an answer. */
+let flashTimer: ReturnType<typeof setTimeout> | undefined;
+
+window.dictateIndicator.onState(({ state, text, error }) => {
+  body.classList.toggle('transcribing', state === 'transcribing');
+  body.classList.toggle('done', state === 'done');
+  body.classList.toggle('error', state === 'error');
+  body.classList.toggle('listening', state === 'listening');
+
+  label.textContent = (state && TITLES[state]) ?? 'Listening';
+
+  const shown = error || text || '';
+  caption.hidden = !shown;
+  // A live caption is a glimpse, not a final sentence: the trailing ellipsis is
+  // what keeps a half-heard fragment from reading as the finished text.
+  caption.textContent = state === 'listening' && !error && shown && !/[.!?…]$/.test(shown) ? `${shown}…` : shown;
+  caption.classList.toggle('error', Boolean(error));
+
+  // A live caption is a glimpse, not a transcript; clear it so the pill does not
+  // sit there looking like the final text.
+  clearTimeout(flashTimer);
+  if (state === 'listening' && shown && !error) {
+    flashTimer = setTimeout(() => {
+      caption.hidden = true;
+      caption.textContent = '';
+    }, 3000);
+  }
+});

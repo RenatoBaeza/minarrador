@@ -1,0 +1,15 @@
+{
+  "// note": "Shared by every tsconfig in the repo. Each environment (main process, preloads, pages, audio worklet) gets its own project because each runs with different globals.",
+  "compilerOptions": {
+    "target": "ES2023",
+    "strict": true,
+    "noImplicitOverride": true,
+    "noUnusedLocals": true,
+    "noFallthroughCasesInSwitch": true,
+    "forceConsistentCasingInFileNames": true,
+    "skipLibCheck": true,
+    "sourceMap": false,
+    "rootDir": ".",
+    "outDir": "out"
+  }
+}

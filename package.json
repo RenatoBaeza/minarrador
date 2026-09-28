@@ -3,7 +3,7 @@
   "productName": "Minarrador",
   "version": "1.0.0",
   "description": "Local-only meeting notes: records mic + system audio, transcribes and summarizes with Ollama on your machine.",
-  "main": "src/main/main.js",
+  "main": "out/src/main/main.js",
   "author": "Renato Baeza",
   "license": "MIT",
   "private": true,
@@ -19,31 +19,36 @@
     "node": ">=20.11"
   },
   "scripts": {
-    "start": "electron .",
-    "test": "node --test \"test/**/*.test.js\"",
-    "test:watch": "node --test --watch \"test/**/*.test.js\"",
+    "clean": "node -e \"require('node:fs').rmSync('out', { recursive: true, force: true })\"",
+    "build": "npm run clean && tsc -p tsconfig.json && tsc -p src/renderer/tsconfig.json && tsc -p src/renderer/tsconfig.preload.json && tsc -p src/renderer/tsconfig.worklet.json && node out/scripts/copy-static.js",
+    "typecheck": "tsc -p tsconfig.json --noEmit && tsc -p src/renderer/tsconfig.json --noEmit && tsc -p src/renderer/tsconfig.preload.json --noEmit && tsc -p src/renderer/tsconfig.worklet.json --noEmit",
+    "start": "npm run build && electron .",
+    "test": "npm run build && node --test \"out/test/**/*.test.js\"",
     "lint": "eslint .",
     "lint:fix": "eslint . --fix",
-    "check": "npm run lint && npm test",
-    "icons": "node scripts/make-icons.js",
-    "whisper:setup": "node scripts/setup-whisper.js",
-    "pipeline": "electron scripts/run-pipeline.js",
-    "capture-test": "electron scripts/capture-test.js",
-    "dist": "electron-builder --win nsis"
+    "check": "npm run typecheck && npm run lint && npm test",
+    "icons": "npm run build && node out/scripts/make-icons.js",
+    "whisper:setup": "npm run build && node out/scripts/setup-whisper.js",
+    "pipeline": "npm run build && electron out/scripts/run-pipeline.js",
+    "capture-test": "npm run build && electron out/scripts/capture-test.js",
+    "dist": "npm run build && electron-builder --win nsis"
   },
   "devDependencies": {
     "@eslint/js": "^10.0.1",
+    "@types/node": "^24.19.0",
     "electron": "^43.3.0",
     "electron-builder": "^26.15.3",
     "eslint": "^10.8.1",
-    "globals": "^17.9.0"
+    "globals": "^17.9.0",
+    "typescript": "^6.0.3",
+    "typescript-eslint": "^8.70.1"
   },
   "build": {
     "appId": "com.rntbz.minarrador",
     "productName": "Minarrador",
     "artifactName": "Minarrador-Setup-${version}.${ext}",
     "files": [
-      "src/**/*",
+      "out/src/**/*",
       "assets/**/*",
       "package.json",
       "!**/*.map"

@@ -4,51 +4,59 @@ Local-only meeting notes app for Windows. Records mic + system audio, transcribe
 
 ## Tech stack
 
-- **Electron** (tray-only, no visible window) — entry point `src/main/main.js`
+- **Electron** (tray-only, no visible window) — entry point `src/main/main.ts`
 - **Node.js** — all backend logic in `src/main/`
 - **Ollama** — local LLM inference for the notes, and for the transcript when whisper.cpp is not installed
 - **whisper.cpp** — local ASR binary; the live transcript and, by default, the saved one (`npm run whisper:setup`)
 - **PowerShell** — the `powershell.exe` built into Windows, used for the one-way paste of dictated text into the foreground application
 - **electron-builder** — packaging and NSIS installer (`npm run dist`)
-- No framework, no bundler, no TypeScript — plain CommonJS throughout
+- **TypeScript** (strict), compiled by plain `tsc` into `out/` — no framework, no bundler. The main process, scripts and tests compile to CommonJS; renderer pages to ES modules
 
 ## Project layout
 
 ```
 ├── assets/            # App & tray icons (ico, png, @2x variants)
-├── scripts/           # Dev/build helpers (icon gen, pipeline runner, capture test, whisper setup)
+├── scripts/           # Dev/build helpers (icon gen, pipeline runner, capture test, whisper setup, copy-static)
 ├── src/
 │   ├── main/          # Electron main process
-│   │   ├── main.js        # App lifecycle, tray wiring, recording start/stop
-│   │   ├── tray.js        # System-tray icon & context menu (pure view)
-│   │   ├── capture.js     # Audio capture controller + speech/silence detectors
-│   │   ├── pipeline.js    # Post-recording chain: transcribe → summarise → PDF
-│   │   ├── ollama.js      # Ollama HTTP client (transcription, chat, pull)
-│   │   ├── whisper.js     # whisper.cpp server supervisor + /inference client
-│   │   ├── whisper-setup.js # Downloads whisper.cpp; the one outbound path
-│   │   ├── wav.js         # WAV read/write, PCM chunking, channel split, RMS
-│   │   ├── pdf.js         # HTML → PDF via hidden BrowserWindow
-│   │   ├── paths.js       # Meeting folder naming, file names, speaker labels
-│   │   ├── library.js     # Read-only view over the notes folder (list, read, search)
-│   │   ├── diskusage.js   # Disk usage walk: folder totals, entries by opaque id
-│   │   ├── settings.js    # JSON settings store (%APPDATA%/Minarrador)
-│   │   ├── snippets.js    # Quick-copy shorthand store (%APPDATA%/Minarrador)
-│   │   ├── dictations.js  # Dictation archive store (%APPDATA%/Minarrador)
-│   │   ├── dictation.js   # Voice-input controller (mic capture + transcription)
-│   │   ├── paste.js       # OS-level Ctrl+V via built-in PowerShell
-│   │   └── logger.js      # File logger
+│   │   ├── main.ts        # App lifecycle, tray wiring, recording start/stop
+│   │   ├── tray.ts        # System-tray icon & context menu (pure view)
+│   │   ├── capture.ts     # Audio capture controller + speech/silence detectors
+│   │   ├── pipeline.ts    # Post-recording chain: transcribe → summarise → PDF
+│   │   ├── ollama.ts      # Ollama HTTP client (transcription, chat, pull)
+│   │   ├── whisper.ts     # whisper.cpp server supervisor + /inference client
+│   │   ├── whisper-setup.ts # Downloads whisper.cpp; the one outbound path
+│   │   ├── wav.ts         # WAV read/write, PCM chunking, channel split, RMS
+│   │   ├── pdf.ts         # HTML → PDF via hidden BrowserWindow
+│   │   ├── paths.ts       # Meeting folder naming, file names, speaker labels
+│   │   ├── library.ts     # Read-only view over the notes folder (list, read, search)
+│   │   ├── diskusage.ts   # Disk usage walk: folder totals, entries by opaque id
+│   │   ├── settings.ts    # JSON settings store (%APPDATA%/Minarrador)
+│   │   ├── snippets.ts    # Quick-copy shorthand store (%APPDATA%/Minarrador)
+│   │   ├── dictations.ts  # Dictation archive store (%APPDATA%/Minarrador)
+│   │   ├── dictation.ts   # Voice-input controller (mic capture + transcription)
+│   │   ├── paste.ts       # OS-level Ctrl+V via built-in PowerShell
+│   │   ├── logger.ts      # File logger
+│   │   ├── errors.ts      # errorMessage/errorCode for `unknown` catch values
+│   │   └── electron-lazy.ts # app.getPath() resolved at call time, so stores load outside Electron
+│   ├── shared/
+│   │   └── types.d.ts     # Every payload that crosses IPC — types only, imported by both sides
 │   └── renderer/      # Hidden renderers for Web Audio capture
 │       ├── capture.html   # Minimal page loaded by the hidden window
-│       ├── capture.js     # Web Audio graph (mic + system loopback)
-│       ├── pcm-worklet.js # AudioWorklet that ships PCM to main
-│       ├── preload.js     # contextBridge exposing IPC to renderer
+│       ├── capture.ts     # Web Audio graph (mic + system loopback)
+│       ├── pcm-worklet.ts # AudioWorklet that ships PCM to main
+│       ├── preload.ts     # contextBridge exposing IPC to renderer
+│       ├── bridges.d.ts   # The `window.<name>` API each preload exposes, typed for both sides
+│       ├── tsconfig*.json # One project per environment: pages, preloads, worklet
 │       ├── transcript.*   # Live transcript window (page, styles, view, preload)
 │       ├── library.*      # The app window: sidebar + Recording, Quick copy, Disk usage, Settings
 │       ├── dictate-capture.*   # Mic-only worker behind the dictation hotkey
 │       ├── dictate-indicator.* # Floating "listening" pill (page, styles, view, preload)
 │       └── dictations.*        # Dictation history window (page, styles, view, preload)
+├── test/              # node:test suites, in TypeScript, run from out/test
 ├── vendor/whisper/    # whisper.cpp binaries + GGML models (gitignored, see setup)
-├── dist/              # Build output (gitignored)
+├── out/               # tsc output — what Electron actually runs (gitignored)
+├── dist/              # Installer output (gitignored)
 └── package.json
 ```
 
@@ -66,9 +74,9 @@ Everything that is *configured* rather than *done* lives in the library window �
 a menu is a poor place to be told that a model is not installed.
 
 **Recording is also bound to a global shortcut** (`Ctrl+Shift+R` by default,
-`applyHotkey()` in `main.js`), because the twenty seconds at the start of a call
+`applyHotkey()` in `main.ts`), because the twenty seconds at the start of a call
 are exactly where finding a tray icon and reading a menu means the meeting goes
-unrecorded. The accelerator comes from `HOTKEY_CHOICES` in `settings.js` and
+unrecorded. The accelerator comes from `HOTKEY_CHOICES` in `settings.ts` and
 never from free text: a global shortcut is claimed against the whole desktop, so
 a typo is either dead or steals a combination from another application, and the
 value is written from a renderer. `globalShortcut.register` reports a
@@ -79,22 +87,22 @@ colour is not confirmation that a room is being recorded, least of all when the
 recording was started from a keyboard.
 
 **The dictation hotkey is a second, independent global shortcut**
-(`Win+Shift+X` by default, `applyDictateHotkey()` in `main.js`): press it, say a
+(`Win+Shift+X` by default, `applyDictateHotkey()` in `main.ts`): press it, say a
 sentence, press it again, and the transcribed text is pasted where you were
 typing. It is deliberately separate from the meeting hotkey — `globalShortcut`
 is unregistered one accelerator at a time rather than `unregisterAll`, which
 would take the meeting shortcut with it — and its choices come from
-`DICTATE_HOTKEY_CHOICES` in `settings.js` for the same reason as the meeting
+`DICTATE_HOTKEY_CHOICES` in `settings.ts` for the same reason as the meeting
 one: a global accelerator is claimed against the whole desktop, never from free
 text. Registration failure is kept in `state.dictateHotkeyRegistered` for the
 settings pane to mark in red. See *Voice input* below.
 
 ### Audio capture flow
 
-1. `capture.js` (main) creates the hidden renderer and listens for IPC messages
-2. `capture.js` (renderer) opens mic + `getDisplayMedia` with `audio: 'loopback'`
+1. `capture.ts` (main) creates the hidden renderer and listens for IPC messages
+2. `capture.ts` (renderer) opens mic + `getDisplayMedia` with `audio: 'loopback'`
 3. A `ChannelMergerNode` puts the mic on the left and the loopback on the right
-4. `pcm-worklet.js` converts to 16 kHz 16-bit PCM and ships it over IPC
+4. `pcm-worklet.ts` converts to 16 kHz 16-bit PCM and ships it over IPC
 5. Main process writes PCM to a `WavWriter` during recording
 6. `SpeechDetector` watches idle levels and fires `'speech'` when sustained audio is detected;
    `SilenceDetector` does the inverse during one, and ends a meeting nobody stopped
@@ -114,7 +122,7 @@ sends it with `capture:setRecording`. The worklet emits interleaved stereo or
 sums to mono accordingly, and a graph rebuilt mid-meeting is told the recording
 state as it is built rather than waiting for a message that may not come.
 
-Everything downstream is channel-aware: `deinterleave`/`downmix` in `wav.js`,
+Everything downstream is channel-aware: `deinterleave`/`downmix` in `wav.ts`,
 `LiveTranscriber` (which folds back to mono — see below), and `transcribe()`.
 A mono recording, including every one made before this existed, still works
 unchanged and simply carries no speaker labels.
@@ -137,20 +145,20 @@ instead of being retried for the rest of the meeting. This is also why the IPC
 handlers are registered in `init()` and the window is built in `#createWindow()`:
 a second set of handlers would write every PCM buffer to the WAV twice.
 
-### Live transcript (`whisper.js` + `LiveTranscriber` in `capture.js`)
+### Live transcript (`whisper.ts` + `LiveTranscriber` in `capture.ts`)
 
 Independent of the post-recording pipeline — a rough preview for the person in the
 meeting, always superseded by the full pass over the saved WAV.
 
 **It is also kept.** Every line goes to `live-transcript.txt` in the meeting
-folder as it is produced (`appendLiveTranscript` in `main.js`), which is what
+folder as it is produced (`appendLiveTranscript` in `main.ts`), which is what
 turns the worst case from "a WAV" into "a rough transcript": the preview used to
 exist only in a window and was wiped the moment processing started, so a
 pipeline that then failed threw away text that already existed. It is appended
 line by line rather than written at the end, because the case it is for is the
 one where there is no end — a crash, a power cut, a quit mid-meeting. It writes
 to `state.liveDir` rather than `state.currentDir` so the segment still decoding
-when Stop is pressed lands in the meeting it was said in. `library.js` reads it
+when Stop is pressed lands in the meeting it was said in. `library.ts` reads it
 wherever `transcript.txt` is missing, and the reader labels those lines as the
 rough preview they are.
 
@@ -174,7 +182,7 @@ of the segment — with a 2:1 margin, because the microphone hears the speakers
 and echo cancellation only mostly removes them, so a wrong label is worse than
 none. The label goes into `live-transcript.txt` too, via `speakerLine`.
 
-`LIVE_SEGMENT` in `capture.js` holds the per-engine timing, tuned for `ggml-base`.
+`LIVE_SEGMENT` in `capture.ts` holds the per-engine timing, tuned for `ggml-base`.
 A heavier model decodes slower, so captions trail further behind and
 `LIVE_MAX_SECONDS` drops the oldest buffered audio during a long unbroken stretch
 — by design, since the saved transcript comes from a separate pass. If whisper.cpp
@@ -186,12 +194,12 @@ length.
 own default is 4 threads, which is ample for `ggml-base` but leaves
 `ggml-large-v3-turbo-q5_0` (the accurate option `whisper:setup` offers) at ~0.7x
 realtime — below 1x the transcriber can never catch up and spends the meeting
-discarding audio. `defaultThreads()` in `whisper.js` therefore resolves the
+discarding audio. `defaultThreads()` in `whisper.ts` therefore resolves the
 "automatic" setting to half the logical cores capped at 8 (~1.2x realtime on a
 24-thread i9) instead of deferring to the server, and `whisperThreads` overrides it
 from **Settings → Whisper decode threads**.
 
-### Meeting library (`library.js` + the library window)
+### Meeting library (`library.ts` + the library window)
 
 The archive: a rail of every recording on the left, the notes and the full
 transcript on the right, and a search box that reads across both. Left-clicking
@@ -203,7 +211,7 @@ rail, and the settings pane.
 **The window is a sidebar of features.** A permanent `.sidebar` on the left
 picks what the rest of the window shows — Recording (the rail and the reader),
 Quick copy, Disk usage, and Settings pinned to the bottom. Each is a `view.mode`
-(`SECTIONS` in `library.js`: `reader`, `quickcopy`, `disk`, `settings`) and
+(`SECTIONS` in `library.ts`: `reader`, `quickcopy`, `disk`, `settings`) and
 `showSection()` is the one way between them; the rail is shown only for
 `reader`. A new feature is a button at the end of `.nav-features`, a key in
 `SECTIONS` (and in `SECTIONS` in the preload, if main should be able to open
@@ -216,8 +224,8 @@ There is no index and no database — `listMeetings()` walks the notes folder on
 every call, and a meeting is recognised by its artefacts (`audio.wav`,
 `notes.json`, `meta.json`) rather than by its name, so a folder renamed by hand
 still appears and the user's unrelated folders never do. **Nothing in
-`library.js` writes, renames or deletes.** The four things the *window* can
-change all live in `main.js` and all name a meeting by its folder name:
+`library.ts` writes, renames or deletes.** The four things the *window* can
+change all live in `main.ts` and all name a meeting by its folder name:
 `library:reprocess`, `library:record`, `library:rename` and `library:delete`.
 
 **The archive can be edited, or it rots.** Every misfire was permanent and every
@@ -231,7 +239,7 @@ re-run and then quietly revert. `describeMeeting` prefers it over the model's
 title and keeps the model's as `generatedTitle`, so a rename can be undone.
 
 A card knows why it has no notes — `pending`, `unprocessed` (quit mid-run),
-`failed` (`ERROR.txt`) — and `main.js` adds what only it can know, which
+`failed` (`ERROR.txt`) — and `main.ts` adds what only it can know, which
 folder is recording and which are mid-pipeline, from `state.jobs`. The reader
 renders `notes.json` directly rather than re-parsing `notes.md`, since the JSON
 is the structured form the pipeline actually produced.
@@ -308,7 +316,7 @@ label, and the difference in both cases is a whole meeting's notes. The pane
 therefore renders a value *and* whether the thing it names is installed, and
 marks the gap in red with what to do about it (`.row.missing`).
 
-`settingsState()` in `main.js` is what makes that possible: the values, the
+`settingsState()` in `main.ts` is what makes that possible: the values, the
 defaults, and the installed model lists, whisper's `describe()`, whether the
 notes folder still exists and whether Ollama answers — assembled in one place
 because the pane is only useful when it can compare the two halves.
@@ -355,11 +363,11 @@ moment ago.
 daemon used to say "try to find Ollama again", which asked the user to go and
 run `ollama serve` and come back — for the most common failure in the app, since
 a meeting stopped with Ollama down keeps its audio and loses its notes.
-`launchOllama()` in `ollama.js` finds the Windows install (the tray app first,
+`launchOllama()` in `ollama.ts` finds the Windows install (the tray app first,
 so the daemon outlives this process; the CLI as fallback) and `openOllama()` in
 main waits for it to answer before saying anything.
 
-### Quick copy (`snippets.js` + the library window's Quick copy feature)
+### Quick copy (`snippets.ts` + the library window's Quick copy feature)
 
 The top section of the tray menu is a list of user-authored shorthands; clicking
 one puts its text on the clipboard, so a phrase typed several times a day costs
@@ -375,7 +383,7 @@ shape. `normalize()` is the single gate — it runs on both the file and the IPC
 payload, keeps only `{ label, text }`, and drops any entry with an empty body
 since that could only ever be a dead menu row.
 
-The editor is `renderQuickCopy` in `library.js`: one compact row per shorthand
+The editor is `renderQuickCopy` in `library.ts`: one compact row per shorthand
 (grip, name, first line of text, edit, delete) — the grip drags a row to a new
 place (or Alt+↑/↓ from the keyboard), and the order saved is the tray's order — with the pencil opening a modal
 `<dialog>` editor (`openQuickCopyEditor`) — case, trim, join, bullets, date/time,
@@ -386,7 +394,7 @@ check `event.sender.id` against the library window. It saves itself shortly
 after typing stops, on blur, on leaving the feature and before the window
 closes — never a way to discard work — and each save refreshes the tray.
 
-### Disk usage (`diskusage.js` + the library window's Disk usage feature)
+### Disk usage (`diskusage.ts` + the library window's Disk usage feature)
 
 Ported from the standalone File Size Viewer: pick a folder, see what is taking
 the space inside it as a tree that opens a level at a time, largest first, with
@@ -419,7 +427,7 @@ and anything holding a meeting that is recording or mid-pipeline
 The image-on-hover preview from the original was not carried over: it needs
 `file:` in `img-src`, and this window's CSP is `img-src 'self'`.
 
-### Voice input (`dictation.js`, `dictations.js`, `paste.js`)
+### Voice input (`dictation.ts`, `dictations.ts`, `paste.ts`)
 
 The dictation hotkey is the app's second capture path: press it, say a sentence,
 press it again, and the finished text is pasted into whatever had the cursor,
@@ -430,9 +438,9 @@ deliberately separate from it.
 **A second worker, not a second graph.** `DictationController` owns its own
 hidden renderer (`dictate-capture.*`) that opens the microphone alone, keeps the
 audio in memory, and joins the same media-permission allow-list as the meeting
-worker (`registerMediaClient` in `capture.js`). The two never share a window or a
+worker (`registerMediaClient` in `capture.ts`). The two never share a window or a
 stream, so a dictation can run in the middle of a recorded meeting without
-either disturbing the other. The renderer reuses `pcm-worklet.js`, feeding the
+either disturbing the other. The renderer reuses `pcm-worklet.ts`, feeding the
 mic onto channel 0 of the worklet's two-channel merger and leaving channel 1
 silent — the mono sum then reads as the mic at full gain rather than doubled.
 
@@ -454,7 +462,7 @@ whenever the chosen engine cannot run. The saved-pass engine and the live-pass
 one are separate settings, exactly as they are for meetings.
 
 **The paste is Windows doing the typing.** Electron cannot type into another
-application's window, so `paste.js` writes the text to the clipboard and then
+application's window, so `paste.ts` writes the text to the clipboard and then
 spawns the PowerShell built into Windows to `SendKeys` Ctrl+V into the foreground
 window — best-effort by design, because an elevated (admin) window will not
 accept it, and the clipboard always holds the text either way. The paste runs
@@ -462,7 +470,7 @@ before the confirmation notification, so a paste that did not land is reported i
 the same breath. `dictateAutoPaste` turns it off.
 
 **Nothing said is lost.** Every successful dictation is added to the archive
-(`dictations.js` → `dictations.json`, newest first) which the **Dictations…**
+(`dictations.ts` → `dictations.json`, newest first) which the **Dictations…**
 window (`src/renderer/dictations.*`) browses, edits and deletes — sender-checked
 like the quick-copy editor, rows saving on blur, closing saves first. A
 transcription that fails keeps the trimmed audio as a WAV under
@@ -470,7 +478,7 @@ transcription that fails keeps the trimmed audio as a WAV under
 job, and a session nobody stops hits `MAX_SECONDS` (five minutes) and is ended
 with a notification.
 
-### Post-recording pipeline (`pipeline.js`)
+### Post-recording pipeline (`pipeline.ts`)
 
 1. **Transcribe** — splits the WAV into 60 s chunks and reads each one. Which
    engine reads it is `transcribeEngineFor()`: whisper.cpp whenever it is
@@ -573,6 +581,11 @@ exists to make sure a folder either holds finished notes or explains itself:
 
 ### Packaging (`build` in package.json)
 
+What ships is `out/src/**` — the compiled main process and renderer, with the
+pages and styles `copy-static` put beside them — plus `assets/`. The TypeScript
+sources, `out/test` and `out/scripts` never enter the asar. `npm run dist`
+builds first, so an installer can never package a stale `out/`.
+
 `electronFuses` burns out the developer conveniences that otherwise survive
 packaging. They matter more here than in most apps: `ELECTRON_RUN_AS_NODE=1
 Minarrador.exe -e '<code>'` turns the shipped binary into a bare Node process
@@ -592,12 +605,15 @@ rather than next to the config.
 
 ## Key conventions
 
-- **`'use strict'`** at the top of every file
-- **CommonJS** (`require` / `module.exports`) — no ES modules
+- **TypeScript, strict**, with `noUnusedLocals`. Write ES `import`/`export`; `tsc` emits CommonJS for the main process. Values that arrive from IPC, JSON on disk or a `catch` are `unknown` and narrowed where they are used (`errors.ts` has the two helpers every `catch` wants)
+- **Four TypeScript projects, one per runtime** — `tsconfig.json` (main, scripts, tests: Node), `src/renderer/tsconfig.json` (pages: DOM, no Node, emitted as ES modules and loaded with `<script type="module">`), `src/renderer/tsconfig.preload.json` (sandboxed preloads: CommonJS, may import only `electron` at runtime) and `src/renderer/tsconfig.worklet.json` (the audio thread, with its globals in `worklet-globals.d.ts`). A file gets the environment it actually runs in, so `document` in the main process or `fs` in a page is a compile error
+- **IPC payloads are typed once**, in `src/shared/types.d.ts`, and each preload implements an interface from `src/renderer/bridges.d.ts` that the page's `window.<name>` is typed as. Both are declaration files on purpose: types have no runtime, so nothing is emitted twice in two module formats
+- **Paths to `assets/` and `vendor/` go through `APP_ROOT`** in `paths.ts`. Compiled code runs from `out/src/main`, three levels down, and that depth is written in exactly one place
+- **Modules that must load outside Electron** (the stores, `paths.ts`, `whisper.ts`) reach Electron through `electronPath()` in `electron-lazy.ts` rather than importing it; under `node --test`, `require('electron')` is only a path string
 - **No external runtime dependencies** — only Electron APIs, Node built-ins, two local HTTP APIs (Ollama, whisper-server), and the `powershell.exe` that ships with Windows, used for the dictation paste. whisper.cpp is a downloaded binary, not an npm package
-- **Network access lives in `ollama.js`, `whisper.js` and `whisper-setup.js`** — eslint blocks bare `fetch` elsewhere in `src/main/`. The first two only ever reach a daemon on this machine; `whisper-setup.js` is the sole outbound path, and it fetches whisper.cpp and nothing else
-- **Renderer files are linted by naming convention**, not by a list: `*preload.js` gets the preload environment, `*worklet.js` the audio-thread one, and everything else under `src/renderer/` is a browser page with no Node. A new window needs no eslint change — and a page reaches its bridge through `window.<name>`, never as a bare global
-- **Dev dependencies only**: `electron`, `electron-builder`
+- **Network access lives in `ollama.ts`, `whisper.ts` and `whisper-setup.ts`** — eslint blocks bare `fetch` elsewhere in `src/main/`. The first two only ever reach a daemon on this machine; `whisper-setup.ts` is the sole outbound path, and it fetches whisper.cpp and nothing else
+- **Renderer files are linted and compiled by naming convention**, not by a list: `*preload.ts` gets the preload environment, `*worklet.ts` the audio-thread one, and everything else under `src/renderer/` is a browser page with no Node. A new window needs no eslint change — and a page reaches its bridge through `window.<name>`, never as a bare global
+- **Dev dependencies only**: `electron`, `electron-builder`, `typescript`, `@types/node`, and ESLint with `typescript-eslint`
 - Settings default to `gemma4:12b` for both transcription and summarisation
 - Ollama host defaults to `http://127.0.0.1:11434`
 - The app registers as a login item with `--hidden` flag
@@ -606,7 +622,11 @@ rather than next to the config.
 
 | Command | Description |
 |---------|-------------|
-| `npm start` | Launch the app in dev mode |
+| `npm run build` | Compile all four TypeScript projects into `out/` and copy the pages and styles beside them |
+| `npm run typecheck` | Type-check every project without emitting |
+| `npm start` | Build, then launch the app in dev mode |
+| `npm test` | Build, then run the `node:test` suites from `out/test` |
+| `npm run check` | Type-check, lint and test |
 | `npm run dist` | Build the NSIS installer for Windows x64 |
 | `npm run icons` | Regenerate tray/app icons from source |
 | `npm run whisper:setup` | Download whisper.cpp + a GGML model into `vendor/whisper` (the tree that gets packaged; the app's own installer puts one under `userData` instead) |
@@ -615,7 +635,7 @@ rather than next to the config.
 
 ## Prerequisites
 
-- **Node.js** ≥ 18
+- **Node.js** ≥ 20.11
 - **Ollama** running locally (`ollama serve`) with an audio-capable model pulled (e.g. `ollama pull gemma4:12b`)
 - **whisper.cpp** for the live captions *and* the saved transcript. Optional — both fall back to Ollama without it — and installable from **Settings → Install whisper.cpp** or with `npm run whisper:setup`
 - Windows 10/11 — system audio capture uses Electron's `desktopCapturer` loopback
@@ -624,19 +644,20 @@ rather than next to the config.
 
 ### Adding a new setting
 
-1. Add the default in `settings.js` → `defaults()`
-2. Add the key to `LIBRARY_SETTINGS` in `main.js` and to `FIELDS` in
-   `library-preload.js` — unless it names a path or a host, which the window is
+1. Add the default in `settings.ts` → `defaults()`
+2. Add the field to the `Settings` interface in `src/shared/types.d.ts`
+3. Add the key to `LIBRARY_SETTINGS` in `main.ts` and to `FIELDS` in
+   `library-preload.ts` — unless it names a path or a host, which the window is
    deliberately not given the vocabulary to set
-3. Render a row for it in `src/renderer/library.js` (`toggleRow`, `selectRow` or
+4. Render a row for it in `src/renderer/library.ts` (`toggleRow`, `selectRow` or
    `buttonRow`), in whichever section it belongs to, and mark it `missing` when
    the thing it names is not installed
-4. Apply it in `main.js` → `applySetting`, the single path both the tray and the
+5. Apply it in `main.ts` → `applySetting`, the single path both the tray and the
    pane write through
 
 ### Modifying the pipeline
 
-Each stage in `pipeline.js` is a standalone async function (`transcribe`, `summarise`, `renderPdf`). They receive the meeting directory, config, and an options bag with `{ onProgress, signal, ollama, whisper }`. Add new stages in `runPipeline()` and write outputs to the meeting folder using `FILES` constants from `paths.js`.
+Each stage in `pipeline.ts` is a standalone async function (`transcribe`, `summarise`, `renderPdf`). They receive the meeting directory, config, and an options bag with `{ onProgress, signal, ollama, whisper }`. Add new stages in `runPipeline()` and write outputs to the meeting folder using `FILES` constants from `paths.ts`.
 
 ### IPC channels
 
@@ -706,13 +727,13 @@ Each stage in `pipeline.js` is a standalone async function (`transcribe`, `summa
 - **No cloud, no telemetry, no accounts.** No audio, transcript, note or
   identifier ever leaves the machine. Two things can reach the internet, both
   only when a button is pressed and neither with any meeting data in it:
-  `whisper-setup.js` fetches whisper.cpp from GitHub and Hugging Face, and
+  `whisper-setup.ts` fetches whisper.cpp from GitHub and Hugging Face, and
   `Ollama.pull` asks the local daemon to download a model.
 - The Ollama transcription uses the **OpenAI-compatible** `/v1/chat/completions` endpoint because the native `/api/chat` route silently drops audio fields.
 - Recordings shorter than 1 second are automatically discarded.
-- The `collapseRepeats` function in `ollama.js` defends against audio model repetition loops.
-- `cleanWhisperText` in `whisper.js` strips whisper's bracketed annotations and the phrases it invents on near-silence (`"you"`, `"Thanks for watching"`), which is the usual source of phantom captions during a pause.
-- `src/main/whisper-setup.js` is the only code in the repo that makes a non-localhost request. It runs from **Settings → Install whisper.cpp** or from `npm run whisper:setup`, never on its own, and it downloads two files: a release binary and a set of weights.
+- The `collapseRepeats` function in `ollama.ts` defends against audio model repetition loops.
+- `cleanWhisperText` in `whisper.ts` strips whisper's bracketed annotations and the phrases it invents on near-silence (`"you"`, `"Thanks for watching"`), which is the usual source of phantom captions during a pause.
+- `src/main/whisper-setup.ts` is the only code in the repo that makes a non-localhost request. It runs from **Settings → Install whisper.cpp** or from `npm run whisper:setup`, never on its own, and it downloads two files: a release binary and a set of weights.
 - Pipeline retries transient Ollama failures (3 attempts with backoff) so a model swap mid-run doesn't kill a long transcription.
 - The dictation paste is the one place the app touches another application's
   window, and it does it with a *fixed* PowerShell command (SendKeys Ctrl+V) that

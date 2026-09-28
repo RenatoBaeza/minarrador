@@ -1,0 +1,15 @@
+{
+  "// note": "The AudioWorklet runs on the audio thread: no window, no Node, no fetch. worklet-globals.d.ts declares the little it does have.",
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    "rootDir": "../..",
+    "outDir": "../../out",
+    "module": "ES2022",
+    "moduleResolution": "Bundler",
+    "moduleDetection": "force",
+    "lib": ["ES2023"],
+    "types": []
+  },
+  "files": ["worklet-globals.d.ts"],
+  "include": ["*worklet.ts"]
+}
