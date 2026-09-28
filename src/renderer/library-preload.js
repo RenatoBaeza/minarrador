@@ -13,6 +13,9 @@
 // Quick copy goes through `quickCopy` below: the one list this window writes,
 // pinned to two strings per entry before it leaves the page.
 //
+// Disk usage goes through `disk` below: the folder comes from a dialog in main,
+// and every entry after that is an id the scan issued.
+//
 // Settings go through `settings` below: a fixed vocabulary of keys, each
 // coerced to the type the store expects, with nothing that names a path or a
 // host among them.
@@ -59,7 +62,7 @@ const FIELDS = {
 };
 
 /** The sidebar features main may open this window onto. Mirrors SECTIONS in library.js. */
-const SECTIONS = ['reader', 'quickcopy', 'settings'];
+const SECTIONS = ['reader', 'quickcopy', 'disk', 'settings'];
 
 const plainSnippets = (items) =>
   (Array.isArray(items) ? items : []).map((item) => ({
@@ -136,6 +139,32 @@ contextBridge.exposeInMainWorld('library', {
     list: () => ipcRenderer.invoke('snippets:list'),
     /** @returns {Promise<{label: string, text: string}[]>} the list as it was actually stored. */
     save: (items) => ipcRenderer.invoke('snippets:save', plainSnippets(items)),
+  },
+
+  /**
+   * Disk usage. The folder is picked in a native dialog; after that every entry
+   * is the numeric id the scan issued, so no path is ever sent from this page.
+   */
+  disk: {
+    /**
+     * @returns {Promise<{ ok: boolean, root?: object, entries?: object[], reason?: string }>}
+     *   resolves when the walk finishes; `ok` false with no reason is a
+     *   cancelled dialog.
+     */
+    choose: () => ipcRenderer.invoke('disk:choose'),
+    cancel: () => ipcRenderer.invoke('disk:cancel'),
+    /** @returns {Promise<object[] | null>} the folder's entries, largest first. */
+    list: (id) => ipcRenderer.invoke('disk:list', Number(id)),
+    /** Shows the entry selected in Explorer. */
+    reveal: (id) => ipcRenderer.invoke('disk:reveal', Number(id)),
+    /**
+     * Moves an entry to the Recycle Bin. Main raises the confirmation itself.
+     *
+     * @returns {Promise<{ ok: boolean, reason?: string }>}
+     */
+    trash: (id) => ipcRenderer.invoke('disk:trash', Number(id)),
+    /** `{ files, dirs, current }` a few times a second while a walk runs. */
+    onProgress: (fn) => ipcRenderer.on('disk:progress', (_e, p) => fn(p ?? {})),
   },
 
   settings: {

@@ -26,6 +26,7 @@ const settingsStore = require('./settings');
 const snippetsStore = require('./snippets');
 const dictationsStore = require('./dictations');
 const library = require('./library');
+const { DiskScan, AbortError: DiskAbortError, isWithin } = require('./diskusage');
 const { CaptureController } = require('./capture');
 const { AppTray } = require('./tray');
 const { Ollama, findOllama, launchOllama } = require('./ollama');
@@ -650,7 +651,7 @@ function sendMicTest(payload) {
  * which never writes. Settings are the exception, and they go through the same
  * store the tray used to write — see the `settings:*` channels below.
  *
- * @param {{ section?: 'settings'|'quickcopy' }} [options] the sidebar feature
+ * @param {{ section?: 'settings'|'quickcopy'|'disk' }} [options] the sidebar feature
  *   to open on rather than whatever was last showing — how the tray's
  *   Settings… item and its empty quick-copy row land.
  */
@@ -695,6 +696,9 @@ function showLibraryWindow({ section = null } = {}) {
     libraryWindow = null;
     // The pane that asked for the mic is gone; the test must not keep it open.
     stopMicTest();
+    // Nor a disk scan, or the tree of a whole drive it was holding.
+    cancelDiskScan();
+    disk.scan = null;
   });
   libraryWindow.loadFile(path.join(RENDERER, 'library.html')).catch((err) => {
     log.error('library window failed to load', err);
@@ -1523,6 +1527,119 @@ function renameMeeting(id, title) {
   return { ok: true };
 }
 
+// ------------------------------------------------------------------ disk usage
+//
+// The library window's Disk usage feature. diskusage.js walks the folder and
+// hands the page opaque ids; everything that acts on an entry is here, behind
+// the same sender check as the rest of the window. The one scan lives for as
+// long as the window does — a tree of a whole drive is not something to keep
+// in memory for a tray icon.
+
+const disk = {
+  /** @type {import('./diskusage').DiskScan | null} */
+  scan: null,
+  /** Aborts the walk in flight, if there is one. */
+  abort: null,
+};
+
+function sendDisk(channel, payload) {
+  if (libraryWindow && !libraryWindow.isDestroyed()) libraryWindow.webContents.send(channel, payload);
+}
+
+function cancelDiskScan() {
+  disk.abort?.abort();
+  disk.abort = null;
+}
+
+/**
+ * Asks for a folder, then walks it.
+ *
+ * The folder comes from a native dialog, never from the page — the same rule
+ * as the notes folder — so a renderer cannot point the walk anywhere.
+ *
+ * @returns {Promise<{ ok: boolean, root?: object, entries?: object[], reason?: string }>}
+ *   `ok` false with no reason means the dialog was cancelled.
+ */
+async function chooseDiskFolder() {
+  const parent = libraryWindow && !libraryWindow.isDestroyed() ? libraryWindow : null;
+  const options = { title: 'Choose a folder to measure', properties: ['openDirectory'] };
+  const picked = parent ? await dialog.showOpenDialog(parent, options) : await dialog.showOpenDialog(options);
+  if (picked.canceled || !picked.filePaths[0]) return { ok: false };
+
+  cancelDiskScan();
+  const controller = new AbortController();
+  disk.abort = controller;
+  const scan = new DiskScan(picked.filePaths[0]);
+  disk.scan = null;
+  try {
+    await scan.walk({ signal: controller.signal, onProgress: (p) => sendDisk('disk:progress', p) });
+  } catch (err) {
+    if (err instanceof DiskAbortError) return { ok: false, reason: 'Scan cancelled.' };
+    log.error('disk scan failed for', scan.root, err);
+    return { ok: false, reason: `Could not read that folder: ${err.message}` };
+  } finally {
+    if (disk.abort === controller) disk.abort = null;
+  }
+  disk.scan = scan;
+  const root = scan.rootEntry();
+  return { ok: true, root, entries: (await scan.list(root.id)) ?? [] };
+}
+
+/**
+ * Whether sending `target` to the Recycle Bin would take a meeting in progress
+ * with it — the folder being recorded into, or one whose notes are being
+ * written, or any folder that holds either.
+ */
+function diskTrashBlocked(target) {
+  const busy = [...state.jobs.keys()];
+  if (state.phase === 'recording' && state.currentDir) busy.push(state.currentDir);
+  if (busy.some((dir) => isWithin(target, dir))) return 'A meeting in there is still being recorded or processed.';
+  return '';
+}
+
+/**
+ * Moves an entry the page was shown to the Recycle Bin, after asking.
+ *
+ * @param {number} id
+ * @returns {Promise<{ ok: boolean, reason?: string }>}
+ */
+async function trashDiskEntry(id) {
+  const node = disk.scan?.resolve(id);
+  if (!node) return { ok: false, reason: 'That entry is not in the current scan any more.' };
+  if (node.path === disk.scan.root) return { ok: false, reason: 'The folder being measured cannot be deleted from here.' };
+  const blocked = diskTrashBlocked(node.path);
+  if (blocked) return { ok: false, reason: blocked };
+
+  const parent = libraryWindow && !libraryWindow.isDestroyed() ? libraryWindow : null;
+  const options = {
+    type: 'warning',
+    buttons: ['Move to Recycle Bin', 'Keep'],
+    defaultId: 1,
+    cancelId: 1,
+    title: 'Move to the Recycle Bin?',
+    message: `Move this ${node.isDirectory ? 'folder' : 'file'} to the Recycle Bin?`,
+    detail: node.path,
+  };
+  const { response } = parent
+    ? await dialog.showMessageBox(parent, options)
+    : await dialog.showMessageBox(options);
+  if (response !== 0) return { ok: false };
+
+  const failure = await shell.trashItem(node.path).then(
+    () => '',
+    (err) => err.message,
+  );
+  if (failure) {
+    log.error('could not trash', node.path, failure);
+    return { ok: false, reason: `Windows would not move that to the Recycle Bin: ${failure}` };
+  }
+  log.info('trashed from disk usage', node.path);
+  disk.scan?.forget(id);
+  // It may have been a meeting, or the notes folder's parent.
+  notifyLibrary();
+  return { ok: true };
+}
+
 // ------------------------------------------------------------------- first run
 //
 // Everything below exists because the app can be installed into a state where
@@ -2032,6 +2149,44 @@ if (!app.requestSingleInstanceLock()) {
   ipcMain.handle('library:rename', (event, req) => {
     if (!fromLibrary(event)) return { ok: false, reason: '' };
     return renameMeeting(String(req?.id ?? ''), req?.title);
+  });
+
+  // Disk usage. The folder comes from a dialog and every later call names an
+  // entry by the id the scan issued — never a path, in either direction.
+  const diskId = (id) => (Number.isSafeInteger(id) && id > 0 ? id : 0);
+
+  ipcMain.handle('disk:choose', (event) => {
+    if (!fromLibrary(event)) return { ok: false };
+    return chooseDiskFolder();
+  });
+
+  ipcMain.handle('disk:cancel', (event) => {
+    if (!fromLibrary(event)) return false;
+    cancelDiskScan();
+    return true;
+  });
+
+  ipcMain.handle('disk:list', async (event, id) => {
+    if (!fromLibrary(event) || !disk.scan) return null;
+    try {
+      return await disk.scan.list(diskId(id));
+    } catch (err) {
+      log.error('disk list failed', err);
+      return null;
+    }
+  });
+
+  ipcMain.handle('disk:reveal', (event, id) => {
+    if (!fromLibrary(event)) return false;
+    const node = disk.scan?.resolve(diskId(id));
+    if (!node) return false;
+    shell.showItemInFolder(node.path);
+    return true;
+  });
+
+  ipcMain.handle('disk:trash', (event, id) => {
+    if (!fromLibrary(event)) return { ok: false, reason: '' };
+    return trashDiskEntry(diskId(id));
   });
 
   // Starting a meeting from the library rather than the tray. Neither call is

@@ -30,6 +30,7 @@ Local-only meeting notes app for Windows. Records mic + system audio, transcribe
 │   │   ├── pdf.js         # HTML → PDF via hidden BrowserWindow
 │   │   ├── paths.js       # Meeting folder naming, file names, speaker labels
 │   │   ├── library.js     # Read-only view over the notes folder (list, read, search)
+│   │   ├── diskusage.js   # Disk usage walk: folder totals, entries by opaque id
 │   │   ├── settings.js    # JSON settings store (%APPDATA%/Minarrador)
 │   │   ├── snippets.js    # Quick-copy shorthand store (%APPDATA%/Minarrador)
 │   │   ├── dictations.js  # Dictation archive store (%APPDATA%/Minarrador)
@@ -42,7 +43,7 @@ Local-only meeting notes app for Windows. Records mic + system audio, transcribe
 │       ├── pcm-worklet.js # AudioWorklet that ships PCM to main
 │       ├── preload.js     # contextBridge exposing IPC to renderer
 │       ├── transcript.*   # Live transcript window (page, styles, view, preload)
-│       ├── library.*      # The app window: sidebar + Recording, Quick copy, Settings
+│       ├── library.*      # The app window: sidebar + Recording, Quick copy, Disk usage, Settings
 │       ├── dictate-capture.*   # Mic-only worker behind the dictation hotkey
 │       ├── dictate-indicator.* # Floating "listening" pill (page, styles, view, preload)
 │       └── dictations.*        # Dictation history window (page, styles, view, preload)
@@ -201,8 +202,8 @@ rail, and the settings pane.
 
 **The window is a sidebar of features.** A permanent `.sidebar` on the left
 picks what the rest of the window shows — Recording (the rail and the reader),
-Quick copy, and Settings pinned to the bottom. Each is a `view.mode`
-(`SECTIONS` in `library.js`: `reader`, `quickcopy`, `settings`) and
+Quick copy, Disk usage, and Settings pinned to the bottom. Each is a `view.mode`
+(`SECTIONS` in `library.js`: `reader`, `quickcopy`, `disk`, `settings`) and
 `showSection()` is the one way between them; the rail is shown only for
 `reader`. A new feature is a button at the end of `.nav-features`, a key in
 `SECTIONS` (and in `SECTIONS` in the preload, if main should be able to open
@@ -384,6 +385,39 @@ closing keeps the edit; only *Discard changes* throws it away. Both `snippets:*`
 check `event.sender.id` against the library window. It saves itself shortly
 after typing stops, on blur, on leaving the feature and before the window
 closes — never a way to discard work — and each save refreshes the tray.
+
+### Disk usage (`diskusage.js` + the library window's Disk usage feature)
+
+Ported from the standalone File Size Viewer: pick a folder, see what is taking
+the space inside it as a tree that opens a level at a time, largest first, with
+a share-of-parent bar, loose files gathered into one line beside subfolders, and
+per-entry *Show in Explorer* and *Move to Recycle Bin*.
+
+**No path ever crosses into the page, in either direction.** The folder comes
+from `dialog.showOpenDialog` in main (`chooseDiskFolder`), exactly like the notes
+folder. `DiskScan` then hands the page opaque numeric ids for every entry it
+lists and keeps the path behind each one; `disk:list`, `disk:reveal` and
+`disk:trash` all name an id. An id from a previous scan resolves to nothing, so
+the page can only ever act on something this scan listed from inside the folder
+the user picked.
+
+**The tree is walked once.** The original re-walked every subfolder on each
+expand; `walk()` records the total of every directory it passes through, so an
+expand is one `readdir` plus lookups. Symlinks and junctions are counted as the
+link and never followed — Windows keeps junctions that loop back up their own
+tree. Sizes are *size on disk* (rounded up to a 4 KB cluster, since Node reports
+no `blksize` on Windows). The scan lives for as long as the library window and
+is aborted and dropped when it closes.
+
+**Deleting goes through main, like deleting a meeting.** `trashDiskEntry` raises
+its own native confirmation, uses `shell.trashItem`, refuses the scanned root
+and anything holding a meeting that is recording or mid-pipeline
+(`diskTrashBlocked`), and takes the entry's weight off the totals itself
+(`forget`) — the page's number is never trusted for that. It calls
+`notifyLibrary()` afterwards, since what went may have been a meeting.
+
+The image-on-hover preview from the original was not carried over: it needs
+`file:` in `img-src`, and this window's CSP is `img-src 'self'`.
 
 ### Voice input (`dictation.js`, `dictations.js`, `paste.js`)
 
@@ -643,7 +677,13 @@ Each stage in `pipeline.js` is a standalone async function (`transcribe`, `summa
 | `library:delete` | library → main (invoke) | `id` → `{ ok, reason }`; main raises the confirmation itself |
 | `library:changed` | main → library | — (the folder changed; re-list) |
 | `library:progress` | main → library | `libraryActivity()` — a run advanced; update in place, read nothing |
-| `library:show` | main → library | `'settings'` \| `'quickcopy'` — open the window onto that feature |
+| `library:show` | main → library | `'settings'` \| `'quickcopy'` \| `'disk'` — open the window onto that feature |
+| `disk:choose` | library → main (invoke) | → `{ ok, root, entries, reason }` — main shows the folder dialog, then walks it; `ok` false with no reason is a cancelled dialog |
+| `disk:cancel` | library → main (invoke) | → `true`, after aborting the walk in flight |
+| `disk:list` | library → main (invoke) | entry id → `{ id, name, isDirectory, size, hasChildren?, inaccessible? }[]`, largest first, or `null` |
+| `disk:reveal` | library → main (invoke) | entry id → shown in Explorer? |
+| `disk:trash` | library → main (invoke) | entry id → `{ ok, reason }`; main raises the confirmation itself |
+| `disk:progress` | main → library | `{ files, dirs, current }` — a walk advancing, throttled to `PROGRESS_MIN_MS` |
 | `library:minimize` / `library:close` | library → main | — |
 | `settings:get` | library → main (invoke) | → `settingsState()` |
 | `settings:set` | library → main (invoke) | patch → `settingsState()` |

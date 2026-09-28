@@ -20,7 +20,7 @@ const navEls = [...document.querySelectorAll('.nav-item')];
 const sectionNameEl = document.getElementById('section-name');
 
 /** The sidebar's features, by the mode each one puts the window in. */
-const SECTIONS = { reader: 'Recording', quickcopy: 'Quick copy', settings: 'Settings' };
+const SECTIONS = { reader: 'Recording', quickcopy: 'Quick copy', disk: 'Disk usage', settings: 'Settings' };
 
 /**
  * How long quick copy waits after the last keystroke before writing the list.
@@ -56,7 +56,7 @@ const view = {
   tab: 'notes',
   /**
    * Which feature the sidebar has open: 'reader' (Recording — the rail and the
-   * meeting it has open), 'quickcopy' or 'settings'. Only the first shows the rail.
+   * meeting it has open), 'quickcopy', 'disk' or 'settings'. Only the first shows the rail.
    */
   mode: 'reader',
   /** settingsState() from the main process, or null before it has been asked for. */
@@ -394,6 +394,9 @@ const ICONS = {
   clock: ['M12 21a9 9 0 1 0 0-18 9 9 0 0 0 0 18z', 'M12 7v5l3 2'],
   rename: ['M4 20h4L19 9l-4-4L4 16z', 'M13 7l4 4'],
   trash: ['M4 7h16', 'M9 7V4h6v3', 'M6 7l1 13h10l1-13'],
+  file: ['M14 3H7a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V8z', 'M14 3v5h5'],
+  files: ['M8 3h7l4 4v10a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2z', 'M4 7v12a2 2 0 0 0 2 2h9'],
+  reveal: ['M14 4h6v6', 'M20 4l-9 9', 'M18 14v5a1 1 0 0 1-1 1H5a1 1 0 0 1-1-1V7a1 1 0 0 1 1-1h5'],
 };
 
 function icon(name) {
@@ -1679,6 +1682,9 @@ async function showSection(mode) {
   } else if (mode === 'quickcopy') {
     // Re-entering reloads from disk; staying put keeps what is being typed.
     if (entering) renderQuickCopy();
+  } else if (mode === 'disk') {
+    // The tree is kept while the window is open, so coming back finds it as left.
+    if (entering) renderDisk();
   } else if (view.meeting) {
     renderReader(view.meeting);
   } else {
@@ -2363,6 +2369,337 @@ async function renderQuickCopy() {
   setQuickCopyStatus('Saved', false);
 }
 
+// ----------------------------------------------------------------- disk usage
+
+/**
+ * The Disk usage feature: a folder someone picked, measured once, as a tree
+ * that opens a level at a time, largest first.
+ *
+ * Every entry is an id the main process issued — this page never holds a path
+ * it could send back. Names and the chosen folder's own path arrive for display
+ * only, and go into the DOM as text.
+ */
+const diskView = {
+  /** The folder being measured, as `{ id, name, size }`, or null before a scan. */
+  root: null,
+  /** Folder id → its entries, largest first, once it has been opened. */
+  children: new Map(),
+  /** Entry id → the id of the folder it was listed in, for walking totals up. */
+  parents: new Map(),
+  /** Open folder ids, and `files:<id>` for an open "loose files" group. */
+  expanded: new Set(),
+  /** Folder ids whose listing is on its way. */
+  loading: new Set(),
+  scanning: false,
+  /** `{ files, dirs, current }` from the walk in flight. */
+  progress: null,
+  /** A sentence about the last scan or delete that did not go through. */
+  message: '',
+  /** Bumped per scan, so a scan that was superseded cannot land over the new one. */
+  seq: 0,
+  /** The live-updating scan counter, so progress moves without a re-render. */
+  progressEl: null,
+};
+
+const DISK_UNITS = ['B', 'KB', 'MB', 'GB', 'TB'];
+
+function fmtSize(bytes) {
+  let size = bytes;
+  let unit = 0;
+  while (size >= 1024 && unit < DISK_UNITS.length - 1) {
+    size /= 1024;
+    unit++;
+  }
+  return `${unit ? size.toFixed(size < 10 ? 2 : 1) : size} ${DISK_UNITS[unit]}`;
+}
+
+const fmtCount = (n) => Number(n ?? 0).toLocaleString();
+
+function diskProgressText(p) {
+  if (!p) return 'Choose a folder in the dialog…';
+  return `${fmtCount(p.dirs)} folders · ${fmtCount(p.files)} files`;
+}
+
+async function chooseDiskFolder() {
+  const seq = ++diskView.seq;
+  diskView.scanning = true;
+  diskView.progress = null;
+  diskView.message = '';
+  if (view.mode === 'disk') renderDisk();
+
+  let result;
+  try {
+    result = await window.library.disk.choose();
+  } catch {
+    result = { ok: false, reason: 'The scan failed.' };
+  }
+  if (seq !== diskView.seq) return;
+  diskView.scanning = false;
+  if (result?.ok) {
+    diskView.root = result.root;
+    diskView.children = new Map([[result.root.id, result.entries ?? []]]);
+    diskView.parents = new Map((result.entries ?? []).map((e) => [e.id, result.root.id]));
+    diskView.expanded = new Set([result.root.id]);
+    diskView.loading = new Set();
+  } else if (result?.reason) {
+    diskView.message = result.reason;
+  }
+  if (view.mode === 'disk') renderDisk();
+}
+
+async function toggleDiskFolder(id) {
+  if (diskView.expanded.has(id)) {
+    diskView.expanded.delete(id);
+    drawDiskTree();
+    return;
+  }
+  if (!diskView.children.has(id)) {
+    const seq = diskView.seq;
+    diskView.loading.add(id);
+    drawDiskTree();
+    const entries = await window.library.disk.list(id).catch(() => null);
+    if (seq !== diskView.seq) return;
+    diskView.loading.delete(id);
+    if (!entries) {
+      diskView.message = 'That folder is not in the current scan any more — choose the folder again.';
+      renderDisk();
+      return;
+    }
+    diskView.children.set(id, entries);
+    for (const e of entries) diskView.parents.set(e.id, id);
+  }
+  diskView.expanded.add(id);
+  drawDiskTree();
+}
+
+async function trashDiskEntry(id) {
+  const seq = diskView.seq;
+  const result = await window.library.disk.trash(id).catch(() => ({ ok: false, reason: 'The delete failed.' }));
+  // A new scan started while the confirmation was up; this tree is gone.
+  if (seq !== diskView.seq) return;
+  if (!result?.ok) {
+    if (result?.reason) {
+      diskView.message = result.reason;
+      if (view.mode === 'disk') renderDisk();
+    }
+    return;
+  }
+  // Take it out of its folder, and its weight out of every folder above it,
+  // the same way main has already done for its own totals.
+  const parentId = diskView.parents.get(id);
+  const siblings = diskView.children.get(parentId) ?? [];
+  const gone = siblings.find((e) => e.id === id);
+  diskView.children.set(
+    parentId,
+    siblings.filter((e) => e.id !== id),
+  );
+  const bytes = gone?.size ?? 0;
+  for (let up = parentId; up !== undefined; up = diskView.parents.get(up)) {
+    const holder = up === diskView.root?.id ? [diskView.root] : diskView.children.get(diskView.parents.get(up)) ?? [];
+    const entry = holder.find((e) => e.id === up);
+    if (entry) entry.size = Math.max(0, entry.size - bytes);
+  }
+  diskView.message = '';
+  if (view.mode === 'disk') renderDisk();
+}
+
+/** A share of the parent as a bar, cool when small and warm when it dominates. */
+function diskBar(size, parentSize) {
+  const pct = parentSize ? (size / parentSize) * 100 : 0;
+  const track = el('div', 'du-bar');
+  const fill = el('div', 'du-bar-fill');
+  fill.style.width = `${Math.max(pct, 0.5)}%`;
+  fill.style.backgroundColor = `hsl(${200 - pct * 1.5}, 70%, 58%)`;
+  track.append(fill);
+  return track;
+}
+
+function diskActionButton(iconName, title, action, id, danger = false) {
+  const button = el('button', `du-act${danger ? ' danger' : ''}`);
+  button.type = 'button';
+  button.title = title;
+  button.setAttribute('aria-label', title);
+  button.dataset.action = action;
+  button.dataset.id = String(id);
+  button.append(icon(iconName));
+  return button;
+}
+
+/**
+ * One line of the tree. `kind` is 'dir', 'file' or 'group' (the loose files of
+ * a folder that also has subfolders, gathered so they compete as one line).
+ */
+function diskRow({ kind, id, name, size, parentSize, depth, open, loading, inaccessible, toggle }) {
+  const row = el('div', `du-row${inaccessible ? ' inaccessible' : ''}`);
+  const nameCell = el('div', 'du-name');
+  nameCell.style.paddingLeft = `${depth * 18}px`;
+
+  const twisty = el('button', 'du-twisty', toggle ? (loading ? '…' : open ? '▾' : '▸') : '');
+  twisty.type = 'button';
+  if (toggle) {
+    twisty.dataset.action = 'toggle';
+    twisty.dataset.id = String(toggle);
+    twisty.setAttribute('aria-expanded', String(Boolean(open)));
+    twisty.setAttribute('aria-label', open ? `Collapse ${name}` : `Expand ${name}`);
+  } else {
+    twisty.disabled = true;
+    twisty.tabIndex = -1;
+  }
+  const label = el('span', 'du-label', name);
+  label.title = inaccessible ? `${name} — could not be read (${inaccessible})` : name;
+  nameCell.append(twisty, icon(kind === 'dir' ? 'folder' : kind === 'group' ? 'files' : 'file'), label);
+
+  const sizeCell = el('div', 'du-size', inaccessible ? 'unreadable' : fmtSize(size));
+  const pctCell = el('div', 'du-pct', parentSize && !inaccessible ? `${((size / parentSize) * 100).toFixed(1)}%` : '');
+
+  const actions = el('div', 'du-actions');
+  if (kind !== 'group') {
+    actions.append(
+      diskActionButton('reveal', 'Show in Explorer', 'reveal', id),
+      diskActionButton('trash', 'Move to Recycle Bin', 'trash', id, true),
+    );
+  }
+
+  row.append(nameCell, diskBar(size, parentSize), sizeCell, pctCell, actions);
+  return row;
+}
+
+/** The rows under one open folder, recursively, in the order they are drawn. */
+function diskRows(folderId, folderSize, depth, out) {
+  const entries = diskView.children.get(folderId) ?? [];
+  const folders = entries.filter((e) => e.isDirectory);
+  const files = entries.filter((e) => !e.isDirectory);
+
+  const pushEntry = (entry, parentSize, level) => {
+    const open = diskView.expanded.has(entry.id);
+    out.push(
+      diskRow({
+        kind: entry.isDirectory ? 'dir' : 'file',
+        id: entry.id,
+        name: entry.name,
+        size: entry.size,
+        parentSize,
+        depth: level,
+        open,
+        loading: diskView.loading.has(entry.id),
+        inaccessible: entry.inaccessible,
+        toggle: entry.isDirectory ? entry.id : null,
+      }),
+    );
+    if (entry.isDirectory && open) diskRows(entry.id, entry.size, level + 1, out);
+  };
+
+  // Loose files only get a line of their own beside subfolders; a folder of
+  // nothing but files just lists them.
+  if (!folders.length || !files.length) {
+    for (const entry of entries) pushEntry(entry, folderSize, depth);
+    return;
+  }
+  const groupKey = `files:${folderId}`;
+  const groupSize = files.reduce((sum, f) => sum + f.size, 0);
+  const lines = [...folders, { group: true, size: groupSize }].sort((a, b) => b.size - a.size);
+  for (const line of lines) {
+    if (!line.group) {
+      pushEntry(line, folderSize, depth);
+      continue;
+    }
+    const open = diskView.expanded.has(groupKey);
+    out.push(
+      diskRow({
+        kind: 'group',
+        name: `Loose files (${files.length})`,
+        size: groupSize,
+        parentSize: folderSize,
+        depth,
+        open,
+        toggle: groupKey,
+      }),
+    );
+    if (open) for (const file of files) pushEntry(file, groupSize, depth + 1);
+  }
+}
+
+function drawDiskTree() {
+  const tree = readerEl.querySelector('.du-tree');
+  if (!tree || !diskView.root) return;
+  const rows = [];
+  diskRows(diskView.root.id, diskView.root.size, 0, rows);
+  if (!rows.length) rows.push(el('div', 'du-empty', 'This folder is empty.'));
+  tree.replaceChildren(...rows);
+}
+
+function renderDisk() {
+  const doc = el('div', 'doc du-doc');
+  doc.append(
+    el('h1', '', 'Disk usage'),
+    el(
+      'p',
+      'settings-lead',
+      'Pick a folder to see what is taking the space inside it, largest first. Anything deleted from here goes to the Recycle Bin.',
+    ),
+  );
+
+  const toolbar = el('div', 'qc-toolbar');
+  const choose = el('button', 'button primary', diskView.root ? 'Measure another folder…' : 'Choose a folder…');
+  choose.type = 'button';
+  choose.disabled = diskView.scanning;
+  choose.addEventListener('click', () => chooseDiskFolder());
+  toolbar.append(choose);
+  if (diskView.scanning) {
+    const cancel = el('button', 'button', 'Cancel');
+    cancel.type = 'button';
+    cancel.addEventListener('click', () => window.library.disk.cancel());
+    toolbar.append(cancel);
+  }
+  doc.append(toolbar);
+
+  if (diskView.message) doc.append(el('div', 'notice notice-warn', diskView.message));
+
+  diskView.progressEl = null;
+  if (diskView.scanning) {
+    const box = el('div', 'du-scan');
+    const counts = el('div', 'du-scan-counts', diskProgressText(diskView.progress));
+    const current = el('div', 'du-scan-current', diskView.progress?.current ?? '');
+    box.append(counts, current);
+    diskView.progressEl = { counts, current };
+    doc.append(box);
+  } else if (diskView.root) {
+    const head = el('div', 'du-head');
+    const where = el('span', 'du-root', diskView.root.name);
+    where.title = diskView.root.name;
+    const reveal = diskActionButton('reveal', 'Show in Explorer', 'reveal', diskView.root.id);
+    reveal.addEventListener('click', () => window.library.disk.reveal(diskView.root.id));
+    head.append(where, el('span', 'du-total', fmtSize(diskView.root.size)), reveal);
+
+    const columns = el('div', 'du-row du-columns');
+    columns.append(el('div', '', 'Name'), el('div'), el('div', 'du-size', 'Size on disk'), el('div'), el('div'));
+
+    const tree = el('div', 'du-tree');
+    tree.setAttribute('role', 'tree');
+    tree.addEventListener('click', (e) => {
+      const button = e.target.closest('button[data-action]');
+      if (!button) return;
+      const { action } = button.dataset;
+      const raw = button.dataset.id;
+      if (action === 'toggle' && raw.startsWith('files:')) {
+        if (diskView.expanded.has(raw)) diskView.expanded.delete(raw);
+        else diskView.expanded.add(raw);
+        drawDiskTree();
+      } else if (action === 'toggle') {
+        toggleDiskFolder(Number(raw));
+      } else if (action === 'reveal') {
+        window.library.disk.reveal(Number(raw));
+      } else if (action === 'trash') {
+        trashDiskEntry(Number(raw));
+      }
+    });
+    doc.append(head, columns, tree);
+  }
+
+  readerEl.replaceChildren(doc);
+  drawDiskTree();
+}
+
 /** Closing is not a way to discard: whatever is on screen goes to disk first. */
 async function closeWindow() {
   await saveQuickCopy();
@@ -2671,6 +3008,16 @@ window.library.settings.onMicTest((p) => {
   if (!els || view.mode !== 'settings') return;
   if (els.bar) els.bar.style.width = `${Math.min(100, Math.round(view.micTest.level * 600))}%`;
   if (els.note && view.micTest.note) els.note.textContent = view.micTest.note;
+});
+
+// A disk walk reports a few times a second; the counter moves in place.
+window.library.disk.onProgress((p) => {
+  if (!diskView.scanning) return;
+  diskView.progress = p;
+  const els = diskView.progressEl;
+  if (!els || view.mode !== 'disk') return;
+  els.counts.textContent = diskProgressText(p);
+  els.current.textContent = p.current ?? '';
 });
 
 // Main asking for a section, e.g. the tray's quick-copy "add one…" item.

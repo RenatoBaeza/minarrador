@@ -156,6 +156,16 @@ without one, it shows the start of the text) and the text to copy. It saves
 itself as you type and appears in the menu straight away. Everything lives in `snippets.json` next to
 your settings.
 
+### Disk usage
+
+**Disk usage** in the app window's sidebar (`Ctrl+3`) shows what is taking the
+space in a folder — handy when a year of meeting audio has quietly filled a
+drive. Choose a folder, and it is measured once and shown largest first; open
+any subfolder to go a level deeper, with loose files gathered into one line so
+they compete with the folders beside them. Hover a line to show it in Explorer
+or move it to the Recycle Bin (you're asked first, and a meeting that is still
+recording or being written up can't be deleted from here).
+
 ### Voice input (dictation)
 
 Press **`Win+Shift+X`** anywhere in Windows to open the microphone, say what you

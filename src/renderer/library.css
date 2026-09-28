@@ -1664,3 +1664,216 @@ label.row:hover {
 .qce-stats.full {
   color: #fbbf24;
 }
+
+/* -------------------------------------------------------------- disk usage */
+
+/* A tree wants more width than prose: long names, a bar, two numbers and two
+   actions all share the line. */
+.du-doc {
+  max-width: 948px;
+}
+
+.du-doc > .notice {
+  margin: 0 0 14px;
+}
+
+.du-scan {
+  border: 1px solid #2c2c34;
+  border-radius: 8px;
+  background: #1b1b21;
+  padding: 14px 16px;
+}
+
+.du-scan-counts {
+  font-variant-numeric: tabular-nums;
+  color: #eaeaea;
+}
+
+/* Changes a few times a second; truncated so the box never changes height. */
+.du-scan-current {
+  margin-top: 6px;
+  font-family: Consolas, 'Cascadia Mono', monospace;
+  font-size: 12px;
+  color: #6b7280;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.du-head {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin: 0 0 10px;
+}
+
+.du-root {
+  flex: 1;
+  min-width: 0;
+  font-weight: 600;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  direction: rtl;
+  text-align: left;
+}
+
+.du-total {
+  flex: none;
+  font-variant-numeric: tabular-nums;
+  background: #24242c;
+  border-radius: 999px;
+  padding: 2px 10px;
+  font-size: 12.5px;
+}
+
+/* name | bar | size | share | actions */
+.du-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 120px 84px 52px 60px;
+  align-items: center;
+  gap: 10px;
+  min-height: 30px;
+  padding: 0 6px;
+  border-radius: 6px;
+}
+
+.du-tree .du-row:hover {
+  background: #1f1f26;
+}
+
+.du-columns {
+  min-height: 24px;
+  font-size: 11.5px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: #6b7280;
+  border-bottom: 1px solid #2c2c34;
+  border-radius: 0;
+  margin-bottom: 4px;
+}
+
+.du-name {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+}
+
+.du-name .icon {
+  flex: none;
+  width: 16px;
+  height: 16px;
+  fill: none;
+  stroke: #8b8b98;
+  stroke-width: 1.8;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+.du-label {
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.du-row.inaccessible .du-label,
+.du-row.inaccessible .du-size {
+  color: #6b7280;
+  font-style: italic;
+}
+
+.du-twisty {
+  flex: none;
+  width: 18px;
+  height: 18px;
+  padding: 0;
+  border: 0;
+  background: none;
+  color: #9ca3af;
+  font: inherit;
+  font-size: 12px;
+  line-height: 1;
+}
+
+.du-twisty:hover:not(:disabled) {
+  color: #eaeaea;
+}
+
+.du-bar {
+  height: 6px;
+  border-radius: 3px;
+  background: #24242c;
+  overflow: hidden;
+}
+
+.du-bar-fill {
+  height: 100%;
+  border-radius: 3px;
+}
+
+.du-size,
+.du-pct {
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+  font-size: 12.5px;
+}
+
+.du-pct {
+  color: #6b7280;
+}
+
+.du-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 2px;
+  opacity: 0;
+}
+
+/* Two actions on every line would be noise; they appear on the line in reach. */
+.du-row:hover .du-actions,
+.du-row:focus-within .du-actions {
+  opacity: 1;
+}
+
+.du-act {
+  width: 26px;
+  height: 26px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+  border: 0;
+  border-radius: 5px;
+  background: none;
+  color: #9ca3af;
+}
+
+.du-act .icon {
+  width: 15px;
+  height: 15px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.8;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+.du-act:hover {
+  background: #2e2e38;
+  color: #eaeaea;
+}
+
+.du-act.danger:hover {
+  background: #e11d48;
+  color: #fff;
+}
+
+.du-head .du-act {
+  flex: none;
+}
+
+.du-empty {
+  padding: 18px 6px;
+  color: #6b7280;
+}
