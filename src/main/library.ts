@@ -4,11 +4,19 @@
 //
 // Pure fs/path, no Electron, so it can be exercised from a plain Node test the
 // way the rest of src/main is.
+//
+// Everything that touches the disk is asynchronous. This runs in the main
+// process, which is also the thread that receives `capture:pcm` and writes the
+// WAV — and a search used to read every transcript on disk with synchronous
+// calls, so typing in the search box during a meeting held up the recording and
+// the tray clock for as long as the read took. What is read is also cached
+// (see LibraryCache), so the same archive is not re-read on every keystroke.
 
 import fs from 'node:fs';
+import fsp from 'node:fs/promises';
 import path from 'node:path';
 
-import { FILES, SPEAKERS, parseFolderStamp, parseSpeakerLine, readTitle, type Speaker } from './paths';
+import { FILES, SPEAKERS, normaliseTitle, parseFolderStamp, parseSpeakerLine, type Speaker } from './paths';
 import type {
   ActionItem,
   Decision,
@@ -29,27 +37,67 @@ const SNIPPET_PAD = 70;
 const MAX_QUERY = 120;
 /** How much of ERROR.txt the reader quotes before it stops being a sentence. */
 const ERROR_CHARS = 400;
+/**
+ * Folders read at once while listing.
+ *
+ * Enough to keep the disk busy, few enough that a notes folder with thousands
+ * of entries does not open thousands of handles in one go.
+ */
+const LIST_CONCURRENCY = 16;
+/**
+ * Transcript text kept in memory for search, in characters.
+ *
+ * An hour of meeting is ~50k characters, so this is several hundred meetings —
+ * far past the point where the cache stops being the thing that matters. Past
+ * it, the oldest entries are dropped and simply read again when searched.
+ */
+const MAX_CACHED_CHARS = 32 * 1024 * 1024;
+
+/**
+ * The files whose contents decide what a card says.
+ *
+ * Their size and modification time are the cache key: a pipeline run, a rename,
+ * a failure note or a live caption all change one of them, and nothing else a
+ * card shows can change without one of them changing too. The audio is left out
+ * on purpose — it grows every second while recording, and only its existence
+ * matters to a card.
+ */
+const CARD_FILES = [
+  FILES.meta,
+  FILES.notesJson,
+  FILES.title,
+  FILES.transcript,
+  FILES.liveTranscript,
+  'ERROR.txt',
+  'UNPROCESSED.txt',
+];
 
 /** A parsed JSON file on disk, whose fields are only as trustworthy as whoever last edited it. */
 type Loose = Record<string, unknown>;
 
-const readJson = (file: string): Loose | null => {
+const parseJson = (raw: string | null): Loose | null => {
+  if (raw === null) return null;
   try {
-    const parsed: unknown = JSON.parse(fs.readFileSync(file, 'utf8'));
+    const parsed: unknown = JSON.parse(raw);
     return parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? (parsed as Loose) : null;
   } catch {
-    // Missing, half-written, or hand-edited into nonsense — all the same here.
+    // Half-written, or hand-edited into nonsense — the same as missing here.
     return null;
   }
 };
 
-const readText = (file: string): string => {
+/** A file's text, or null when it cannot be read. */
+const readOrNull = async (file: string): Promise<string | null> => {
   try {
-    return fs.readFileSync(file, 'utf8');
+    return await fsp.readFile(file, 'utf8');
   } catch {
-    return '';
+    return null;
   }
 };
+
+const readJson = async (file: string): Promise<Loose | null> => parseJson(await readOrNull(file));
+
+const readText = async (file: string): Promise<string> => (await readOrNull(file)) ?? '';
 
 /** A field of a loosely-parsed object that is expected to be a list. */
 const arrayOf = (value: unknown): unknown[] => (Array.isArray(value) ? value : []);
@@ -61,21 +109,17 @@ const objectOf = (value: unknown): Loose => (value && typeof value === 'object' 
  * The first `bytes` of a file, so a four-hour transcript costs the same as a
  * four-minute one when all that is wanted is the opening line.
  */
-function head(file: string, bytes = PREVIEW_BYTES): string {
-  let fd: number | null = null;
+async function head(file: string, bytes = PREVIEW_BYTES): Promise<string> {
+  let handle: fsp.FileHandle | null = null;
   try {
-    fd = fs.openSync(file, 'r');
+    handle = await fsp.open(file, 'r');
     const buf = Buffer.alloc(bytes);
-    const read = fs.readSync(fd, buf, 0, bytes, 0);
-    return buf.subarray(0, read).toString('utf8');
+    const { bytesRead } = await handle.read(buf, 0, bytes, 0);
+    return buf.subarray(0, bytesRead).toString('utf8');
   } catch {
     return '';
   } finally {
-    if (fd !== null) {
-      try {
-        fs.closeSync(fd);
-      } catch {}
-    }
+    await handle?.close().catch(() => {});
   }
 }
 
@@ -96,6 +140,101 @@ const SPEAKER_PREFIX = new RegExp(`^(?:${Object.values(SPEAKERS).join('|')}): `,
 const spoken = (text: unknown): string => String(text ?? '').replace(SPEAKER_PREFIX, '');
 
 /**
+ * Runs `fn` over `items`, at most `limit` at a time, keeping the input order.
+ */
+async function mapPool<T, R>(items: T[], limit: number, fn: (item: T) => Promise<R>): Promise<R[]> {
+  const out = new Array<R>(items.length);
+  let next = 0;
+  const worker = async (): Promise<void> => {
+    while (next < items.length) {
+      const i = next++;
+      out[i] = await fn(items[i]);
+    }
+  };
+  await Promise.all(Array.from({ length: Math.min(limit, items.length) }, worker));
+  return out;
+}
+
+// ---------------------------------------------------------------------- cache
+
+interface CachedCard {
+  signature: string;
+  card: MeetingCard;
+}
+
+interface CachedText {
+  signature: string;
+  /** The transcript as spoken — speaker labels removed — and its lower-case twin for matching. */
+  text: string;
+  lower: string;
+}
+
+/**
+ * What the library has already read, keyed by folder (cards) and by file
+ * (transcripts), and valid for as long as the files behind it are unchanged.
+ *
+ * Nothing has to invalidate it by hand: every entry carries the sizes and
+ * modification times it was built from, and a list compares those first — one
+ * `readdir` and a few `stat`s per folder instead of reading and parsing its
+ * notes, its meta and the head of its transcript. A search over a warm cache
+ * reads no transcript at all. That is what `library:changed` costs now: the one
+ * folder that changed is read again, and every other card comes from here.
+ */
+export class LibraryCache {
+  readonly cards = new Map<string, CachedCard>();
+  readonly texts = new Map<string, CachedText>();
+  /** Characters held in `texts`, kept under MAX_CACHED_CHARS. */
+  chars = 0;
+  /** Counters for the tests and for the timing line main logs per list. */
+  readonly stats = { cardHits: 0, cardMisses: 0, textHits: 0, textMisses: 0 };
+
+  constructor(readonly maxChars = MAX_CACHED_CHARS) {}
+
+  clear(): void {
+    this.cards.clear();
+    this.texts.clear();
+    this.chars = 0;
+  }
+
+  /** Forgets every folder under `root` that `seen` does not list — ones deleted or renamed away. */
+  prune(root: string, seen: Set<string>): void {
+    for (const dir of this.cards.keys()) {
+      if (path.dirname(dir) === root && !seen.has(dir)) this.cards.delete(dir);
+    }
+    for (const [file, entry] of this.texts) {
+      const dir = path.dirname(file);
+      if (path.dirname(dir) === root && !seen.has(dir)) {
+        this.texts.delete(file);
+        this.chars -= entry.text.length;
+      }
+    }
+  }
+
+  putText(file: string, entry: CachedText): void {
+    const old = this.texts.get(file);
+    if (old) {
+      this.texts.delete(file);
+      this.chars -= old.text.length;
+    }
+    // One transcript bigger than the whole budget is read each time instead.
+    if (entry.text.length > this.maxChars) return;
+    // A Map iterates in insertion order, so the first key is the oldest read.
+    for (const [key, value] of this.texts) {
+      if (this.chars + entry.text.length <= this.maxChars) break;
+      this.texts.delete(key);
+      this.chars -= value.text.length;
+    }
+    this.texts.set(file, entry);
+    this.chars += entry.text.length;
+  }
+}
+
+/** The cache main uses; tests pass their own. */
+export const defaultCache = new LibraryCache();
+
+// -------------------------------------------------------------------- folders
+
+/**
  * Resolves a meeting id to its folder, refusing anything that is not a direct
  * child of the notes folder.
  *
@@ -103,6 +242,9 @@ const spoken = (text: unknown): string => String(text ?? '').replace(SPEAKER_PRE
  * this is the single place that decides which paths the window can reach. A
  * nested path, a `..`, or an absolute path all fail the same test: their parent
  * is not the notes folder.
+ *
+ * Synchronous on purpose: it is one stat, and every caller in main needs the
+ * answer before it can decide anything else.
  *
  * @returns the absolute folder, or null when the id is not one
  */
@@ -122,20 +264,37 @@ export function meetingDir(notesDir: string, id: unknown): string | null {
   return dir;
 }
 
+/** What a folder holds, read once per list: its file names, and a key for its card. */
+interface FolderState {
+  names: Set<string>;
+  signature: string;
+}
+
 /**
- * The best transcript a folder holds, and which one it is.
+ * Lists a folder and stats the files a card depends on.
  *
- * transcript.txt is the pipeline's careful pass and always wins. The live
- * preview is the fallback, and it is the reason a meeting whose pipeline never
- * ran is still readable at all — it was written line by line while the meeting
- * happened, so it exists exactly in the case where nothing else does.
+ * @returns null when the folder cannot be read at all
  */
-export function transcriptSource(dir: string): { file: string; source: TranscriptSource } {
-  const full = path.join(dir, FILES.transcript);
-  if (fs.existsSync(full)) return { file: full, source: 'pipeline' };
-  const live = path.join(dir, FILES.liveTranscript);
-  if (fs.existsSync(live)) return { file: live, source: 'live' };
-  return { file: '', source: 'none' };
+async function folderState(dir: string): Promise<FolderState | null> {
+  let names: Set<string>;
+  try {
+    names = new Set(await fsp.readdir(dir));
+  } catch {
+    return null;
+  }
+  const parts = await Promise.all(
+    CARD_FILES.filter((name) => names.has(name)).map(async (name) => {
+      try {
+        const st = await fsp.stat(path.join(dir, name));
+        return `${name}:${st.size}:${st.mtimeMs}`;
+      } catch {
+        return `${name}:?`;
+      }
+    }),
+  );
+  // Existence alone for the rest of what a card reports.
+  for (const name of [FILES.audio, FILES.notes, FILES.pdf]) if (names.has(name)) parts.push(name);
+  return { names, signature: parts.join('|') };
 }
 
 /**
@@ -145,8 +304,27 @@ export function transcriptSource(dir: string): { file: string; source: Transcrip
  * A meeting is recognised by its artefacts rather than by its name, so a
  * renamed folder still shows up and an unrelated one never does.
  */
-const isMeeting = (dir: string): boolean =>
-  [FILES.audio, FILES.notesJson, FILES.meta].some((f) => fs.existsSync(path.join(dir, f)));
+const isMeeting = (names: Set<string>): boolean => [FILES.audio, FILES.notesJson, FILES.meta].some((f) => names.has(f));
+
+/**
+ * The best transcript a folder holds, and which one it is.
+ *
+ * transcript.txt is the pipeline's careful pass and always wins. The live
+ * preview is the fallback, and it is the reason a meeting whose pipeline never
+ * ran is still readable at all — it was written line by line while the meeting
+ * happened, so it exists exactly in the case where nothing else does.
+ */
+function pickTranscript(dir: string, names: Set<string>): { file: string; source: TranscriptSource } {
+  if (names.has(FILES.transcript)) return { file: path.join(dir, FILES.transcript), source: 'pipeline' };
+  if (names.has(FILES.liveTranscript)) return { file: path.join(dir, FILES.liveTranscript), source: 'live' };
+  return { file: '', source: 'none' };
+}
+
+/** {@link pickTranscript} for a caller that has not listed the folder. */
+export function transcriptSource(dir: string): { file: string; source: TranscriptSource } {
+  const names = new Set([FILES.transcript, FILES.liveTranscript].filter((f) => fs.existsSync(path.join(dir, f))));
+  return pickTranscript(dir, names);
+}
 
 /** An ISO string for whatever the meta file happened to store, or null. */
 function isoOr(value: unknown): string | null {
@@ -155,16 +333,19 @@ function isoOr(value: unknown): string | null {
 }
 
 /**
- * What one meeting looks like in the list: enough to render a card and decide
- * whether to open it, and nothing that costs a full file read.
+ * Builds one card from disk, uncached.
  *
  * @param dir absolute meeting folder
  */
-export function describeMeeting(dir: string): MeetingCard {
+async function buildCard(dir: string, names: Set<string>): Promise<MeetingCard> {
   const id = path.basename(dir);
-  const meta = readJson(path.join(dir, FILES.meta)) ?? {};
-  const notes = readJson(path.join(dir, FILES.notesJson));
-  const has = (name: string): boolean => fs.existsSync(path.join(dir, name));
+  const [metaRaw, notes, titleRaw] = await Promise.all([
+    names.has(FILES.meta) ? readJson(path.join(dir, FILES.meta)) : null,
+    names.has(FILES.notesJson) ? readJson(path.join(dir, FILES.notesJson)) : null,
+    names.has(FILES.title) ? readText(path.join(dir, FILES.title)) : '',
+  ]);
+  const meta = metaRaw ?? {};
+  const has = (name: string): boolean => names.has(name);
 
   // meta.json is written twice — once when the audio closes, once when the
   // pipeline finishes — so it is the best answer when present. The folder name
@@ -172,15 +353,15 @@ export function describeMeeting(dir: string): MeetingCard {
   let startedAt = isoOr(meta.startedAt) ?? isoOr(parseFolderStamp(id));
   if (!startedAt) {
     try {
-      startedAt = fs.statSync(dir).mtime.toISOString();
+      startedAt = (await fsp.stat(dir)).mtime.toISOString();
     } catch {
       startedAt = new Date(0).toISOString();
     }
   }
 
-  const transcript = transcriptSource(dir);
+  const transcript = pickTranscript(dir, names);
   const summary = arrayOf(notes?.summary).filter((s): s is string => typeof s === 'string');
-  const preview = clip(spoken(summary[0] ?? (transcript.file ? head(transcript.file) : '')));
+  const preview = clip(spoken(summary[0] ?? (transcript.file ? await head(transcript.file) : '')));
 
   const failed = has('ERROR.txt');
   const status: MeetingStatus = notes
@@ -194,7 +375,7 @@ export function describeMeeting(dir: string): MeetingCard {
   // A title someone typed beats the one a model guessed at, always. Otherwise
   // every meeting is called whatever the summariser made of it, and an archive
   // of "Weekly Sync Discussion" is an archive nobody can find anything in.
-  const chosen = readTitle(dir);
+  const chosen = normaliseTitle(titleRaw);
   const generated = typeof notes?.title === 'string' && notes.title.trim() ? notes.title.trim() : '';
 
   return {
@@ -219,6 +400,53 @@ export function describeMeeting(dir: string): MeetingCard {
   };
 }
 
+/** A card from the cache when its files are unchanged, from disk otherwise. */
+async function cardFor(dir: string, state: FolderState, cache: LibraryCache): Promise<MeetingCard> {
+  const hit = cache.cards.get(dir);
+  if (hit && hit.signature === state.signature) {
+    cache.stats.cardHits++;
+    return hit.card;
+  }
+  cache.stats.cardMisses++;
+  const card = await buildCard(dir, state.names);
+  cache.cards.set(dir, { signature: state.signature, card });
+  return card;
+}
+
+/**
+ * What one meeting looks like in the list: enough to render a card and decide
+ * whether to open it, and nothing that costs a full file read.
+ *
+ * @param dir absolute meeting folder
+ * @returns null when the folder cannot be read
+ */
+export async function describeMeeting(dir: string, cache: LibraryCache = defaultCache): Promise<MeetingCard | null> {
+  const state = await folderState(dir);
+  return state ? { ...(await cardFor(dir, state, cache)) } : null;
+}
+
+/** A transcript as spoken, from the cache when the file is unchanged. */
+async function spokenTranscript(file: string, cache: LibraryCache): Promise<CachedText | null> {
+  if (!file) return null;
+  let signature: string;
+  try {
+    const st = await fsp.stat(file);
+    signature = `${st.size}:${st.mtimeMs}`;
+  } catch {
+    return null;
+  }
+  const hit = cache.texts.get(file);
+  if (hit && hit.signature === signature) {
+    cache.stats.textHits++;
+    return hit;
+  }
+  cache.stats.textMisses++;
+  const text = spoken(await readText(file));
+  const entry = { signature, text, lower: text.toLowerCase() };
+  cache.putText(file, entry);
+  return entry;
+}
+
 /**
  * Finds `query` in a meeting and returns a quotable hit.
  *
@@ -228,19 +456,24 @@ export function describeMeeting(dir: string): MeetingCard {
  *
  * @returns null when nothing matched
  */
-function findInMeeting(dir: string, card: MeetingCard, query: string): { count: number; snippet: string } | null {
+async function findInMeeting(
+  dir: string,
+  names: Set<string>,
+  card: MeetingCard,
+  query: string,
+  cache: LibraryCache,
+): Promise<{ count: number; snippet: string } | null> {
   const needle = query.toLowerCase();
-  const transcript = spoken(readText(transcriptSource(dir).file));
+  const transcript = await spokenTranscript(pickTranscript(dir, names).file, cache);
   const haystacks = [
-    { text: transcript, quote: true },
-    { text: card.title, quote: false },
-    { text: card.preview, quote: false },
+    { text: transcript?.text ?? '', lower: transcript?.lower ?? '', quote: true },
+    { text: card.title, lower: card.title.toLowerCase(), quote: false },
+    { text: card.preview, lower: card.preview.toLowerCase(), quote: false },
   ];
 
   let count = 0;
   let snippet = '';
-  for (const { text, quote } of haystacks) {
-    const lower = text.toLowerCase();
+  for (const { text, lower, quote } of haystacks) {
     let at = lower.indexOf(needle);
     if (at === -1) continue;
     if (!snippet) {
@@ -263,12 +496,17 @@ function findInMeeting(dir: string, card: MeetingCard, query: string): { count: 
  * Every meeting in the notes folder, newest first.
  *
  * `query` filters by title and transcript text and annotates each survivor
- * with where it was found.
+ * with where it was found. The cards handed back are copies, so a caller (or a
+ * search annotating one) never edits what the cache holds.
  */
-export function listMeetings(notesDir: string, { query = '' }: { query?: unknown } = {}): MeetingCard[] {
+export async function listMeetings(
+  notesDir: string,
+  { query = '', cache = defaultCache }: { query?: unknown; cache?: LibraryCache } = {},
+): Promise<MeetingCard[]> {
+  const root = path.resolve(notesDir);
   let entries: fs.Dirent[];
   try {
-    entries = fs.readdirSync(notesDir, { withFileTypes: true });
+    entries = await fsp.readdir(root, { withFileTypes: true });
   } catch {
     // No notes folder yet: a first run, or a configured folder that has gone
     // missing. Both are an empty library rather than an error.
@@ -276,22 +514,28 @@ export function listMeetings(notesDir: string, { query = '' }: { query?: unknown
   }
 
   const needle = String(query ?? '').trim().slice(0, MAX_QUERY);
-  const meetings: MeetingCard[] = [];
-  for (const entry of entries) {
-    if (!entry.isDirectory()) continue;
-    const dir = path.join(notesDir, entry.name);
-    if (!isMeeting(dir)) continue;
+  const dirs = entries.filter((entry) => entry.isDirectory()).map((entry) => path.join(root, entry.name));
+  const seen = new Set<string>();
 
-    const card = describeMeeting(dir);
+  const found = await mapPool(dirs, LIST_CONCURRENCY, async (dir): Promise<MeetingCard | null> => {
+    const state = await folderState(dir);
+    if (!state || !isMeeting(state.names)) return null;
+    seen.add(dir);
+
+    const card = { ...(await cardFor(dir, state, cache)) };
     if (needle) {
-      const hit = findInMeeting(dir, card, needle);
-      if (!hit) continue;
+      const hit = await findInMeeting(dir, state.names, card, needle, cache);
+      if (!hit) return null;
       card.matches = hit.count;
       card.preview = hit.snippet;
     }
-    meetings.push(card);
-  }
+    return card;
+  });
+  // A folder that is no longer here (deleted, renamed, stopped being a
+  // meeting) should not keep its transcript in memory for the rest of the day.
+  cache.prune(root, seen);
 
+  const meetings = found.filter((m): m is MeetingCard => m !== null);
   // Descending by start time, with the folder name breaking a tie — two
   // meetings in the same second only differ by the `-2` suffix.
   meetings.sort((a, b) => b.startedAt.localeCompare(a.startedAt) || b.id.localeCompare(a.id));
@@ -317,8 +561,8 @@ const asSpeaker = (value: unknown): Speaker =>
  * @param source which file is being read; the live preview writes one caption
  *   per line, the pipeline one paragraph per chunk
  */
-function transcriptLines(dir: string, file: string, source: TranscriptSource): TranscriptLine[] {
-  const parsed = source === 'pipeline' ? readJson(path.join(dir, FILES.transcriptJson)) : null;
+async function transcriptLines(dir: string, file: string, source: TranscriptSource): Promise<TranscriptLine[]> {
+  const parsed = source === 'pipeline' ? await readJson(path.join(dir, FILES.transcriptJson)) : null;
   const segments = Array.isArray(parsed?.segments) ? (parsed.segments as unknown[]) : null;
   if (segments) {
     return segments
@@ -331,7 +575,8 @@ function transcriptLines(dir: string, file: string, source: TranscriptSource): T
       }));
   }
 
-  return readText(file)
+  if (!file) return [];
+  return (await readText(file))
     .split(source === 'live' ? /\n+/ : /\n{2,}/)
     .map((block) => block.trim())
     .filter(Boolean)
@@ -345,8 +590,8 @@ function transcriptLines(dir: string, file: string, source: TranscriptSource): T
  * stack. The first line of that stack is what went wrong; the frames under it
  * belong in the file rather than in a window someone is reading notes in.
  */
-function errorSummary(dir: string): string {
-  const raw = head(path.join(dir, 'ERROR.txt'), PREVIEW_BYTES);
+async function errorSummary(dir: string): Promise<string> {
+  const raw = await head(path.join(dir, 'ERROR.txt'), PREVIEW_BYTES);
   if (!raw.trim()) return '';
   const body = raw.split(/\n\s*\n/).slice(1).join('\n').trim() || raw;
   const first = body.split('\n').find((line) => line.trim()) ?? '';
@@ -362,14 +607,26 @@ function errorSummary(dir: string): string {
  *
  * @returns null when the id does not name a meeting folder
  */
-export function readMeeting(notesDir: string, id: unknown): MeetingDetail | null {
+export async function readMeeting(
+  notesDir: string,
+  id: unknown,
+  cache: LibraryCache = defaultCache,
+): Promise<MeetingDetail | null> {
   const dir = meetingDir(notesDir, id);
-  if (!dir || !isMeeting(dir)) return null;
+  if (!dir) return null;
+  const state = await folderState(dir);
+  if (!state || !isMeeting(state.names)) return null;
 
-  const card = describeMeeting(dir);
-  const notes = readJson(path.join(dir, FILES.notesJson)) ?? {};
-  const meta = readJson(path.join(dir, FILES.meta)) ?? {};
-  const transcript = transcriptSource(dir);
+  const card = await cardFor(dir, state, cache);
+  const transcript = pickTranscript(dir, state.names);
+  const [notesRaw, metaRaw, lines, error] = await Promise.all([
+    readJson(path.join(dir, FILES.notesJson)),
+    readJson(path.join(dir, FILES.meta)),
+    transcriptLines(dir, transcript.file, transcript.source),
+    card.status === 'failed' ? errorSummary(dir) : Promise.resolve(''),
+  ]);
+  const notes = notesRaw ?? {};
+  const meta = metaRaw ?? {};
   const sources = objectOf(meta.sources);
   const models = objectOf(meta.models);
 
@@ -387,12 +644,12 @@ export function readMeeting(notesDir: string, id: unknown): MeetingDetail | null
     summary: arrayOf(notes.summary).filter((s): s is string => typeof s === 'string' && Boolean(s.trim())),
     decisions,
     actionItems,
-    transcript: transcriptLines(dir, transcript.file, transcript.source),
+    transcript: lines,
     // What went wrong, quoted rather than pointed at: "ERROR.txt says why" asks
     // someone to leave the window to read one sentence, and that sentence is
     // almost always the reason the Generate notes button beneath it will fail
     // too — usually Ollama being down.
-    error: card.status === 'failed' ? errorSummary(dir) : '',
+    error,
     sources: {
       mic: Boolean(sources.mic),
       system: Boolean(sources.system),

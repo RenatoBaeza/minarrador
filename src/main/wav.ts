@@ -37,7 +37,7 @@ export interface PcmChunk {
   endSeconds: number;
 }
 
-function buildHeader(dataBytes: number, sampleRate: number, channels: number): Buffer {
+export function buildHeader(dataBytes: number, sampleRate: number, channels: number): Buffer {
   const h = Buffer.alloc(HEADER_BYTES);
   const byteRate = sampleRate * channels * BYTES_PER_SAMPLE;
   h.write('RIFF', 0);

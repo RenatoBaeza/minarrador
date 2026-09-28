@@ -42,10 +42,61 @@ export interface Settings {
   dictateAutoPaste: boolean;
 }
 
+/**
+ * The settings the library window may change — and so the only ones that ever
+ * arrive from a renderer.
+ *
+ * Nothing here names a place: the notes folder, the Ollama host and the whisper
+ * root are paths, and a page that could set one could point this app's reading
+ * and writing anywhere on the machine. The preload's FIELDS and main's gate are
+ * both typed from this one list, so the two cannot drift apart.
+ */
+export type LibrarySettingKey =
+  | 'suggestOnAudio'
+  | 'startAtLogin'
+  | 'liveTranscript'
+  | 'captureMic'
+  | 'captureSystem'
+  | 'separateChannels'
+  | 'micDeviceId'
+  | 'micDeviceLabel'
+  | 'silenceStopMinutes'
+  | 'maxRecordingMinutes'
+  | 'preventSleep'
+  | 'hotkey'
+  | 'dictateHotkey'
+  | 'dictateEngine'
+  | 'dictateAutoPaste'
+  | 'liveEngine'
+  | 'transcribeEngine'
+  | 'whisperModel'
+  | 'whisperThreads'
+  | 'transcribeModel'
+  | 'summaryModel';
+
 /** A quick-copy shorthand. */
 export interface Snippet {
   label: string;
   text: string;
+}
+
+/** How urgent a task is; 'none' sorts last. */
+export type TodoPriority = 'none' | 'low' | 'medium' | 'high';
+
+/** One task on the to-do list. */
+export interface Todo {
+  id: string;
+  title: string;
+  /** Free text, edited in the task editor. */
+  description: string;
+  /** '' for a task that belongs to no project. */
+  project: string;
+  priority: TodoPriority;
+  /** YYYY-MM-DD, or '' for no due date. */
+  due: string;
+  done: boolean;
+  createdAt: string;
+  updatedAt: string;
 }
 
 /** One entry in the dictation archive. */
@@ -162,6 +213,29 @@ export interface SettingsState {
   notesDirExists: boolean;
   snippetCount: number;
   recording: boolean;
+}
+
+/**
+ * One light on the record button's health strip.
+ *
+ * `wait` is the first seconds of a recording, before a source has had the
+ * chance to hear anything; `off` is a source the settings turned off.
+ */
+export interface HealthItem {
+  key: 'mic' | 'system' | 'whisper' | 'ollama';
+  label: string;
+  state: 'ok' | 'warn' | 'wait' | 'off';
+  detail: string;
+}
+
+/** Whether the next (or the just-started) meeting will produce notes. Built by health() in main. */
+export interface Health {
+  items: HealthItem[];
+  recording: boolean;
+  /** Seconds into the recording, or 0 when idle. */
+  elapsed: number;
+  /** Whether the strip should be on screen at all. */
+  show: boolean;
 }
 
 /** The settings pane's mic meter: a level, a status, or the end of the test. */

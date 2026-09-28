@@ -469,8 +469,83 @@ export interface RecordingResult extends WavCloseResult {
   channels: number;
 }
 
+/** What an IPC message arrives with: who sent it. */
+export interface IpcSender {
+  sender: { id: number };
+}
+
+/**
+ * The capture worker's window, as far as the controller needs it.
+ *
+ * An interface rather than BrowserWindow so the recovery path — the part of
+ * this module that has to work when everything else has gone wrong — can be
+ * driven by a test with a fake window, under plain Node.
+ */
+export interface WorkerWindow {
+  webContents: {
+    id: number;
+    send(channel: string, ...args: unknown[]): void;
+    on(event: 'render-process-gone', fn: (e: unknown, details: { reason?: string; exitCode?: number }) => void): void;
+  };
+  isDestroyed(): boolean;
+  destroy(): void;
+}
+
+/** Where the controller gets its window and its messages from. Electron's, unless a test says otherwise. */
+export interface CapturePlatform {
+  on(channel: string, listener: (event: IpcSender, ...args: never[]) => void): void;
+  /**
+   * Builds the worker. `loaded` settles when its page has loaded; the window
+   * is returned before that, because the page starts talking during the load
+   * and its messages are only accepted from the window the controller knows.
+   */
+  createWindow(controller: CaptureController): { win: WorkerWindow; loaded: Promise<unknown> };
+}
+
+/**
+ * The real thing: the hidden BrowserWindow that owns the Web Audio graph,
+ * listening on ipcMain.
+ */
+const electronPlatform: CapturePlatform = {
+  on: (channel, listener) => {
+    ipcMain.on(channel, listener as unknown as (event: Electron.IpcMainEvent, ...args: unknown[]) => void);
+  },
+  createWindow(controller) {
+    const win = new BrowserWindow({
+      show: false,
+      width: 420,
+      height: 320,
+      skipTaskbar: true,
+      webPreferences: {
+        preload: path.join(RENDERER, 'preload.js'),
+        contextIsolation: true,
+        nodeIntegration: false,
+        sandbox: true,
+        backgroundThrottling: false,
+      },
+    });
+
+    // Nothing in this window is user-facing; never let it appear.
+    win.on('close', (e) => {
+      if (!controller._quitting) e.preventDefault();
+    });
+
+    // The audio graph lives in the renderer, so its console is where capture
+    // problems surface. Mirror it into the log file.
+    win.webContents.on('console-message', (e) => {
+      const level = e.level === 'error' ? 'error' : e.level === 'warning' ? 'warn' : null;
+      if (level) log[level](`renderer: ${e.message}`);
+    });
+
+    // Allowed a device before the page loads, so its graph can open one the
+    // moment it starts.
+    mediaClients.add(win.webContents.id);
+    return { win, loaded: win.loadFile(path.join(RENDERER, 'capture.html')) };
+  },
+};
+
 export class CaptureController extends EventEmitter {
-  window: BrowserWindow | null = null;
+  window: WorkerWindow | null = null;
   writer: WavWriter | null = null;
   status: CaptureStatus = { micOk: false, systemOk: false, micError: '', systemError: '', micLabel: '', running: false };
   levels: CaptureLevels = { mixed: 0, mic: 0, system: 0 };
@@ -497,8 +572,24 @@ export class CaptureController extends EventEmitter {
   /** Set once when the file stops being writable, so it is reported once. */
   writeFailed = false;
 
-  constructor({ ollamaHost, whisper = null }: { ollamaHost?: string; whisper?: (LiveWhisper & { stop(): void }) | null } = {}) {
+  readonly platform: CapturePlatform;
+  /** How long after a crash the worker is rebuilt. A setting only so a test need not wait. */
+  readonly recoverDelayMs: number;
+
+  constructor({
+    ollamaHost,
+    whisper = null,
+    platform = electronPlatform,
+    recoverDelayMs = RECOVER_DELAY_MS,
+  }: {
+    ollamaHost?: string;
+    whisper?: (LiveWhisper & { stop(): void }) | null;
+    platform?: CapturePlatform;
+    recoverDelayMs?: number;
+  } = {}) {
     super();
+    this.platform = platform;
+    this.recoverDelayMs = recoverDelayMs;
     this.ollama = new Ollama(ollamaHost);
     this.whisper = whisper;
     this.liveTranscriber = new LiveTranscriber({ ollama: this.ollama, whisper });
@@ -541,7 +632,7 @@ export class CaptureController extends EventEmitter {
   }
 
   async init(): Promise<void> {
-    ipcMain.on('capture:pcm', (event, arrayBuffer: ArrayBuffer) => {
+    this.platform.on('capture:pcm', (event: IpcSender, arrayBuffer: ArrayBuffer) => {
       // Only the capture worker feeds the recording.
       if (event.sender.id !== this.window?.webContents.id) return;
       const buf = Buffer.from(arrayBuffer);
@@ -559,7 +650,7 @@ export class CaptureController extends EventEmitter {
       }
     });
 
-    ipcMain.on('capture:level', (event, levels: CaptureLevels) => {
+    this.platform.on('capture:level', (event: IpcSender, levels: CaptureLevels) => {
       if (event.sender.id !== this.window?.webContents.id) return;
       this.levels = levels;
       if (this.monitoring && !this.writer) this.detector.push(levels);
@@ -567,7 +658,7 @@ export class CaptureController extends EventEmitter {
       this.emit('levels', levels);
     });
 
-    ipcMain.on('capture:devices', (event, devices: unknown) => {
+    this.platform.on('capture:devices', (event: IpcSender, devices: unknown) => {
       if (event.sender.id !== this.window?.webContents.id) return;
       this.devices = (Array.isArray(devices) ? (devices as unknown[]) : [])
         .filter((d): d is { id: string; label?: unknown } =>
@@ -577,7 +668,7 @@ export class CaptureController extends EventEmitter {
       this.emit('devices', this.devices);
     });
 
-    ipcMain.on('capture:status', (event, status: Partial<CaptureStatus> & { fatal?: string }) => {
+    this.platform.on('capture:status', (event: IpcSender, status: Partial<CaptureStatus> & { fatal?: string }) => {
       if (event.sender.id !== this.window?.webContents.id) return;
       this.status = { ...this.status, ...status };
       if (status.fatal) log.error('capture fatal:', status.fatal);
@@ -600,42 +691,16 @@ export class CaptureController extends EventEmitter {
    * IPC handlers above must not be registered twice — a second set would double
    * every PCM buffer into the WAV.
    */
-  async #createWindow(): Promise<BrowserWindow> {
-    const win = new BrowserWindow({
-      show: false,
-      width: 420,
-      height: 320,
-      skipTaskbar: true,
-      webPreferences: {
-        preload: path.join(RENDERER, 'preload.js'),
-        contextIsolation: true,
-        nodeIntegration: false,
-        sandbox: true,
-        backgroundThrottling: false,
-      },
-    });
+  async #createWindow(): Promise<WorkerWindow> {
+    const { win, loaded } = this.platform.createWindow(this);
     this.window = win;
-    mediaClients.add(win.webContents.id);
-
-    // Nothing in this window is user-facing; never let it appear.
-    win.on('close', (e) => {
-      if (!this._quitting) e.preventDefault();
-    });
-
-    // The audio graph lives in the renderer, so its console is where capture
-    // problems surface. Mirror it into the log file.
-    win.webContents.on('console-message', (e) => {
-      const level = e.level === 'error' ? 'error' : e.level === 'warning' ? 'warn' : null;
-      if (level) log[level](`renderer: ${e.message}`);
-    });
 
     // The one failure this app cannot afford to miss. Nothing in the main
     // process notices a dead renderer on its own: the writer stays open, the
     // tray still says "Recording", and the WAV simply stops growing — so a
     // meeting ends as a few minutes of audio and no warning.
     win.webContents.on('render-process-gone', (_e, details) => this.#onRendererGone(win, details));
-
-    await win.loadFile(path.join(RENDERER, 'capture.html'));
+    await loaded;
     return win;
   }
 
@@ -650,7 +715,7 @@ export class CaptureController extends EventEmitter {
    *
    * @param win the window that died
    */
-  #onRendererGone(win: BrowserWindow, details: { reason?: string; exitCode?: number }): void {
+  #onRendererGone(win: WorkerWindow, details: { reason?: string; exitCode?: number }): void {
     // Only the live worker counts. Tearing the old window down during a rebuild
     // can raise this same event on it, and acting on that would schedule another
     // rebuild, which would tear down another window, for as long as the app runs.
@@ -675,7 +740,7 @@ export class CaptureController extends EventEmitter {
     this.recoverTimer = setTimeout(() => {
       this.recoverTimer = null;
       this.#rebuild(wasRecording).catch((err: unknown) => log.error('capture renderer rebuild failed', err));
-    }, RECOVER_DELAY_MS);
+    }, this.recoverDelayMs);
   }
 
   async #rebuild(wasRecording: boolean): Promise<void> {

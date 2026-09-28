@@ -19,7 +19,19 @@ Local-only meeting notes app for Windows. Records mic + system audio, transcribe
 ├── scripts/           # Dev/build helpers (icon gen, pipeline runner, capture test, whisper setup, copy-static)
 ├── src/
 │   ├── main/          # Electron main process
-│   │   ├── main.ts        # App lifecycle, tray wiring, recording start/stop
+│   │   ├── main.ts        # App lifecycle and the wiring between the modules below
+│   │   ├── context.ts     # Shared state + settings every main module reads (no Electron)
+│   │   ├── windows.ts     # Every window, notify(), and the fromLibrary/… sender checks
+│   │   ├── ui.ts          # settingsState, libraryActivity, health, tray refresh, notify* signals
+│   │   ├── recording.ts   # Start/stop/finalize, state.stopping, pipeline runs (deps injected, no Electron)
+│   │   ├── services.ts    # Ollama refresh/launch, meeting hotkey, applySetting
+│   │   ├── settings-gate.ts # What a settings patch from the window may change (pure)
+│   │   ├── audio-serve.ts # meeting-audio: — a meeting's WAV as mono, by byte range (pure)
+│   │   ├── ipc/           # One module per channel namespace
+│   │   │   ├── library.ts     # library:*, snippets:*, todos:*, transcript:*, the audio protocol
+│   │   │   ├── settings.ts    # settings:*, model pull, whisper install
+│   │   │   ├── disk.ts        # disk:*
+│   │   │   └── dictation.ts   # voice input, mic test, dictations:*
 │   │   ├── tray.ts        # System-tray icon & context menu (pure view)
 │   │   ├── capture.ts     # Audio capture controller + speech/silence detectors
 │   │   ├── pipeline.ts    # Post-recording chain: transcribe → summarise → PDF
@@ -33,6 +45,7 @@ Local-only meeting notes app for Windows. Records mic + system audio, transcribe
 │   │   ├── diskusage.ts   # Disk usage walk: folder totals, entries by opaque id
 │   │   ├── settings.ts    # JSON settings store (%APPDATA%/Minarrador)
 │   │   ├── snippets.ts    # Quick-copy shorthand store (%APPDATA%/Minarrador)
+│   │   ├── todos.ts       # To-do list store (%APPDATA%/Minarrador)
 │   │   ├── dictations.ts  # Dictation archive store (%APPDATA%/Minarrador)
 │   │   ├── dictation.ts   # Voice-input controller (mic capture + transcription)
 │   │   ├── paste.ts       # OS-level Ctrl+V via built-in PowerShell
@@ -49,7 +62,8 @@ Local-only meeting notes app for Windows. Records mic + system audio, transcribe
 │       ├── bridges.d.ts   # The `window.<name>` API each preload exposes, typed for both sides
 │       ├── tsconfig*.json # One project per environment: pages, preloads, worklet
 │       ├── transcript.*   # Live transcript window (page, styles, view, preload)
-│       ├── library.*      # The app window: sidebar + Recording, Quick copy, Disk usage, Settings
+│       ├── library.*      # The app window: sidebar + Recording, Quick copy, Disk usage, To-do, Settings
+│       ├── library-*.ts   # One module per sidebar feature (reader, quickcopy, disk, todos, settings) + common
 │       ├── dictate-capture.*   # Mic-only worker behind the dictation hotkey
 │       ├── dictate-indicator.* # Floating "listening" pill (page, styles, view, preload)
 │       └── dictations.*        # Dictation history window (page, styles, view, preload)
@@ -74,7 +88,7 @@ Everything that is *configured* rather than *done* lives in the library window �
 a menu is a poor place to be told that a model is not installed.
 
 **Recording is also bound to a global shortcut** (`Ctrl+Shift+R` by default,
-`applyHotkey()` in `main.ts`), because the twenty seconds at the start of a call
+`applyHotkey()` in `services.ts`), because the twenty seconds at the start of a call
 are exactly where finding a tray icon and reading a menu means the meeting goes
 unrecorded. The accelerator comes from `HOTKEY_CHOICES` in `settings.ts` and
 never from free text: a global shortcut is claimed against the whole desktop, so
@@ -87,7 +101,7 @@ colour is not confirmation that a room is being recorded, least of all when the
 recording was started from a keyboard.
 
 **The dictation hotkey is a second, independent global shortcut**
-(`Win+Shift+X` by default, `applyDictateHotkey()` in `main.ts`): press it, say a
+(`Win+Shift+X` by default, `applyDictateHotkey()` in `ipc/dictation.ts`): press it, say a
 sentence, press it again, and the transcribed text is pasted where you were
 typing. It is deliberately separate from the meeting hotkey — `globalShortcut`
 is unregistered one accelerator at a time rather than `unregisterAll`, which
@@ -151,7 +165,7 @@ Independent of the post-recording pipeline — a rough preview for the person in
 meeting, always superseded by the full pass over the saved WAV.
 
 **It is also kept.** Every line goes to `live-transcript.txt` in the meeting
-folder as it is produced (`appendLiveTranscript` in `main.ts`), which is what
+folder as it is produced (`appendLiveTranscript` in `ui.ts`), which is what
 turns the worst case from "a WAV" into "a rough transcript": the preview used to
 exist only in a window and was wiped the moment processing started, so a
 pipeline that then failed threw away text that already existed. It is appended
@@ -210,23 +224,42 @@ rail, and the settings pane.
 
 **The window is a sidebar of features.** A permanent `.sidebar` on the left
 picks what the rest of the window shows — Recording (the rail and the reader),
-Quick copy, Disk usage, and Settings pinned to the bottom. Each is a `view.mode`
-(`SECTIONS` in `library.ts`: `reader`, `quickcopy`, `disk`, `settings`) and
+Quick copy, Disk usage, To-do, and Settings pinned to the bottom. Each is a `view.mode`
+(`SECTIONS` in `library-common.ts`: `reader`, `quickcopy`, `disk`, `todos`, `settings`) and
 `showSection()` is the one way between them; the rail is shown only for
 `reader`. A new feature is a button at the end of `.nav-features`, a key in
 `SECTIONS` (and in `SECTIONS` in the preload, if main should be able to open
-onto it) and a render function. The title bar carries only the app icon, the
+onto it) and a module of its own — `library-<feature>.ts`, exporting its
+render function, imported by `library.ts` and wired into `showSection()`.
+`library.ts` is the entry point and owns only the sidebar, the keyboard and
+main's signals; the features share `library-common.ts` and send the window
+elsewhere through `navigate()` rather than importing the entry. They load as
+sibling ES modules — imports are written with `.js` — so there is still no
+bundler. The title bar carries only the app icon, the
 name, the current section and the window controls — the record button and the
 meetings-folder button sit at the top of the rail they act on.
 
 **The folder on disk is the source of truth, and the window only reads it.**
 There is no index and no database — `listMeetings()` walks the notes folder on
-every call, and a meeting is recognised by its artefacts (`audio.wav`,
+every call (through the cache described below), and a meeting is recognised by its artefacts (`audio.wav`,
 `notes.json`, `meta.json`) rather than by its name, so a folder renamed by hand
 still appears and the user's unrelated folders never do. **Nothing in
 `library.ts` writes, renames or deletes.** The four things the *window* can
-change all live in `main.ts` and all name a meeting by its folder name:
+change all live in `ipc/library.ts` and `recording.ts`, and all name a meeting by its folder name:
 `library:reprocess`, `library:record`, `library:rename` and `library:delete`.
+
+**Every read is asynchronous, and cached.** `library.ts` runs on the main
+process, which is also the thread that receives `capture:pcm` and writes the
+WAV; a search used to read every transcript with synchronous `fs` calls, so
+typing in the search box mid-meeting held up the recording and the tray clock.
+Everything now goes through `fs.promises`, and `LibraryCache` keeps each card
+(keyed by the size and mtime of the files a card is built from — `CARD_FILES`)
+and each transcript's searchable text (keyed by that file's size and mtime).
+Nothing invalidates it by hand: a list compares signatures, so `library:changed`
+re-reads only the folder that changed, and a warm search reads no transcript at
+all. Cards are handed out as copies, since a search annotates them. Folders that
+disappear are pruned, and transcript text is capped at `MAX_CACHED_CHARS`.
+`ipc/library.ts` logs the duration of every `library:list`.
 
 **The archive can be edited, or it rots.** Every misfire was permanent and every
 meeting was called whatever the summariser made of it. `deleteMeeting` uses
@@ -239,7 +272,7 @@ re-run and then quietly revert. `describeMeeting` prefers it over the model's
 title and keeps the model's as `generatedTitle`, so a rename can be undone.
 
 A card knows why it has no notes — `pending`, `unprocessed` (quit mid-run),
-`failed` (`ERROR.txt`) — and `main.ts` adds what only it can know, which
+`failed` (`ERROR.txt`) — and `ui.ts` (`libraryActivity`) adds what only main can know, which
 folder is recording and which are mid-pipeline, from `state.jobs`. The reader
 renders `notes.json` directly rather than re-parsing `notes.md`, since the JSON
 is the structured form the pipeline actually produced.
@@ -305,6 +338,33 @@ sends `library:record` and waits for the folder list to confirm it; neither call
 is awaited in main, since stopping runs the whole pipeline and no click should
 hang on minutes of work.
 
+**The record button carries a health strip.** Four lights under it — Mic,
+System, Whisper, Ollama — green, amber, grey for a source turned off, and a
+pulsing "listening" state (`health()` in `ui.ts`). It is shown while idle and
+for the first `HEALTH_WINDOW_SECONDS` (10) of a recording, because the failure
+it exists for can only be seen by listening: a system channel that is open and
+hears nothing, because the call is playing through a device the loopback is not
+on. `state.heard` keeps the loudest level each source has reached since Start
+(fed from capture's `levels`, against the detectors' 0.006 floor); a source
+still silent after the window turns amber and keeps the strip up. The most
+costly warning is spelled out in words. Main pushes it on `library:health` from
+`notifySettings`, `notifyLibrary` and the one-second tick while
+`healthTicking()`.
+
+**The reader plays the meeting.** A player sits under the title, and every
+timed transcript line's timestamp is a button that plays from there; the lines
+under the playhead are highlighted. The audio comes over the privileged
+`meeting-audio:` protocol (`registerAudioScheme` before ready, `protocol.handle`
+in `ipc/library.ts`), never `file:` — the URL carries only a meeting id, which
+goes through `openTarget`, so the only file it can return is a meeting's
+`audio.wav`, and the meeting being recorded is refused. `audio-serve.ts`
+downmixes a two-channel file to mono on the fly (mic-left/call-right is right
+for transcription and wrong in headphones) and maps each Range request from the
+mono file the player sees back onto the stereo file on disk. The page's CSP
+allows `media-src meeting-audio:` and nothing else. The `<audio>` element is
+kept across redraws of the same meeting, so a tab switch or a folder change does
+not stop playback.
+
 ### Settings (the settings pane, `settings:*`)
 
 The second thing the library window is: everything the tray's Settings submenu
@@ -316,14 +376,16 @@ label, and the difference in both cases is a whole meeting's notes. The pane
 therefore renders a value *and* whether the thing it names is installed, and
 marks the gap in red with what to do about it (`.row.missing`).
 
-`settingsState()` in `main.ts` is what makes that possible: the values, the
+`settingsState()` in `ui.ts` is what makes that possible: the values, the
 defaults, and the installed model lists, whisper's `describe()`, whether the
 notes folder still exists and whether Ollama answers — assembled in one place
 because the pane is only useful when it can compare the two halves.
 
 The window is still a renderer, so writing a setting is gated twice: the preload
-casts a fixed vocabulary of keys to the types the store expects, and
-`LIBRARY_SETTINGS` in main filters again on arrival. **Nothing that names a
+casts a fixed vocabulary of keys to the types the store expects (`FIELDS`), and
+`gateLibraryPatch` in `settings-gate.ts` filters again on arrival. Both are
+typed from `LibrarySettingKey` in `types.d.ts`, so they cannot drift apart, and
+`NoPathSettings` is a compile error the day a path-shaped key joins them. **Nothing that names a
 place is in that set.** The notes folder, the Ollama host and the whisper root
 are paths, and a page that could set one could point this app's reading and
 writing anywhere on the machine; the folder is changed through a dialog, where
@@ -383,7 +445,7 @@ shape. `normalize()` is the single gate — it runs on both the file and the IPC
 payload, keeps only `{ label, text }`, and drops any entry with an empty body
 since that could only ever be a dead menu row.
 
-The editor is `renderQuickCopy` in `library.ts`: one compact row per shorthand
+The editor is `renderQuickCopy` in `library-quickcopy.ts`: one compact row per shorthand
 (grip, name, first line of text, edit, delete) — the grip drags a row to a new
 place (or Alt+↑/↓ from the keyboard), and the order saved is the tray's order — with the pencil opening a modal
 `<dialog>` editor (`openQuickCopyEditor`) — case, trim, join, bullets, date/time,
@@ -426,6 +488,32 @@ and anything holding a meeting that is recording or mid-pipeline
 
 The image-on-hover preview from the original was not carried over: it needs
 `file:` in `img-src`, and this window's CSP is `img-src 'self'`.
+
+### To-do (`todos.ts` + the library window's To-do feature)
+
+A task list: each task has a title, a description, a project, a priority
+(`none`/`low`/`medium`/`high`), a due date (`YYYY-MM-DD`) and a done flag.
+Stored in `todos.json` for the same reason as `snippets.json`, and saved the
+same way — the page sends the whole list a moment after each change, on leaving
+the feature and before the window closes. `normalize()` is the single gate: a
+task needs only a title, an unknown priority or impossible date falls back to
+empty, and duplicate ids are reissued.
+
+**The array order is the manual order**, and it is the only order stored.
+Every other sort (priority, due date, project, title, date added, last edited)
+is a view `visibleTodos()` computes, so sorting by due date and back never
+loses the order someone dragged tasks into. Dragging is offered only in *My
+order*, and `commitTodoOrder()` permutes the visible tasks among the slots they
+already held — reordering one project's tasks never shuffles the hidden ones.
+Done tasks always sink below open ones; empty due dates and projects sort last
+in either direction. The view's choices live in `localStorage` — a per-window
+preference, not data.
+
+The description is written in a modal editor (`openTodoEditor`) with list,
+numbered-list, checklist, heading and date tools; like the quick-copy editor,
+every tool edits through `execCommand('insertText')` so Ctrl+Z undoes it,
+closing keeps the edit, and only *Discard changes* throws it away. Both
+`todos:*` channels check `event.sender.id` against the library window.
 
 ### Voice input (`dictation.ts`, `dictations.ts`, `paste.ts`)
 
@@ -646,13 +734,14 @@ rather than next to the config.
 
 1. Add the default in `settings.ts` → `defaults()`
 2. Add the field to the `Settings` interface in `src/shared/types.d.ts`
-3. Add the key to `LIBRARY_SETTINGS` in `main.ts` and to `FIELDS` in
-   `library-preload.ts` — unless it names a path or a host, which the window is
+3. Add the key to `LibrarySettingKey` in `types.d.ts`, then to `KEYS` in
+   `settings-gate.ts` and `FIELDS` in `library-preload.ts` (the compiler holds
+   the three together) — unless it names a path or a host, which the window is
    deliberately not given the vocabulary to set
-4. Render a row for it in `src/renderer/library.ts` (`toggleRow`, `selectRow` or
+4. Render a row for it in `src/renderer/library-settings.ts` (`toggleRow`, `selectRow` or
    `buttonRow`), in whichever section it belongs to, and mark it `missing` when
    the thing it names is not installed
-5. Apply it in `main.ts` → `applySetting`, the single path both the tray and the
+5. Apply it in `services.ts` → `applySetting`, the single path both the tray and the
    pane write through
 
 ### Modifying the pipeline
@@ -697,8 +786,12 @@ Each stage in `pipeline.ts` is a standalone async function (`transcribe`, `summa
 | `library:rename` | library → main (invoke) | `{ id, title }` → `{ ok, reason }`; an empty title restores the model's |
 | `library:delete` | library → main (invoke) | `id` → `{ ok, reason }`; main raises the confirmation itself |
 | `library:changed` | main → library | — (the folder changed; re-list) |
+| `library:health` | library → main (invoke) · main → library | → `health()`: `{ items, recording, elapsed, show }` — pushed when a source, a model or a recording's first seconds change it |
+| `meeting-audio://meeting/<id>` | library `<audio>` → main (protocol) | a meeting's `audio.wav` as mono WAV, with Range support; refused while that meeting records |
 | `library:progress` | main → library | `libraryActivity()` — a run advanced; update in place, read nothing |
-| `library:show` | main → library | `'settings'` \| `'quickcopy'` \| `'disk'` — open the window onto that feature |
+| `todos:list` | library → main (invoke) | → `Todo[]`, in manual order |
+| `todos:save` | library → main (invoke) | `Todo[]` → the list as stored |
+| `library:show` | main → library | `'settings'` \| `'quickcopy'` \| `'disk'` \| `'todos'` — open the window onto that feature |
 | `disk:choose` | library → main (invoke) | → `{ ok, root, entries, reason }` — main shows the folder dialog, then walks it; `ok` false with no reason is a cancelled dialog |
 | `disk:cancel` | library → main (invoke) | → `true`, after aborting the walk in flight |
 | `disk:list` | library → main (invoke) | entry id → `{ id, name, isDirectory, size, hasChildren?, inaccessible? }[]`, largest first, or `null` |

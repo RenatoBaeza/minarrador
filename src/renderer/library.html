@@ -2,7 +2,7 @@
 <html lang="en">
   <head>
     <meta charset="utf-8" />
-    <meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self'" />
+    <meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self'; media-src meeting-audio:" />
     <title>Minarrador</title>
     <link rel="stylesheet" href="library.css" />
   </head>
@@ -41,6 +41,12 @@
             </svg>
             <span>Disk usage</span>
           </button>
+          <button class="nav-item" data-mode="todos" type="button" title="To-do (Ctrl+4)">
+            <svg viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+              <path d="M4 6l1.5 1.5L8 5M4 12l1.5 1.5L8 11M4 18l1.5 1.5L8 17M11 6h9M11 12h9M11 18h9" />
+            </svg>
+            <span>To-do</span>
+          </button>
         </div>
         <button class="nav-item" data-mode="settings" type="button" title="Settings (Ctrl+,)">
           <svg viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
@@ -64,6 +70,8 @@
               </svg>
             </button>
           </div>
+          <!-- Whether the next meeting will produce notes; filled by renderHealth(). -->
+          <div id="health" class="health" role="status" aria-live="polite" hidden></div>
           <div class="search">
             <input
               id="query"

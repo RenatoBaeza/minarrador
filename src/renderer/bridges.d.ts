@@ -14,6 +14,7 @@ import type {
   DiskChoice,
   DiskEntry,
   DiskProgress,
+  Health,
   LibraryActivity,
   LibraryList,
   MeetingDetail,
@@ -23,6 +24,7 @@ import type {
   SettingsState,
   Snippet,
   Speaker,
+  Todo,
   TranscriptWindowState,
 } from '../shared/types';
 
@@ -93,7 +95,7 @@ export interface DictationsBridge {
 export type OpenTarget = 'folder' | 'pdf' | 'notes' | 'transcript' | 'audio';
 
 /** The sidebar features main may open the library window onto. */
-export type LibrarySection = 'reader' | 'quickcopy' | 'disk' | 'settings';
+export type LibrarySection = 'reader' | 'quickcopy' | 'disk' | 'todos' | 'settings';
 
 export interface LibraryBridge {
   speakers: SpeakerNames;
@@ -106,6 +108,9 @@ export interface LibraryBridge {
   reprocess(id: string): Promise<Outcome>;
   rename(id: string, title: string): Promise<Outcome>;
   delete(id: string): Promise<Outcome>;
+  audioUrl(id: string): string;
+  health(): Promise<Health | null>;
+  onHealth(fn: (health: Health) => void): void;
   onChanged(fn: () => void): void;
   onProgress(fn: (activity: Partial<LibraryActivity>) => void): void;
   onShow(fn: (section: LibrarySection) => void): void;
@@ -115,6 +120,11 @@ export interface LibraryBridge {
   quickCopy: {
     list(): Promise<Snippet[]>;
     save(items: Snippet[]): Promise<Snippet[]>;
+  };
+
+  todos: {
+    list(): Promise<Todo[]>;
+    save(items: Todo[]): Promise<Todo[]>;
   };
 
   disk: {

@@ -11,6 +11,9 @@
 // Quick copy goes through `quickCopy` below: the one list this window writes,
 // pinned to two strings per entry before it leaves the page.
 //
+// The to-do list goes through `todos` below: saved as a whole, like quick copy,
+// with every field pinned to its type before it leaves the page.
+//
 // Disk usage goes through `disk` below: the folder comes from a dialog in main,
 // and every entry after that is an id the scan issued.
 //
@@ -21,7 +24,7 @@
 import { contextBridge, ipcRenderer } from 'electron';
 
 import type { LibraryBridge, LibrarySection, OpenTarget, SpeakerNames } from './bridges';
-import type { Settings, Snippet } from '../shared/types';
+import type { LibrarySettingKey, Snippet, Todo } from '../shared/types';
 
 /** Things the window may ask the shell to open. Mirrors OPEN_TARGETS in library.ts. */
 const TARGETS: readonly OpenTarget[] = ['folder', 'pdf', 'notes', 'transcript', 'audio'];
@@ -32,11 +35,11 @@ const SPEAKERS: SpeakerNames = { mic: 'You', system: 'Others' };
 /**
  * Settings the page may change, and what each one is.
  *
- * Mirrors LIBRARY_SETTINGS in main.ts — main filters again on arrival, since a
- * preload is only the first gate — and pins the type here so a DOM value (which
+ * Typed from LibrarySettingKey, like main's gate in settings-gate.ts — main
+ * filters again on arrival, since a preload is only the first gate — and pins the type here so a DOM value (which
  * is always a string) cannot arrive as one where a boolean was meant.
  */
-const FIELDS: Partial<Record<keyof Settings, (value: unknown) => unknown>> = {
+const FIELDS: Record<LibrarySettingKey, (value: unknown) => unknown> = {
   suggestOnAudio: Boolean,
   startAtLogin: Boolean,
   liveTranscript: Boolean,
@@ -63,12 +66,25 @@ const FIELDS: Partial<Record<keyof Settings, (value: unknown) => unknown>> = {
 };
 
 /** The sidebar features main may open this window onto. Mirrors SECTIONS in library.ts. */
-const SECTIONS: readonly LibrarySection[] = ['reader', 'quickcopy', 'disk', 'settings'];
+const SECTIONS: readonly LibrarySection[] = ['reader', 'quickcopy', 'disk', 'todos', 'settings'];
 
 const plainSnippets = (items: unknown): Snippet[] =>
   (Array.isArray(items) ? (items as Partial<Snippet>[]) : []).map((item) => ({
     label: String(item?.label ?? ''),
     text: String(item?.text ?? ''),
+  }));
+
+const plainTodos = (items: unknown): Todo[] =>
+  (Array.isArray(items) ? (items as Partial<Todo>[]) : []).map((item) => ({
+    id: String(item?.id ?? ''),
+    title: String(item?.title ?? ''),
+    description: String(item?.description ?? ''),
+    project: String(item?.project ?? ''),
+    priority: String(item?.priority ?? 'none') as Todo['priority'],
+    due: String(item?.due ?? ''),
+    done: item?.done === true,
+    createdAt: String(item?.createdAt ?? ''),
+    updatedAt: String(item?.updatedAt ?? ''),
   }));
 
 const patch = (values: unknown): Record<string, unknown> => {
@@ -110,6 +126,20 @@ const api: LibraryBridge = {
    * `ok` false with no reason means the confirmation was declined.
    */
   delete: (id) => ipcRenderer.invoke('library:delete', String(id ?? '')),
+  /**
+   * Where the reader's player loads a meeting's audio from. The protocol
+   * resolves only a meeting id, through the same check as every channel here,
+   * and serves it downmixed to mono.
+   */
+  audioUrl: (id) => `meeting-audio://meeting/${encodeURIComponent(String(id ?? ''))}`,
+  /** Whether the next meeting will produce notes: the lights under the record button. */
+  health: () => ipcRenderer.invoke('library:health'),
+  /** The same, pushed when a source, a model or the first seconds of a recording change it. */
+  onHealth: (fn) => {
+    ipcRenderer.on('library:health', (_e, payload) => {
+      if (payload && Array.isArray(payload.items)) fn(payload);
+    });
+  },
   /** Fires when a recording starts or a pipeline run finishes, so the list can catch up. */
   onChanged: (fn) => {
     ipcRenderer.on('library:changed', () => fn());
@@ -137,6 +167,12 @@ const api: LibraryBridge = {
     list: () => ipcRenderer.invoke('snippets:list'),
     /** Resolves to the list as it was actually stored. */
     save: (items) => ipcRenderer.invoke('snippets:save', plainSnippets(items)),
+  },
+
+  todos: {
+    list: () => ipcRenderer.invoke('todos:list'),
+    /** Resolves to the list as it was actually stored. */
+    save: (items) => ipcRenderer.invoke('todos:save', plainTodos(items)),
   },
 
   /**
