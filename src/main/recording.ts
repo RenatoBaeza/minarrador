@@ -53,8 +53,10 @@ export interface RecordingDeps {
   notifyLibrary(): void;
   notifySettings(): void;
   notifyProgress(): void;
-  showTranscriptWindow(): void;
-  sendToTranscript(channel: string, payload?: unknown): void;
+  /** The activity payload, now: a pause someone clicked cannot wait out a throttle. */
+  sendActivity(): void;
+  /** Brings up the library on the meeting being recorded, where the live preview is shown. */
+  showLiveTranscript(): void;
   /** A modal error: the one way to refuse a Start with a sentence. */
   errorBox(title: string, body: string): void;
   openPath(target: string): void;
@@ -185,10 +187,9 @@ export function startRecording(): void {
     });
     state.phase = 'recording';
     applySleepBlocker();
-    if (settings.liveTranscript) d.showTranscriptWindow();
-    d.sendToTranscript('transcript:clear');
     d.refreshTray();
     d.notifyLibrary();
+    if (settings.liveTranscript) d.showLiveTranscript();
     // A recording started from a shortcut has no other confirmation at all, and
     // a tray icon changing colour is not one anywhere: this is the difference
     // between knowing the meeting is being captured and hoping it is.
@@ -205,6 +206,25 @@ export function startRecording(): void {
     applySleepBlocker();
     d.refreshTray();
   }
+}
+
+/**
+ * Pauses or resumes the meeting being recorded.
+ *
+ * The file stays open and the audio graph keeps running; what is said while
+ * paused is simply never written, so the clock — which is the length of the
+ * WAV — stands still with it.
+ *
+ * @returns false when there was no recording to change
+ */
+export function setRecordingPaused(paused: boolean): boolean {
+  const { capture } = ctx;
+  if (state.phase !== 'recording' || state.stopping || !capture) return false;
+  capture.setPaused(paused);
+  const d = use();
+  d.refreshTray();
+  d.sendActivity();
+  return true;
 }
 
 /** What the shortcut does: one key for both ends of a meeting. */
@@ -393,11 +413,6 @@ export async function stopRecording(): Promise<void> {
  */
 export async function processMeeting(dir: string, meta: MeetingMeta): Promise<RunResult | null> {
   const d = use();
-  // The rough live preview is superseded by the proper pass that follows, so
-  // clear it — but never force a window open on someone who closed it. The
-  // preview's own file stays on disk until the pipeline writes a real
-  // transcript over the top of it.
-  d.sendToTranscript('transcript:clear');
 
   // A folder carries one explanation at a time, and both of these are now out
   // of date. Left in place, a successful re-run would keep the meeting marked
@@ -417,7 +432,6 @@ export async function processMeeting(dir: string, meta: MeetingMeta): Promise<Ru
   const onProgress = (p: PipelineProgress): void => {
     if (p.phase === 'transcribing') {
       state.progress = `Transcribing ${p.done}/${p.total}…`;
-      if (p.text) d.sendToTranscript('transcript:line', { text: p.text, speaker: p.speaker });
     } else if (p.phase === 'summarising') {
       state.progress = p.total ? `Condensing ${p.done}/${p.total}…` : 'Writing notes…';
     } else if (p.phase === 'designing') {
@@ -475,7 +489,6 @@ export async function processMeeting(dir: string, meta: MeetingMeta): Promise<Ru
     d.refreshTray();
     // Whichever way the run ended, the folder now holds something new to read.
     d.notifyLibrary();
-    // The transcript window stays open; closing it is the user's call.
   }
 }
 

@@ -1,6 +1,6 @@
-// The library window's channels — the archive, quick copy, the to-do list — the
-// live transcript window's two, and the protocol the reader's player loads
-// audio from.
+// The library window's channels — the archive, the meeting being recorded,
+// quick copy, the to-do list — and the protocol the reader's player loads audio
+// from.
 //
 // The library reads the notes folder and nothing else. Every channel is
 // sender-checked with fromLibrary, and the folder name a page sends back is
@@ -24,9 +24,9 @@ import { AUDIO_SCHEME, monoSize, monoStream, parseRange, wavLayout } from '../au
 import { FILES, normaliseTitle } from '../paths';
 import { errorMessage } from '../errors';
 import { ctx, field, state } from '../context';
-import { confirm, fromLibrary, fromTranscript, windows } from '../windows';
+import { confirm, fromLibrary, windows } from '../windows';
 import { health, libraryActivity, notifyLibrary, notifySettings, refreshTray } from '../ui';
-import { meetingBusy, reprocessMeeting, startRecording, stopRecording } from '../recording';
+import { meetingBusy, reprocessMeeting, setRecordingPaused, startRecording, stopRecording } from '../recording';
 import type { LibraryList, Outcome } from '../../shared/types';
 
 /**
@@ -159,19 +159,6 @@ function handleAudio(): void {
 
 export function registerLibraryIpc(): void {
   handleAudio();
-
-  // Frameless windows have no system close button, so the page asks for one.
-  ipcMain.on('transcript:close', (event) => {
-    if (!fromTranscript(event)) return;
-    windows.transcript?.close();
-  });
-
-  // The preview's "copy so far" is the one way text leaves that window. The
-  // lines come from the page's own DOM, so this is a plain clipboard write.
-  ipcMain.on('transcript:copy', (event, text: unknown) => {
-    if (!fromTranscript(event)) return;
-    clipboard.writeText(String(text ?? ''));
-  });
 
   // Quick copy is edited in the library window's Quick copy feature. The store
   // normalises the payload regardless — it also has to survive a hand-edited
@@ -309,5 +296,31 @@ export function registerLibraryIpc(): void {
       stopRecording().catch((err: unknown) => log.error('stop from the library failed', err));
     }
     return true;
+  });
+
+  ipcMain.handle('library:pause', (event, paused: unknown) => {
+    if (!fromLibrary(event)) return false;
+    return setRecordingPaused(Boolean(paused));
+  });
+
+  // The reader's Stop asks first, natively: ending a meeting cannot be taken
+  // back, and a page is not the thing to vouch for having asked.
+  ipcMain.handle('library:stop', async (event): Promise<Outcome> => {
+    if (!fromLibrary(event)) return { ok: false, reason: '' };
+    if (state.phase !== 'recording') return { ok: false, reason: 'Nothing is being recorded.' };
+    const confirmed = await confirm({
+      type: 'question',
+      buttons: ['Stop recording', 'Keep recording'],
+      defaultId: 1,
+      cancelId: 1,
+      title: 'Stop recording?',
+      message: 'Stop recording this meeting?',
+      detail: 'The notes are written from what has been recorded so far. A stopped recording cannot be continued.',
+    });
+    if (!confirmed) return { ok: false, reason: '' };
+    // The recording may have ended on its own while the dialog was up.
+    if (state.phase !== 'recording') return { ok: true, reason: '' };
+    stopRecording().catch((err: unknown) => log.error('stop from the reader failed', err));
+    return { ok: true, reason: '' };
   });
 }

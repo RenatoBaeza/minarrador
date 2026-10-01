@@ -123,8 +123,21 @@ export interface JobProgress {
 /** What the library shows on folders the app is still busy with. */
 export interface LibraryActivity {
   recordingId: string | null;
+  /** Seconds of audio written so far, when the payload was built. */
+  elapsed: number;
+  /** True while the recording is paused: the clock stands still. */
+  paused: boolean;
+  /** Which live-preview engine is writing the captions, or '' when none is. */
+  liveEngine: string;
   processingIds: string[];
   processing: (JobProgress & { id: string })[];
+}
+
+/** One caption of the live preview, tagged with the meeting it was said in. */
+export interface LiveLine {
+  id: string;
+  text: string;
+  speaker: Speaker;
 }
 
 /** One step of the library's list: the cards, and what is happening to them. */
@@ -251,13 +264,6 @@ export interface DictateIndicatorState {
   state: 'listening' | 'transcribing' | 'done' | 'error';
   text?: string;
   error?: string;
-}
-
-/** The live transcript window's header. */
-export interface TranscriptWindowState {
-  recording: boolean;
-  label: string;
-  engine: string;
 }
 
 /** An audio input as the capture worker lists it. */

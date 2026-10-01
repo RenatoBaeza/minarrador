@@ -557,6 +557,12 @@ export class CaptureController extends EventEmitter {
   readonly whisper: (LiveWhisper & { stop(): void }) | null;
   readonly liveTranscriber: LiveTranscriber;
   monitoring = false;
+  /**
+   * True while a recording is paused. The graph keeps running — reopening the
+   * devices on resume is exactly where a meeting loses its first seconds — and
+   * the audio that arrives meanwhile is simply not written.
+   */
+  paused = false;
   _quitting = false;
   /** Last configuration sent to the renderer, replayed after a rebuild. */
   config: CaptureConfig = { active: false, captureMic: true, captureSystem: true, micDeviceId: '', micDeviceLabel: '' };
@@ -636,7 +642,7 @@ export class CaptureController extends EventEmitter {
       // Only the capture worker feeds the recording.
       if (event.sender.id !== this.window?.webContents.id) return;
       const buf = Buffer.from(arrayBuffer);
-      if (this.writer) {
+      if (this.writer && !this.paused) {
         this.writer.write(buf);
         // A full disk stops the WAV growing and everything else carries on
         // looking normal — the tray still says Recording, the captions still
@@ -654,7 +660,7 @@ export class CaptureController extends EventEmitter {
       if (event.sender.id !== this.window?.webContents.id) return;
       this.levels = levels;
       if (this.monitoring && !this.writer) this.detector.push(levels);
-      if (this.writer) this.silence.push(levels);
+      if (this.writer && !this.paused) this.silence.push(levels);
       this.emit('levels', levels);
     });
 
@@ -805,6 +811,19 @@ export class CaptureController extends EventEmitter {
     return Boolean(this.writer);
   }
 
+  /**
+   * Stops or resumes writing the recording, without closing the file.
+   *
+   * The silence watcher starts counting afresh on resume: the stretch spent
+   * paused was chosen, not a meeting that ended.
+   */
+  setPaused(paused: boolean): void {
+    if (!this.writer || this.paused === paused) return;
+    this.paused = paused;
+    if (!paused) this.silence.reset();
+    log.info(paused ? 'recording paused' : 'recording resumed');
+  }
+
   get elapsedSeconds(): number {
     return this.writer ? this.writer.seconds : 0;
   }
@@ -828,6 +847,7 @@ export class CaptureController extends EventEmitter {
     this.separateChannels = separateChannels;
     const channels = this.recordingChannels;
     this.writeFailed = false;
+    this.paused = false;
     this.writer = new WavWriter(filePath, { sampleRate: SAMPLE_RATE, channels });
     this.detector.reset();
     this.silence.configure({ minutes: silenceMinutes }).reset();
@@ -842,6 +862,7 @@ export class CaptureController extends EventEmitter {
     this.window?.webContents.send('capture:setRecording', false, writer.channels);
     this.liveTranscriber.stop();
     this.silence.reset();
+    this.paused = false;
     // Let the worklet's final flush land before we patch the header.
     return new Promise((resolve) => {
       setTimeout(() => {

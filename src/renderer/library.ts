@@ -12,7 +12,7 @@
 // sibling imports with no bundler.
 
 import { SECTIONS, byId, isSection, setNavigator, listEl, navEls, queryEl, readerEl, recordEl, searchingEl, sectionNameEl, view } from './library-common.js';
-import { openMeeting, refresh, renderPlaceholder, renderHealth, renderProgress, renderReader, select, toggleRecord } from './library-reader.js';
+import { addLiveLine, openMeeting, refresh, renderPlaceholder, renderHealth, renderProgress, renderReader, select, toggleRecord } from './library-reader.js';
 import { renderSettings } from './library-settings.js';
 import { qcEditor, renderQuickCopy, saveQuickCopy } from './library-quickcopy.js';
 import { renderTodos, saveTodos, tdEditor, todo } from './library-todos.js';
@@ -194,6 +194,9 @@ for (const item of navEls) item.addEventListener('click', () => void showSection
 // is on screen without anything being re-read from disk.
 window.library.onProgress((activity) => renderProgress(activity));
 
+// The live preview of the meeting being recorded, a caption at a time.
+window.library.onLiveLine((line) => addLiveLine(line));
+
 // A recording that just finished belongs at the top of the list without anyone
 // having to reopen the window.
 window.library.onChanged(async () => {
@@ -263,7 +266,9 @@ Promise.all([refresh(), window.library.settings.get()]).then(([, settings]) => {
   // newest when it is gone — the window is usually opened to read the one that
   // just finished.
   if (sessionStorage.getItem('minarrador:tab') === 'transcript') view.tab = 'transcript';
-  const remembered = sessionStorage.getItem('minarrador:lastMeeting');
+  // A meeting being recorded wins over both: refresh() has already moved the
+  // reader to it.
+  const remembered = view.selected ?? sessionStorage.getItem('minarrador:lastMeeting');
   const first = view.meetings.find((m) => m.id === remembered) ?? view.meetings[0];
   if (first) select(first.id);
   else renderPlaceholder();

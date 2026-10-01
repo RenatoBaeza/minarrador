@@ -32,9 +32,7 @@ import {
   cancelIndicatorHide,
   notify,
   sendToDictate,
-  sendToTranscript,
   showLibraryWindow,
-  showTranscriptWindow,
 } from './windows';
 import {
   appendLiveTranscript,
@@ -44,7 +42,9 @@ import {
   notifyProgress,
   notifySettings,
   refreshTray,
+  sendActivity,
   sendHealth,
+  sendLiveLine,
   startedHidden,
 } from './ui';
 import {
@@ -118,8 +118,8 @@ function wireRecording(): void {
     notifyLibrary,
     notifySettings,
     notifyProgress,
-    showTranscriptWindow: () => void showTranscriptWindow(),
-    sendToTranscript,
+    sendActivity,
+    showLiveTranscript: () => void showLibraryWindow({ section: 'reader' }),
     errorBox: (title, body) => dialog.showErrorBox(title, body),
     openPath: (target) => void shell.openPath(target),
     openOllama,
@@ -234,8 +234,10 @@ async function startup(): Promise<void> {
   // What each source has heard, for the health strip's first ten seconds.
   cap.on('levels', hear);
   cap.on('transcript', (text: string, speaker: Speaker) => {
-    sendToTranscript('transcript:line', { text, speaker });
+    // On disk first: the file is what survives a crash, and what the reader
+    // rebuilds the preview from when it is opened mid-meeting.
     appendLiveTranscript(text, speaker);
+    sendLiveLine(text, speaker);
   });
   cap.on('speech', () => {
     if (!ctx.settings.suggestOnAudio || state.phase === 'recording') return;

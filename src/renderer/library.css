@@ -1,5 +1,5 @@
 /* Meeting library window. Same palette and frameless-header treatment as the
-   live transcript and the quick-copy editor, kept in its own file so the page
+   dictations archive, kept in its own file so the page
    can run under a strict CSP with no inline styles.
 
    A permanent sidebar of features on the left, then whatever the chosen one
@@ -1085,6 +1085,124 @@ mark {
   color: #fde68a;
   border-radius: 2px;
   padding: 0 1px;
+}
+
+/* --------------------------------------------------------------------- live */
+
+/* The meeting being recorded: a clock and its two controls over the live
+   preview. The bar stays put while the captions scroll under it, so Pause and
+   Stop are always where they were. */
+.live {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  max-width: 760px;
+}
+
+.live-bar {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 12px 16px;
+  border: 1px solid #3a2a30;
+  border-radius: 8px;
+  background: #1f1a1d;
+}
+
+.live-status {
+  display: flex;
+  align-items: baseline;
+  gap: 12px;
+  min-width: 0;
+}
+
+.live-dot {
+  flex: none;
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  background: #e11d48;
+  align-self: center;
+  animation: live-pulse 1.6s ease-in-out infinite;
+}
+
+@keyframes live-pulse {
+  50% {
+    opacity: 0.35;
+  }
+}
+
+.live-clock {
+  font-size: 22px;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+  color: #eaeaea;
+}
+
+.live-state {
+  color: #9ca3af;
+  font-size: 12.5px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.live-controls {
+  display: flex;
+  gap: 8px;
+}
+
+.live-controls .button {
+  min-width: 76px;
+}
+
+/* Paused reads as stopped-for-now: amber, still, and the clock dimmed. */
+.live.paused .live-bar {
+  border-color: #4a3d22;
+  background: #1f1c16;
+}
+
+.live.paused .live-dot {
+  background: #f59e0b;
+  animation: none;
+}
+
+.live.paused .live-clock {
+  color: #9ca3af;
+}
+
+.live-log {
+  min-height: 160px;
+}
+
+.live-line {
+  margin: 0;
+  padding: 7px 0;
+  font-size: 14.5px;
+  line-height: 1.7;
+  white-space: pre-wrap;
+}
+
+.live-hint {
+  margin: 0;
+  padding: 7px 0;
+  color: #6b7280;
+  font-style: italic;
+}
+
+.live-foot {
+  color: #6f6f7d;
+  font-size: 12px;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .live-dot {
+    animation: none;
+  }
 }
 
 .notice {

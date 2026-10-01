@@ -61,7 +61,6 @@ Local-only meeting notes app for Windows. Records mic + system audio, transcribe
 │       ├── preload.ts     # contextBridge exposing IPC to renderer
 │       ├── bridges.d.ts   # The `window.<name>` API each preload exposes, typed for both sides
 │       ├── tsconfig*.json # One project per environment: pages, preloads, worklet
-│       ├── transcript.*   # Live transcript window (page, styles, view, preload)
 │       ├── library.*      # The app window: sidebar + Recording, Quick copy, Disk usage, To-do, Settings
 │       ├── library-*.ts   # One module per sidebar feature (reader, quickcopy, disk, todos, settings) + common
 │       ├── dictate-capture.*   # Mic-only worker behind the dictation hotkey
@@ -78,7 +77,7 @@ Local-only meeting notes app for Windows. Records mic + system audio, transcribe
 
 ### Tray-only app
 
-No main window is shown at startup. A hidden `BrowserWindow` exists solely to run the Web Audio API (unavailable in the main process). The tray icon is the app: **left-click opens the meeting library, right-click opens the menu.** Nothing is bound to double-click — Windows sends a plain click first, so a second action there would always arrive with the library already opening. Every other window (library, live transcript, quick-copy editor, dictations archive) is opened on demand, frameless, dark, and single-instance.
+No main window is shown at startup. A hidden `BrowserWindow` exists solely to run the Web Audio API (unavailable in the main process). The tray icon is the app: **left-click opens the meeting library, right-click opens the menu.** Nothing is bound to double-click — Windows sends a plain click first, so a second action there would always arrive with the library already opening. Every other window (library, dictations archive) is opened on demand, frameless, dark, and single-instance.
 
 The menu is deliberately short: the quick-copy list, *Record meeting* and
 *Start dictation*, each labelled with its shortcut, and *Quit Minarrador* at the
@@ -163,6 +162,21 @@ a second set of handlers would write every PCM buffer to the WAV twice.
 
 Independent of the post-recording pipeline — a rough preview for the person in the
 meeting, always superseded by the full pass over the saved WAV.
+
+**It is shown in the library's reader, not a window of its own.** While a
+meeting records, the reader draws `livePanel()` in `library-reader.ts` for it
+instead of tabs: a clock, **Pause**/**Resume**, **Stop** (main raises a native
+confirmation on `library:stop`) and the captions. Starting a recording with the
+live transcript on opens the library onto it, and the rail moves to the new
+meeting. Lines already said come from `live-transcript.txt` with the meeting;
+each new one arrives on `library:liveLine`, tagged with its meeting id. The
+clock runs in the page from `activity.elapsed`, so the one-second tray tick
+never reaches the window.
+
+**Pause keeps the file open and the graph running** — reopening devices on
+resume is where a meeting loses its first seconds. `CaptureController.paused`
+drops PCM before the `WavWriter` and the `LiveTranscriber`, and feeds nothing to
+the silence watcher; the clock is the WAV's length, so it stands still too.
 
 **It is also kept.** Every line goes to `live-transcript.txt` in the meeting
 folder as it is produced (`appendLiveTranscript` in `ui.ts`), which is what
@@ -764,10 +778,6 @@ Each stage in `pipeline.ts` is a standalone async function (`transcribe`, `summa
 | `dictate:level` | dictation worker → main | RMS float, for the indicator |
 | `dictate:status` | dictation worker → main | `{ micOk, micError, micLabel, fatal }` |
 | `dictate:state` | main → indicator | `{ state, text, error }` — listening / transcribing / done / error |
-| `transcript:clear` / `transcript:line` | main → transcript window | — \| `{ text, speaker }` — the live preview, line by line |
-| `transcript:state` | main → transcript window | `{ recording, label, engine }` |
-| `transcript:copy` | transcript window → main | `string` for the clipboard — the "copy so far" button |
-| `transcript:close` | transcript window → main | — |
 | `snippets:list` | library → main (invoke) | → `{ label, text }[]` |
 | `snippets:save` | library → main (invoke) | `{ label, text }[]` → the list as stored |
 | `dictations:list` | dictations window → main (invoke) | → `{ id, text, createdAt }[]`, newest first |
@@ -782,13 +792,16 @@ Each stage in `pipeline.ts` is a standalone async function (`transcribe`, `summa
 | `library:openNotesFolder` | library → main (invoke) | → opened? |
 | `library:copy` | library → main | `string` for the clipboard |
 | `library:record` | library → main (invoke) | `boolean` — start or stop; the result arrives as `library:changed` |
+| `library:pause` | library → main (invoke) | `boolean` → whether there was a recording to pause/resume; the new state arrives as `library:progress` |
+| `library:stop` | library → main (invoke) | → `{ ok, reason }`; main raises the confirmation itself |
+| `library:liveLine` | main → library | `{ id, text, speaker }` — one caption of the live preview |
 | `library:reprocess` | library → main (invoke) | `id` → `{ ok, reason }` — whether the run started; how it ends arrives as `library:changed` |
 | `library:rename` | library → main (invoke) | `{ id, title }` → `{ ok, reason }`; an empty title restores the model's |
 | `library:delete` | library → main (invoke) | `id` → `{ ok, reason }`; main raises the confirmation itself |
 | `library:changed` | main → library | — (the folder changed; re-list) |
 | `library:health` | library → main (invoke) · main → library | → `health()`: `{ items, recording, elapsed, show }` — pushed when a source, a model or a recording's first seconds change it |
 | `meeting-audio://meeting/<id>` | library `<audio>` → main (protocol) | a meeting's `audio.wav` as mono WAV, with Range support; refused while that meeting records |
-| `library:progress` | main → library | `libraryActivity()` — a run advanced; update in place, read nothing |
+| `library:progress` | main → library | `libraryActivity()` (incl. `elapsed`, `paused`, `liveEngine`) — a run advanced or a recording paused; update in place, read nothing |
 | `todos:list` | library → main (invoke) | → `Todo[]`, in manual order |
 | `todos:save` | library → main (invoke) | `Todo[]` → the list as stored |
 | `library:show` | main → library | `'settings'` \| `'quickcopy'` \| `'disk'` \| `'todos'` — open the window onto that feature |

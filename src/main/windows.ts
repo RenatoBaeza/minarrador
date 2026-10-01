@@ -28,15 +28,14 @@ export const RENDERER = path.join(__dirname, '..', 'renderer');
 const ASSETS = path.join(APP_ROOT, 'assets');
 
 /** The sidebar features main can open the library window onto. */
-export type LibrarySection = 'settings' | 'quickcopy' | 'disk' | 'todos';
+export type LibrarySection = 'reader' | 'settings' | 'quickcopy' | 'disk' | 'todos';
 
 /** The open windows, or null. Read through {@link alive}; a closed one clears its own slot. */
 export const windows: {
-  transcript: BrowserWindow | null;
   library: BrowserWindow | null;
   dictations: BrowserWindow | null;
   indicator: BrowserWindow | null;
-} = { transcript: null, library: null, dictations: null, indicator: null };
+} = { library: null, dictations: null, indicator: null };
 
 /** When the "Pasted" pill last got told to leave, so a second dictation can bring it back. */
 let indicatorTimer: NodeJS.Timeout | null = null;
@@ -80,44 +79,6 @@ const secure = (preload: string): Electron.WebPreferences => ({
   nodeIntegration: false,
   sandbox: true,
 });
-
-/**
- * The live transcript window: a read-only preview of what the model is hearing.
- *
- * It loads transcript.html, never capture.html — the latter is the hidden audio
- * worker, and opening a second copy of it would build a second Web Audio graph
- * competing for the same microphone and loopback stream.
- *
- * Frameless: the header doubles as the drag handle and carries its own close
- * button, so the page is the whole window with no OS chrome around it.
- */
-export function showTranscriptWindow(): BrowserWindow {
-  const open = alive(windows.transcript);
-  if (open) return raise(open);
-
-  const win = new BrowserWindow({
-    width: 480,
-    height: 640,
-    minWidth: 320,
-    minHeight: 240,
-    show: false,
-    frame: false,
-    title: 'Live Transcription',
-    backgroundColor: '#16161a',
-    icon: appIcon(),
-    webPreferences: secure('transcript-preload.js'),
-  });
-  windows.transcript = win;
-
-  win.once('ready-to-show', () => windows.transcript?.show());
-  win.on('closed', () => {
-    windows.transcript = null;
-  });
-  win.loadFile(path.join(RENDERER, 'transcript.html')).catch((err: unknown) => {
-    log.error('transcript window failed to load', err);
-  });
-  return win;
-}
 
 /**
  * The dictations archive: everything the voice-input hotkey has transcribed.
@@ -296,11 +257,6 @@ export function sendToLibrary(channel: string, payload?: unknown): void {
   alive(windows.library)?.webContents.send(channel, payload);
 }
 
-/** Posts to the transcript window when one is open; a no-op otherwise. */
-export function sendToTranscript(channel: string, payload?: unknown): void {
-  alive(windows.transcript)?.webContents.send(channel, payload);
-}
-
 export type SenderEvent = IpcMainEvent | IpcMainInvokeEvent;
 
 /**
@@ -314,8 +270,6 @@ export type SenderEvent = IpcMainEvent | IpcMainInvokeEvent;
 export const fromLibrary = (event: SenderEvent): boolean => event.sender.id === windows.library?.webContents.id;
 
 export const fromDictations = (event: SenderEvent): boolean => event.sender.id === windows.dictations?.webContents.id;
-
-export const fromTranscript = (event: SenderEvent): boolean => event.sender.id === windows.transcript?.webContents.id;
 
 /** A native confirmation, parented to the library window when there is one. */
 export async function confirm(options: MessageBoxOptions): Promise<boolean> {

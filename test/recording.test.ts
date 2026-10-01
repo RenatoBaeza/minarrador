@@ -9,6 +9,7 @@ import {
   initRecording,
   meetingBusy,
   reprocessMeeting,
+  setRecordingPaused,
   startRecording,
   stopRecording,
   type RecordingDeps,
@@ -39,6 +40,10 @@ function fakeCapture(seconds: number) {
   const capture = {
     status: { micOk: true, systemOk: true, micError: '', systemError: '', micLabel: '', running: true },
     elapsedSeconds: 0,
+    paused: false,
+    setPaused(on: boolean) {
+      if (writing) capture.paused = on;
+    },
     get stops() {
       return stops;
     },
@@ -49,6 +54,7 @@ function fakeCapture(seconds: number) {
     stopRecording() {
       if (!writing) return null;
       stops++;
+      capture.paused = false;
       return new Promise((resolve) =>
         setTimeout(() => {
           writing = false;
@@ -84,8 +90,8 @@ function setup(t: test.TestContext, { seconds = 5, holdPipeline = false, fail = 
     notifyLibrary: () => {},
     notifySettings: () => {},
     notifyProgress: () => {},
-    showTranscriptWindow: () => {},
-    sendToTranscript: () => {},
+    sendActivity: () => {},
+    showLiveTranscript: () => {},
     errorBox: (title, body) => void notes.push(`${title}: ${body}`),
     openPath: () => {},
     openOllama: async () => {},
@@ -238,4 +244,23 @@ test('a folder the pipeline failed on explains itself, and a re-run clears it', 
   assert.equal(reprocessMeeting(id).ok, true);
   while (state.jobs.size) await new Promise((resolve) => setTimeout(resolve, 5));
   assert.equal(fs.existsSync(path.join(dir, 'ERROR.txt')), false, 'a folder never carries an explanation that stopped being true');
+});
+
+test('a pause holds the recording open, and only a recording can be paused', async (t) => {
+  const h = setup(t);
+  assert.equal(setRecordingPaused(true), false, 'nothing to pause while idle');
+
+  startRecording();
+  assert.equal(setRecordingPaused(true), true);
+  assert.equal(h.capture.paused, true);
+  assert.equal(state.phase, 'recording', 'paused is still recording, not stopped');
+
+  assert.equal(setRecordingPaused(false), true);
+  assert.equal(h.capture.paused, false);
+
+  // A meeting stopped while paused is kept and processed like any other.
+  setRecordingPaused(true);
+  await stopRecording();
+  assert.equal(h.runs.length, 1);
+  assert.equal(setRecordingPaused(false), false, 'and there is nothing left to resume');
 });

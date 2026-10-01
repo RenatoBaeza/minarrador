@@ -1,7 +1,7 @@
 // The Recording feature: the rail of meetings, the reader beside it, the
 // record button, and everything that loads a meeting into them.
 
-import type { Health, ActionItem, JobProgress, LibraryActivity, MeetingCard, MeetingDetail, SettingsState } from '../shared/types';
+import type { Health, ActionItem, JobProgress, LibraryActivity, LiveLine, MeetingCard, MeetingDetail, SettingsState, Speaker } from '../shared/types';
 import { type View, countEl, dateGroup, el, fmtClock, fmtDuration, fmtTime, highlighted, icon, listEl, placeholder, readerEl, recordEl, recordGlyphEl, recordLabelEl, searchingEl, view, navigate , healthEl } from './library-common.js';
 
 /**
@@ -751,6 +751,17 @@ export function renderReader(meeting: MeetingDetail): void {
   const title = el('h1');
   title.append(highlighted(meeting.title, view.query));
   header.append(title, metaRow(meeting));
+
+  // The meeting being recorded has no notes, no transcript and no audio to
+  // play yet — what it has is the live preview and the controls for the
+  // recording itself, so that is the whole page.
+  if (meeting.id === view.activity.recordingId) {
+    page.append(header, livePanel(meeting));
+    readerEl.replaceChildren(page);
+    scrollLiveToEnd();
+    return;
+  }
+
   const audio = playerFor(meeting);
   if (audio) header.append(audio.parentElement ?? audio);
 
@@ -764,6 +775,154 @@ export function renderReader(meeting: MeetingDetail): void {
   readerEl.replaceChildren(page);
   markPlaying();
 }
+
+// ----------------------------------------------------------------------- live
+//
+// The meeting being recorded, shown where it will be read afterwards: a clock,
+// Pause and Stop, and the live preview under them. The preview used to be a
+// window of its own — one more thing to find and arrange in the middle of a
+// call. Lines come from two places: live-transcript.txt, read with the
+// meeting, for whatever was said before the reader opened, and
+// `library:liveLine` for every one after.
+
+const live: { id: string | null; lines: { text: string; speaker: Speaker }[]; stopping: boolean } = {
+  id: null,
+  lines: [],
+  stopping: false,
+};
+
+/** When the last activity payload arrived, so the page can run the clock between them. */
+let clockAt = performance.now();
+
+/** Seconds recorded so far: the last figure main sent, plus the time since unless paused. */
+const liveElapsed = (): number =>
+  view.activity.elapsed + (view.activity.paused ? 0 : (performance.now() - clockAt) / 1000);
+
+/** Marks a fresh activity payload as the clock's new starting point. */
+export function noteActivity(): void {
+  clockAt = performance.now();
+}
+
+/** True while the reader is pinned to the newest line. */
+const liveAtBottom = (): boolean => readerEl.scrollHeight - readerEl.scrollTop - readerEl.clientHeight < 40;
+
+function liveRow(line: { text: string; speaker: Speaker }): HTMLElement {
+  const row = el('p', 'live-line');
+  // A two-channel recording knows which side of the call a line came from.
+  if (line.speaker) row.append(el('span', `who ${line.speaker}`, window.library.speakers[line.speaker]));
+  // A text node, never markup: this string came out of a model.
+  row.append(document.createTextNode(line.text));
+  return row;
+}
+
+function scrollLiveToEnd(): void {
+  readerEl.scrollTop = readerEl.scrollHeight;
+}
+
+const liveHint = (): string =>
+  view.activity.liveEngine
+    ? 'Transcript lines appear here a few seconds after people start speaking.'
+    : 'The live transcript is turned off in Settings. The meeting is still being recorded.';
+
+/** Clock, Pause and Stop, and the captions so far. */
+function livePanel(meeting: MeetingDetail): HTMLElement {
+  if (live.id !== meeting.id) {
+    live.id = meeting.id;
+    live.lines = [];
+    live.stopping = false;
+  }
+  // What is on disk is the record; a line only this page has seen yet is newer
+  // than the read, so the longer of the two wins.
+  const disk = meeting.transcript.map(({ text, speaker }) => ({ text, speaker }));
+  if (disk.length >= live.lines.length) live.lines = disk;
+
+  const panel = el('section', 'live');
+  const bar = el('div', 'live-bar');
+  const status = el('div', 'live-status');
+  status.append(el('span', 'live-dot'), el('span', 'live-clock'), el('span', 'live-state'));
+
+  const pause = el('button', 'button live-pause');
+  pause.type = 'button';
+  pause.addEventListener('click', async () => {
+    pause.disabled = true;
+    await window.library.pause(!view.activity.paused);
+    // The new state arrives as a progress payload, which has redrawn the label.
+    pause.disabled = live.stopping;
+  });
+
+  const stop = el('button', 'button danger live-stop', 'Stop');
+  stop.type = 'button';
+  stop.title = 'Stop recording and write the notes';
+  stop.addEventListener('click', async () => {
+    stop.disabled = true;
+    const result = await window.library.stop();
+    if (result?.ok) {
+      live.stopping = true;
+      stop.textContent = 'Stopping…';
+      renderLiveBar();
+      return;
+    }
+    stop.disabled = false;
+  });
+
+  const controls = el('div', 'live-controls');
+  controls.append(pause, stop);
+  bar.append(status, controls);
+
+  const log = el('div', 'live-log');
+  log.setAttribute('role', 'log');
+  log.setAttribute('aria-live', 'polite');
+  log.setAttribute('aria-label', 'Live transcript');
+  if (live.lines.length) log.append(...live.lines.map(liveRow));
+  else log.append(el('p', 'live-hint', liveHint()));
+
+  panel.append(
+    bar,
+    log,
+    el('div', 'live-foot', 'A rough live preview. The notes are written once you stop, from a full pass over the saved audio.'),
+  );
+  renderLiveBar(panel);
+  return panel;
+}
+
+/** Moves the clock and the pause state on, in place. */
+function renderLiveBar(panel: HTMLElement | null = readerEl.querySelector<HTMLElement>('.live')): void {
+  if (!panel) return;
+  const paused = view.activity.paused;
+  panel.classList.toggle('paused', paused);
+  const engine = view.activity.liveEngine;
+  const label = live.stopping ? 'Stopping…' : paused ? 'Paused' : 'Recording';
+  const state = panel.querySelector('.live-state');
+  if (state) state.textContent = engine && !paused && !live.stopping ? `${label} · ${engine}` : label;
+  const clock = panel.querySelector('.live-clock');
+  if (clock) clock.textContent = fmtClock(liveElapsed());
+  const pause = panel.querySelector<HTMLButtonElement>('.live-pause');
+  if (pause) {
+    pause.textContent = paused ? 'Resume' : 'Pause';
+    pause.title = paused ? 'Carry on recording' : 'Stop writing audio until you resume';
+    if (live.stopping) pause.disabled = true;
+  }
+}
+
+/** A caption arriving: kept, and appended in place if its meeting is on screen. */
+export function addLiveLine(line: LiveLine): void {
+  // A meeting the reader has not drawn yet gets the line from disk when it is.
+  if (!line.text.trim() || line.id !== live.id) return;
+  live.lines.push({ text: line.text, speaker: line.speaker });
+  if (view.mode !== 'reader' || view.selected !== line.id) return;
+  const log = readerEl.querySelector<HTMLElement>('.live-log');
+  if (!log) return;
+  const stick = liveAtBottom();
+  log.querySelector('.live-hint')?.remove();
+  log.append(liveRow(line));
+  if (stick) scrollLiveToEnd();
+}
+
+// The clock is the page's own: one payload per pause, rather than one a second
+// from main for as long as the meeting lasts.
+setInterval(() => {
+  if (view.activity.recordingId && view.mode === 'reader') renderLiveBar();
+}, 1000);
 
 // --------------------------------------------------------------------- player
 //
@@ -1004,6 +1163,8 @@ export function toggleRecord() {
  */
 export function renderProgress(activity: Partial<LibraryActivity>): void {
   view.activity = { ...view.activity, ...activity };
+  noteActivity();
+  renderLiveBar();
   for (const p of view.activity.processing ?? []) {
     const tag = listEl.querySelector(`.card[data-id="${CSS.escape(p.id)}"] .tag.working`);
     if (tag) tag.textContent = progressTag(p);
@@ -1068,9 +1229,14 @@ export async function refresh() {
   const seq = ++listSeq;
   const { meetings, activity } = await window.library.list(view.query);
   if (seq !== listSeq) return; // A later query already answered.
+  const started = activity.recordingId && activity.recordingId !== view.activity.recordingId;
   view.meetings = meetings;
   view.activity = activity;
+  noteActivity();
   searchingEl.hidden = true;
+  // A meeting that has just started is what anybody looking at this window
+  // wants to watch, so the reader moves to it; the caller's select() draws it.
+  if (started && !view.renaming) view.selected = activity.recordingId;
   // The record button reads its state from here, so a meeting started from the
   // tray flips it without this window being told anything else.
   renderRecordButton();

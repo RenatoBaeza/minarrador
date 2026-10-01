@@ -17,15 +17,14 @@ import type {
   Health,
   LibraryActivity,
   LibraryList,
+  LiveLine,
   MeetingDetail,
   MicTestUpdate,
   Outcome,
   Settings,
   SettingsState,
   Snippet,
-  Speaker,
   Todo,
-  TranscriptWindowState,
 } from '../shared/types';
 
 /** Names for the two sides of a two-channel recording. */
@@ -72,15 +71,6 @@ export interface DictateIndicatorBridge {
   onState(fn: (payload: Partial<DictateIndicatorState>) => void): void;
 }
 
-export interface TranscriptBridge {
-  speakers: SpeakerNames;
-  onClear(fn: () => void): void;
-  onLine(fn: (line: { text: string; speaker: Speaker }) => void): void;
-  onState(fn: (state: Partial<TranscriptWindowState>) => void): void;
-  copy(text: string): void;
-  close(): void;
-}
-
 export interface DictationsBridge {
   list(): Promise<Dictation[]>;
   /** The list after the change, or null when the id was gone. */
@@ -105,6 +95,10 @@ export interface LibraryBridge {
   openNotesFolder(): Promise<boolean>;
   copy(text: string): void;
   record(on: boolean): Promise<boolean>;
+  /** Pauses or resumes the recording; false when there was none to change. */
+  pause(paused: boolean): Promise<boolean>;
+  /** Stops the recording after a native confirmation; `ok` false when declined. */
+  stop(): Promise<Outcome>;
   reprocess(id: string): Promise<Outcome>;
   rename(id: string, title: string): Promise<Outcome>;
   delete(id: string): Promise<Outcome>;
@@ -113,6 +107,8 @@ export interface LibraryBridge {
   onHealth(fn: (health: Health) => void): void;
   onChanged(fn: () => void): void;
   onProgress(fn: (activity: Partial<LibraryActivity>) => void): void;
+  /** One caption of the live preview, as it is produced. */
+  onLiveLine(fn: (line: LiveLine) => void): void;
   onShow(fn: (section: LibrarySection) => void): void;
   minimize(): void;
   close(): void;
@@ -162,7 +158,6 @@ declare global {
     capture: CaptureBridge;
     dictate: DictateBridge;
     dictateIndicator: DictateIndicatorBridge;
-    transcript: TranscriptBridge;
     dictations: DictationsBridge;
     library: LibraryBridge;
   }

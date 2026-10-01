@@ -19,14 +19,13 @@ import { findOllama } from './ollama';
 import { FILES, speakerLine, type Speaker } from './paths';
 import { errorMessage } from './errors';
 import { DISK_WARN_BYTES, PROGRESS_MIN_MS, ctx, hotkeyLabel, state, type AppState } from './context';
-import { alive, sendToLibrary, sendToTranscript, windows } from './windows';
+import { alive, sendToLibrary, windows } from './windows';
 import type {
   Health,
   HealthItem,
   LibraryActivity,
   SettingsState,
   SetupState,
-  TranscriptWindowState,
 } from '../shared/types';
 
 /** Launched by the login item, or otherwise asked to stay out of the way. */
@@ -153,8 +152,22 @@ export function setupState(): SetupState | null {
 
 /** What the library shows on folders the app is still busy with. */
 export function libraryActivity(): LibraryActivity {
+  const { settings, capture } = ctx;
+  const recording = state.phase === 'recording';
   return {
-    recordingId: state.phase === 'recording' && state.currentDir ? path.basename(state.currentDir) : null,
+    recordingId: recording && state.currentDir ? path.basename(state.currentDir) : null,
+    // The page runs the clock itself from here, so the one-second tray tick
+    // never has to reach the window.
+    elapsed: recording ? (capture?.elapsedSeconds ?? 0) : 0,
+    paused: recording && Boolean(capture?.paused),
+    // Which engine is producing the captions. Worth showing: the two differ
+    // enough in speed and phrasing that "why is this slow" has a real answer.
+    liveEngine:
+      recording && settings?.liveTranscript
+        ? capture?.liveTranscriber.engine === 'whisper'
+          ? 'whisper.cpp'
+          : (settings.transcribeModel ?? '')
+        : '',
     processingIds: [...state.jobs.keys()].map((dir) => path.basename(dir)),
     /**
      * Where each run has got to. The tray has said "Transcribing 12/60…" since
@@ -329,6 +342,26 @@ export function notifySettings(): void {
 }
 
 /**
+ * Sends the activity payload now, unthrottled — for a change someone just
+ * clicked, like a pause, where waiting out the progress throttle would leave
+ * the button looking as if it had not worked.
+ */
+export function sendActivity(): void {
+  sendToLibrary('library:progress', libraryActivity());
+}
+
+/**
+ * One caption of the live preview, to the library's reader. Tagged with the
+ * meeting it was said in, so a line that lands just after Stop is not appended
+ * to whatever the window has open by then.
+ */
+export function sendLiveLine(text: string, speaker: Speaker): void {
+  const line = String(text ?? '').trim();
+  if (!state.liveDir || !line) return;
+  sendToLibrary('library:liveLine', { id: path.basename(state.liveDir), text: line, speaker });
+}
+
+/**
  * Tells an open library how far a pipeline run has got.
  *
  * Its own channel because it fires on a completely different budget from
@@ -369,21 +402,7 @@ export function appendLiveTranscript(text: string, speaker: Speaker): void {
   }
 }
 
-export function transcriptState(): TranscriptWindowState {
-  const { settings, capture } = ctx;
-  const engine = capture?.liveTranscriber.engine === 'whisper' ? 'whisper.cpp' : settings?.transcribeModel;
-  return {
-    recording: state.phase === 'recording',
-    label:
-      state.phase === 'recording' ? 'Recording' : state.phase === 'processing' ? state.progress || 'Processing…' : 'Idle',
-    // Which engine is producing these lines. Worth showing: the two differ
-    // enough in speed and phrasing that "why is this slow" has a real answer.
-    engine: state.phase === 'recording' && settings?.liveTranscript ? engine : '',
-  };
-}
-
 export function refreshTray(): void {
-  sendToTranscript('transcript:state', transcriptState());
   const { tray, settings, capture, dictation } = ctx;
   if (!tray) return;
   tray.update({

@@ -110,6 +110,13 @@ const api: LibraryBridge = {
   copy: (text) => ipcRenderer.send('library:copy', String(text ?? '')),
   /** Starts or stops a recording. The result arrives as an onChanged, not a return. */
   record: (on) => ipcRenderer.invoke('library:record', Boolean(on)),
+  /** Pauses or resumes the meeting being recorded. The clock arrives as onProgress. */
+  pause: (paused) => ipcRenderer.invoke('library:pause', Boolean(paused)),
+  /**
+   * Stops the meeting being recorded. Main asks first, natively — ending a
+   * meeting cannot be taken back, and the page is not the one to vouch for it.
+   */
+  stop: () => ipcRenderer.invoke('library:stop'),
   /**
    * Runs the transcription and notes again over a meeting that has audio.
    * Resolves to whether the run started — how it *ends* arrives as an
@@ -153,6 +160,19 @@ const api: LibraryBridge = {
    */
   onProgress: (fn) => {
     ipcRenderer.on('library:progress', (_e, activity) => fn(activity ?? {}));
+  },
+  /**
+   * The live preview, a caption at a time. Only ever one of the two speaker
+   * names reaches the page; anything else is an unlabelled line.
+   */
+  onLiveLine: (fn) => {
+    ipcRenderer.on('library:liveLine', (_e, line) =>
+      fn({
+        id: String(line?.id ?? ''),
+        text: String(line?.text ?? ''),
+        speaker: line?.speaker === 'mic' || line?.speaker === 'system' ? line.speaker : '',
+      }),
+    );
   },
   /** Main asking for a feature, landing in an already-open window. */
   onShow: (fn) => {

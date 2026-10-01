@@ -89,7 +89,7 @@ export const view: View = {
    * elsewhere would otherwise throw away half a typed title.
    */
   renaming: false,
-  activity: { recordingId: null, processingIds: [], processing: [] },
+  activity: { recordingId: null, elapsed: 0, paused: false, liveEngine: '', processingIds: [], processing: [] },
   /**
    * What the last record click asked for, until the rail confirms it happened.
    * Recording is started and stopped in the main process, so this window learns
