@@ -157,16 +157,24 @@ export function todoCompare(sort: TodoSort, reverse: boolean): (a: Todo, b: Todo
   return (a, b) => Number(a.done) - Number(b.done) || primary[sort](a, b);
 }
 
+/** The project filter and the search box — every filter but the done toggle. */
+function matchesTodoFilters(t: Todo): boolean {
+  const { project } = todo.prefs;
+  const needle = todo.query.trim().toLowerCase();
+  return (
+    (!project || (project === NO_PROJECT ? !t.project : t.project === project)) &&
+    (!needle || `${t.title}\n${t.project}\n${t.description}`.toLowerCase().includes(needle))
+  );
+}
+
 /** What the list shows: filtered by project, completion and the search box, then sorted. */
 export function visibleTodos(): Todo[] {
-  const { project, showDone, sort, reverse } = todo.prefs;
-  const needle = todo.query.trim().toLowerCase();
-  return todo.items
-    .filter((t) => showDone || !t.done)
-    .filter((t) => !project || (project === NO_PROJECT ? !t.project : t.project === project))
-    .filter((t) => !needle || `${t.title}\n${t.project}\n${t.description}`.toLowerCase().includes(needle))
-    .sort(todoCompare(sort, reverse));
+  const { showDone, sort, reverse } = todo.prefs;
+  return todo.items.filter((t) => (showDone || !t.done) && matchesTodoFilters(t)).sort(todoCompare(sort, reverse));
 }
+
+/** Finished tasks the filters let through, whether or not they are being shown. */
+const doneTodos = (): Todo[] => todo.items.filter((t) => t.done && matchesTodoFilters(t));
 
 /** Dragging only makes sense when the list on screen is in the saved order. */
 export const todoDraggable = (): boolean => todo.prefs.sort === 'manual' && !todo.prefs.reverse;
@@ -197,6 +205,49 @@ export function removeTodo(id: string): void {
   todo.items = todo.items.filter((t) => t.id !== id);
   markTodosDirty();
   drawTodos();
+}
+
+/**
+ * The heading over the finished tasks, always at the foot of the list when
+ * there are any: it folds them away or out, and clears the ones the filters
+ * show. Clearing asks by asking twice — the button turns into its own
+ * confirmation for a few seconds — since it can take a whole history at once.
+ */
+function doneHeading(done: readonly Todo[]): HTMLElement {
+  const open = todo.prefs.showDone;
+  const head = el('div', 'td-group td-done-head');
+  const toggle = el('button', 'td-done-toggle', `${open ? '▾' : '▸'} Done · ${done.length}`);
+  toggle.type = 'button';
+  toggle.title = open ? 'Hide finished tasks' : 'Show finished tasks';
+  toggle.setAttribute('aria-expanded', String(open));
+  toggle.addEventListener('click', () => setTodoPref({ showDone: !open }));
+  head.append(toggle);
+  if (!open) return head;
+
+  const idle = 'Delete all done';
+  const clear = el('button', 'td-done-clear', idle);
+  clear.type = 'button';
+  clear.title = 'Delete every finished task shown here';
+  let armed: ReturnType<typeof setTimeout> | null = null;
+  clear.addEventListener('click', () => {
+    if (!armed) {
+      clear.textContent = `Delete ${done.length} task${done.length === 1 ? '' : 's'}? Click again`;
+      clear.classList.add('armed');
+      armed = setTimeout(() => {
+        armed = null;
+        clear.textContent = idle;
+        clear.classList.remove('armed');
+      }, 4000);
+      return;
+    }
+    clearTimeout(armed);
+    const ids = new Set(done.map((t) => t.id));
+    todo.items = todo.items.filter((t) => !ids.has(t.id));
+    markTodosDirty();
+    drawTodos();
+  });
+  head.append(clear);
+  return head;
 }
 
 export async function saveTodos(): Promise<void> {
@@ -335,6 +386,7 @@ export function drawTodos(): void {
   const list = todo.listEl;
   if (!list || !todo.loaded) return;
   const shown = visibleTodos();
+  const done = doneTodos();
   const draggable = todoDraggable();
   list.classList.toggle('manual', draggable);
 
@@ -370,10 +422,17 @@ export function drawTodos(): void {
       if (heading !== group) rows.push(el('div', 'td-group', heading));
       group = heading;
     } else if (t.done && group !== '\0done') {
-      if (rows.length) rows.push(el('div', 'td-group', 'Done'));
+      if (!rows.length) rows.push(el('p', 'none', 'Nothing left to do.'));
+      rows.push(doneHeading(done));
       group = '\0done';
     }
     rows.push(todoRow(t, draggable && !t.done));
+  }
+  // Folded away, the finished tasks still leave their heading behind, so
+  // they can always be found again.
+  if (done.length && !todo.prefs.showDone) {
+    if (!rows.length) rows.push(el('p', 'none', 'Nothing left to do.'));
+    rows.push(doneHeading(done));
   }
   if (!rows.length) {
     const empty = todo.items.length

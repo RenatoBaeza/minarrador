@@ -2381,6 +2381,44 @@ label.row:hover {
   margin-top: 0;
 }
 
+.td-done-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-left: 0;
+}
+
+.td-done-toggle,
+.td-done-clear {
+  padding: 3px 4px;
+  border: 0;
+  border-radius: 5px;
+  background: none;
+  color: inherit;
+  font: inherit;
+  text-transform: inherit;
+  letter-spacing: inherit;
+  cursor: default;
+}
+
+.td-done-toggle:hover {
+  color: #d1d5db;
+}
+
+.td-done-clear {
+  padding: 3px 8px;
+  text-transform: none;
+  letter-spacing: 0;
+  color: #e0808f;
+}
+
+.td-done-clear:hover,
+.td-done-clear.armed {
+  background: #e11d48;
+  color: #fff;
+}
+
 .td-foot {
   display: flex;
   justify-content: space-between;

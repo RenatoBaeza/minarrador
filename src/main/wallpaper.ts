@@ -198,8 +198,9 @@ export interface DesktopPage {
 
 /**
  * The page the wallpaper is photographed from: the picture, and the tasks in a
- * panel at the top right — where desktop icons, which line up from the top
- * left, are least likely to be.
+ * panel at the bottom right, just above the taskbar — the corner desktop
+ * icons, which line up from the top left, reach last. It grows upwards, so a
+ * short list stays tucked into the corner.
  *
  * Every task string is escaped: titles are the user's own text, and they land
  * in markup.
@@ -231,10 +232,10 @@ export function desktopHtml({ tasks, more, background, insets }: DesktopPage): s
   html, body { margin: 0; width: 100%; height: 100%; overflow: hidden; }
   body { background: ${background}; font-family: 'Segoe UI Variable Text', 'Segoe UI', sans-serif; color: #fff; }
   .panel {
-    position: absolute; top: ${insets.top + 40}px; right: ${insets.right + 40}px;
+    position: absolute; bottom: ${insets.bottom + 40}px; right: ${insets.right + 40}px;
     width: 380px; max-height: calc(100% - ${insets.top + insets.bottom + 80}px); overflow: hidden;
-    padding: 18px 20px 14px; border-radius: 14px;
-    background: rgba(12, 14, 18, 0.46); backdrop-filter: blur(18px) saturate(1.2);
+    padding: 10px 14px 8px; border-radius: 12px;
+    background: rgba(12, 14, 18, 0.78); backdrop-filter: blur(18px) saturate(1.2);
     border: 1px solid rgba(255, 255, 255, 0.10);
     text-shadow: 0 1px 2px rgba(0, 0, 0, 0.55);
   }
