@@ -40,6 +40,7 @@ export interface Settings {
   dictateHotkey: string;
   dictateEngine: Engine;
   dictateAutoPaste: boolean;
+  desktopTodos: boolean;
 }
 
 /**
@@ -67,6 +68,7 @@ export type LibrarySettingKey =
   | 'dictateHotkey'
   | 'dictateEngine'
   | 'dictateAutoPaste'
+  | 'desktopTodos'
   | 'liveEngine'
   | 'transcribeEngine'
   | 'whisperModel'

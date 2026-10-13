@@ -8,7 +8,7 @@ Local-only meeting notes app for Windows. Records mic + system audio, transcribe
 - **Node.js** — all backend logic in `src/main/`
 - **Ollama** — local LLM inference for the notes, and for the transcript when whisper.cpp is not installed
 - **whisper.cpp** — local ASR binary; the live transcript and, by default, the saved one (`npm run whisper:setup`)
-- **PowerShell** — the `powershell.exe` built into Windows, used for the one-way paste of dictated text into the foreground application
+- **PowerShell** — the `powershell.exe` built into Windows, used for the one-way paste of dictated text into the foreground application, and to read and set the desktop wallpaper
 - **electron-builder** — packaging and NSIS installer (`npm run dist`)
 - **TypeScript** (strict), compiled by plain `tsc` into `out/` — no framework, no bundler. The main process, scripts and tests compile to CommonJS; renderer pages to ES modules
 
@@ -46,6 +46,8 @@ Local-only meeting notes app for Windows. Records mic + system audio, transcribe
 │   │   ├── settings.ts    # JSON settings store (%APPDATA%/Minarrador)
 │   │   ├── snippets.ts    # Quick-copy shorthand store (%APPDATA%/Minarrador)
 │   │   ├── todos.ts       # To-do list store (%APPDATA%/Minarrador)
+│   │   ├── desktop-todos.ts # Draws the open tasks onto the wallpaper: when, the offscreen render, restore
+│   │   ├── wallpaper.ts   # Wallpaper read/set via PowerShell + the overlay page (no Electron)
 │   │   ├── dictations.ts  # Dictation archive store (%APPDATA%/Minarrador)
 │   │   ├── dictation.ts   # Voice-input controller (mic capture + transcription)
 │   │   ├── paste.ts       # OS-level Ctrl+V via built-in PowerShell
@@ -529,6 +531,26 @@ every tool edits through `execCommand('insertText')` so Ctrl+Z undoes it,
 closing keeps the edit, and only *Discard changes* throws it away. Both
 `todos:*` channels check `event.sender.id` against the library window.
 
+**The open tasks can be drawn onto the desktop wallpaper** (`desktopTodos`,
+off by default; the To-do toolbar's *Show on desktop* and a Settings row both
+set it). It is a picture, not a window: a window kept behind everything still
+disappears under Show desktop (Win+D) — exactly when someone is looking at the
+wallpaper — and anything that is a window can be clicked. `desktop-todos.ts`
+copies the current wallpaper into `userData/desktop-todos`, lays the first
+`DESKTOP_MAX_TASKS` open tasks over it in an offscreen page (`desktopHtml` in
+`wallpaper.ts`, which reproduces the original's Fill/Fit/Tile style in CSS),
+photographs it at the primary display's physical size and sets that as the
+wallpaper with style Fill. The copy is the point: Windows overwrites its own
+`Themes\TranscodedWallpaper` with ours, so every redraw starts from the copy,
+and a desktop showing anything other than `wallpaper-a/b.png` means the user
+picked a new picture, which becomes the new original. Redraws follow
+`todos:save` (settled), display changes, wake-ups, midnight (for the due
+labels) and a watch on `Themes\`; one with nothing changed is skipped.
+Turning it off — or starting with it off while the folder still exists — puts
+the original back and deletes the folder. Reading and setting go through
+fixed PowerShell scripts (`-EncodedCommand`), with the path and style passed in
+environment variables, never in the command.
+
 ### Voice input (`dictation.ts`, `dictations.ts`, `paste.ts`)
 
 The dictation hotkey is the app's second capture path: press it, say a sentence,
@@ -803,7 +825,7 @@ Each stage in `pipeline.ts` is a standalone async function (`transcribe`, `summa
 | `meeting-audio://meeting/<id>` | library `<audio>` → main (protocol) | a meeting's `audio.wav` as mono WAV, with Range support; refused while that meeting records |
 | `library:progress` | main → library | `libraryActivity()` (incl. `elapsed`, `paused`, `liveEngine`) — a run advanced or a recording paused; update in place, read nothing |
 | `todos:list` | library → main (invoke) | → `Todo[]`, in manual order |
-| `todos:save` | library → main (invoke) | `Todo[]` → the list as stored |
+| `todos:save` | library → main (invoke) | `Todo[]` → the list as stored; redraws the desktop wallpaper when `desktopTodos` is on |
 | `library:show` | main → library | `'settings'` \| `'quickcopy'` \| `'disk'` \| `'todos'` — open the window onto that feature |
 | `disk:choose` | library → main (invoke) | → `{ ok, root, entries, reason }` — main shows the folder dialog, then walks it; `ok` false with no reason is a cancelled dialog |
 | `disk:cancel` | library → main (invoke) | → `true`, after aborting the walk in flight |
@@ -843,7 +865,9 @@ Each stage in `pipeline.ts` is a standalone async function (`transcribe`, `summa
 - Pipeline retries transient Ollama failures (3 attempts with backoff) so a model swap mid-run doesn't kill a long transcription.
 - The dictation paste is the one place the app touches another application's
   window, and it does it with a *fixed* PowerShell command (SendKeys Ctrl+V) that
-  contains no user input — nothing is ever interpolated into the shell.
+  contains no user input — nothing is ever interpolated into the shell. The
+  wallpaper scripts in `wallpaper.ts` follow the same rule: fixed text, values
+  in environment variables.
 - A dictation whose transcription fails keeps the trimmed clip as a WAV under
   `%APPDATA%\Minarrador\dictation-errors`, so the words' audio survives even
   when the text could not be produced.

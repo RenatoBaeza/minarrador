@@ -27,6 +27,7 @@ import { ctx, field, state } from '../context';
 import { confirm, fromLibrary, windows } from '../windows';
 import { health, libraryActivity, notifyLibrary, notifySettings, refreshTray } from '../ui';
 import { meetingBusy, reprocessMeeting, setRecordingPaused, startRecording, stopRecording } from '../recording';
+import { scheduleDesktopTodos } from '../desktop-todos';
 import type { LibraryList, Outcome } from '../../shared/types';
 
 /**
@@ -192,6 +193,8 @@ export function registerLibraryIpc(): void {
     if (!fromLibrary(event)) return [];
     const saved = todosStore.save(list);
     log.info(`to-do: ${saved.length} task(s) saved`);
+    // The wallpaper copy of the list, when it is on; settled, so a drag is one redraw.
+    scheduleDesktopTodos();
     return saved;
   });
 

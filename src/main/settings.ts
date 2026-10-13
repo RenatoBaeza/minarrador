@@ -145,6 +145,13 @@ export function defaults(): Settings {
     dictateEngine: 'ollama',
     /** Type the finished dictation into the window that had the cursor. */
     dictateAutoPaste: true,
+    /**
+     * Draw the open to-do tasks onto the desktop wallpaper. Off by default: it
+     * replaces the wallpaper with a copy that has the list on it, which is not
+     * something an app should do to a desktop unasked. Turning it off puts the
+     * original back.
+     */
+    desktopTodos: false,
   };
 }
 

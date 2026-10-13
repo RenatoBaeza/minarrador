@@ -459,6 +459,25 @@ export async function renderTodos(): Promise<void> {
   doneBox.addEventListener('change', () => setTodoPref({ showDone: doneBox.checked }));
   doneLabel.append(doneBox, el('span', '', 'Show done'));
 
+  // A setting rather than a view preference — main owns the wallpaper — so it
+  // is read from and written to the settings store, not `todo.prefs`.
+  const desktopLabel = el('label', 'td-control td-toggle');
+  desktopLabel.title = 'Draw the open tasks onto the desktop wallpaper';
+  const desktopBox = el('input');
+  desktopBox.type = 'checkbox';
+  desktopBox.checked = Boolean(view.settings?.settings.desktopTodos);
+  desktopBox.addEventListener('change', async () => {
+    view.settings = await window.library.settings.set({ desktopTodos: desktopBox.checked });
+    desktopBox.checked = view.settings.settings.desktopTodos;
+  });
+  desktopLabel.append(desktopBox, el('span', '', 'Show on desktop'));
+  if (!view.settings) {
+    void window.library.settings.get().then((s) => {
+      view.settings ??= s;
+      desktopBox.checked = s.settings.desktopTodos;
+    });
+  }
+
   const search = el('input', 'td-search');
   search.type = 'search';
   search.placeholder = 'Search tasks… (Ctrl+F)';
@@ -469,7 +488,7 @@ export async function renderTodos(): Promise<void> {
     drawTodos();
   });
 
-  bar.append(sortLabel, reverse, projectLabel, doneLabel, search);
+  bar.append(sortLabel, reverse, projectLabel, doneLabel, desktopLabel, search);
 
   const foot = el('div', 'td-foot');
   const count = el('span', 'td-count');

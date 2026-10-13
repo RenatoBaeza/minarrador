@@ -14,6 +14,7 @@ import { notify } from './windows';
 import { notifyLibrary, notifySettings, refreshTray } from './ui';
 import { applySleepBlocker, checkDisk, toggleRecording } from './recording';
 import { applyDictateHotkey } from './ipc/dictation';
+import { applyDesktopTodos } from './desktop-todos';
 import type { Settings } from '../shared/types';
 
 /**
@@ -162,6 +163,7 @@ export function applySetting(patch: Partial<Settings>): Settings {
   if ('hotkey' in patch) applyHotkey();
   if ('dictateHotkey' in patch) applyDictateHotkey();
   if ('preventSleep' in patch) applySleepBlocker();
+  if ('desktopTodos' in patch) applyDesktopTodos();
   if ('silenceStopMinutes' in patch) ctx.capture?.silence.configure({ minutes: ctx.settings.silenceStopMinutes });
   // A different microphone means a different stream, which means the graph is
   // rebuilt around it — there is no way to swap a source under a live one.
