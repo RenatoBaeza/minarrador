@@ -42,6 +42,36 @@ test('desktopTasks caps the list and counts the rest', () => {
   assert.equal(more, 3);
 });
 
+test('desktopTasks gathers tasks by project, first-seen order, no project last', () => {
+  const { tasks } = desktopTasks(
+    [todo('a', { project: 'Work' }), todo('b'), todo('c', { project: 'Home' }), todo('d', { project: 'Work' })],
+    now,
+  );
+  assert.deepEqual(
+    tasks.map((t) => t.title),
+    ['a', 'd', 'c', 'b'],
+  );
+});
+
+test('desktopTasks caps in manual order before grouping', () => {
+  const list = [
+    ...Array.from({ length: DESKTOP_MAX_TASKS }, (_, i) => todo(`t${i}`)),
+    todo('late', { project: 'Work' }),
+  ];
+  const { tasks, more } = desktopTasks(list, now);
+  assert.ok(!tasks.some((t) => t.title === 'late'));
+  assert.equal(more, 1);
+});
+
+test('desktopHtml heads each project, and only when there are projects', () => {
+  const page = (list: Todo[]): string =>
+    desktopHtml({ ...desktopTasks(list, now), background: 'black', insets: { top: 0, right: 0, bottom: 0, left: 0 } });
+  const html = page([todo('a', { project: 'Work' }), todo('b'), todo('c', { project: 'Work' })]);
+  assert.equal(html.match(/<h2>Work<\/h2>/g)?.length, 1);
+  assert.ok(html.includes('No project'));
+  assert.ok(!page([todo('a'), todo('b')]).includes('<h2'));
+});
+
 test('dueText labels a due day relative to today', () => {
   assert.equal(dueText('2026-10-13', now).text, 'Today');
   assert.equal(dueText('2026-10-14', now).text, 'Tomorrow');

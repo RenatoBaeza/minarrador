@@ -144,13 +144,19 @@ export function dueText(due: string, now: Date): { text: string; urgency: string
 /**
  * The open tasks, in the order someone dragged them into — the list's own
  * order is the one they curated, and the desktop is not the place to re-sort it.
+ * The cap is taken in that order too, and only then are the tasks gathered by
+ * project: each project where its first task stood, its tasks still in manual
+ * order, and the ones with no project last.
  */
 export function desktopTasks(todos: readonly Todo[], now = new Date()): { tasks: DesktopTask[]; more: number } {
   const open = todos.filter((t) => !t.done);
-  const tasks = open.slice(0, DESKTOP_MAX_TASKS).map((t) => {
+  const shown = open.slice(0, DESKTOP_MAX_TASKS).map((t) => {
     const { text, urgency } = dueText(t.due, now);
     return { title: t.title, project: t.project, priority: t.priority, due: text, urgency };
   });
+  const groups = new Map<string, DesktopTask[]>();
+  for (const t of shown.filter((t) => t.project)) groups.set(t.project, [...(groups.get(t.project) ?? []), t]);
+  const tasks = [...[...groups.values()].flat(), ...shown.filter((t) => !t.project)];
   return { tasks, more: open.length - tasks.length };
 }
 
@@ -202,26 +208,35 @@ export interface DesktopPage {
  * icons, which line up from the top left, reach last. It grows upwards, so a
  * short list stays tucked into the corner.
  *
+ * `tasks` arrives grouped by project (desktopTasks), and each project gets a
+ * heading where its run starts — unless no task has one, when a lone "No
+ * project" heading would only take up a line.
+ *
  * Every task string is escaped: titles are the user's own text, and they land
  * in markup.
  */
 export function desktopHtml({ tasks, more, background, insets }: DesktopPage): string {
-  const rows = tasks
-    .map((t) => {
-      const meta = [
-        t.project ? `<span class="project">${escapeHtml(t.project)}</span>` : '',
-        t.due ? `<span class="due ${t.urgency}">${escapeHtml(t.due)}</span>` : '',
-      ].filter(Boolean);
-      return (
-        `<li class="p-${t.priority}"><span class="dot"></span><div class="body">` +
-        `<div class="title">${escapeHtml(t.title)}</div>` +
-        (meta.length ? `<div class="meta">${meta.join('<span class="sep">·</span>')}</div>` : '') +
-        '</div></li>'
-      );
-    })
+  const grouped = tasks.some((t) => t.project);
+  const groups: { project: string; tasks: DesktopTask[] }[] = [];
+  for (const t of tasks) {
+    const last = groups[groups.length - 1];
+    if (last && last.project === t.project) last.tasks.push(t);
+    else groups.push({ project: t.project, tasks: [t] });
+  }
+  const row = (t: DesktopTask): string =>
+    `<li class="p-${t.priority}"><span class="dot"></span><div class="body">` +
+    `<div class="title">${escapeHtml(t.title)}</div>` +
+    (t.due ? `<div class="meta"><span class="due ${t.urgency}">${escapeHtml(t.due)}</span></div>` : '') +
+    '</div></li>';
+  const lists = groups
+    .map(
+      (g) =>
+        (grouped ? `<h2${g.project ? '' : ' class="none"'}>${g.project ? escapeHtml(g.project) : 'No project'}</h2>` : '') +
+        `<ul>${g.tasks.map(row).join('')}</ul>`,
+    )
     .join('');
   const body = tasks.length
-    ? `<ul>${rows}</ul>${more > 0 ? `<p class="more">+ ${more} more</p>` : ''}`
+    ? `${lists}${more > 0 ? `<p class="more">+ ${more} more</p>` : ''}`
     : '<p class="empty">Nothing on the list.</p>';
   const count = tasks.length + Math.max(0, more);
 
@@ -241,6 +256,9 @@ export function desktopHtml({ tasks, more, background, insets }: DesktopPage): s
   }
   h1 { margin: 0 0 10px; font-size: 13px; font-weight: 600; letter-spacing: 0.08em; text-transform: uppercase; opacity: 0.8; }
   h1 .count { opacity: 0.6; margin-left: 6px; }
+  h2 { margin: 0; padding: 2px 0 2px; font-size: 12px; font-weight: 600; color: #9cc3ff; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  h2.none { color: inherit; opacity: 0.6; font-weight: 400; }
+  ul + h2 { margin-top: 8px; padding-top: 8px; border-top: 1px solid rgba(255, 255, 255, 0.16); }
   ul { list-style: none; margin: 0; padding: 0; }
   li { display: flex; gap: 10px; padding: 6px 0; }
   li + li { border-top: 1px solid rgba(255, 255, 255, 0.08); }
@@ -251,7 +269,6 @@ export function desktopHtml({ tasks, more, background, insets }: DesktopPage): s
   .body { min-width: 0; }
   .title { font-size: 15px; line-height: 1.35; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; overflow-wrap: anywhere; }
   .meta { margin-top: 1px; font-size: 12px; opacity: 0.72; }
-  .sep { margin: 0 6px; }
   .due.overdue { color: #ff8f8f; opacity: 1; font-weight: 600; }
   .due.today { color: #ffd27a; font-weight: 600; }
   .more, .empty { margin: 8px 0 0; font-size: 12px; opacity: 0.65; }

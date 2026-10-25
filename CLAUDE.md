@@ -537,7 +537,8 @@ set it). It is a picture, not a window: a window kept behind everything still
 disappears under Show desktop (Win+D) — exactly when someone is looking at the
 wallpaper — and anything that is a window can be clicked. `desktop-todos.ts`
 copies the current wallpaper into `userData/desktop-todos`, lays the first
-`DESKTOP_MAX_TASKS` open tasks over it in an offscreen page (`desktopHtml` in
+`DESKTOP_MAX_TASKS` open tasks (in manual order, then gathered under a heading
+per project) over it in an offscreen page (`desktopHtml` in
 `wallpaper.ts`, which reproduces the original's Fill/Fit/Tile style in CSS),
 photographs it at the primary display's physical size and sets that as the
 wallpaper with style Fill. The copy is the point: Windows overwrites its own
