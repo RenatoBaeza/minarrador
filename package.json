@@ -37,11 +37,11 @@
     "@eslint/js": "^10.0.1",
     "@types/node": "^24.19.0",
     "electron": "^43.3.0",
-    "electron-builder": "^26.15.3",
+    "electron-builder": "^26.18.0",
     "eslint": "^10.8.1",
     "globals": "^17.9.0",
     "typescript": "^6.0.3",
-    "typescript-eslint": "^8.70.1"
+    "typescript-eslint": "^8.73.0"
   },
   "build": {
     "appId": "com.rntbz.minarrador",
