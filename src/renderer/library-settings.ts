@@ -667,6 +667,14 @@ export function storageSection(frag: DocumentFragment, s: SettingsState): void {
       label: 'Edit quick copy…',
       onClick: () => navigate('quickcopy'),
     }),
+    toggleRow({
+      title: 'To-do list on the desktop',
+      hint:
+        'Draws your open tasks onto a copy of the wallpaper, so they are there whenever the desktop is — and ' +
+        'nothing on it can be clicked. Turning it off puts your own wallpaper back.',
+      key: 'desktopTodos',
+      checked: s.settings.desktopTodos,
+    }),
   ]);
 }
 

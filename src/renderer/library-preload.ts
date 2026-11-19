@@ -57,6 +57,7 @@ const FIELDS: Record<LibrarySettingKey, (value: unknown) => unknown> = {
   dictateHotkey: String,
   dictateEngine: String,
   dictateAutoPaste: Boolean,
+  desktopTodos: Boolean,
   liveEngine: String,
   transcribeEngine: String,
   whisperModel: String,

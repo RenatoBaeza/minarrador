@@ -38,6 +38,7 @@ const KEYS: Record<LibrarySettingKey, true> = {
   dictateHotkey: true,
   dictateEngine: true,
   dictateAutoPaste: true,
+  desktopTodos: true,
   liveEngine: true,
   transcribeEngine: true,
   whisperModel: true,

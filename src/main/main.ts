@@ -62,6 +62,7 @@ import { applyCaptureConfig, applyHotkey, applyLiveConfig, applyLoginItem, openO
 import { registerAudioScheme, registerLibraryIpc } from './ipc/library';
 import { registerSettingsIpc } from './ipc/settings';
 import { registerDiskIpc } from './ipc/disk';
+import { initDesktopTodos, stopDesktopTodos } from './desktop-todos';
 import {
   applyDictateHotkey,
   cancelMicTestTimer,
@@ -328,6 +329,9 @@ async function startup(): Promise<void> {
   await dictate.init();
   applyDictateHotkey();
   installPowerHandlers();
+  // Redraws the to-do list onto the wallpaper when that is on — the list may
+  // have changed, or the date moved past a due day, while the app was closed.
+  initDesktopTodos();
   // Also finds the newest meeting still owed its notes, so the tray can offer
   // to write them for a run that failed in an earlier session.
   notifyLibrary();
@@ -373,6 +377,8 @@ function shutdown(): void {
   if (ollamaTimer) clearInterval(ollamaTimer);
   uiTimer = null;
   ollamaTimer = null;
+  // The wallpaper itself stays: the list on the desktop is still the list.
+  stopDesktopTodos();
   // A global shortcut outlives the window that registered it, so hand it back
   // rather than leaving the combination dead for the next application.
   globalShortcut.unregisterAll();
