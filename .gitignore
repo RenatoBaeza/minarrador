@@ -38,3 +38,7 @@ Thumbs.db
 # Miscellaneous
 .claude/
 *.log
+
+# code-signing keys
+*.pfx
+*.p12
