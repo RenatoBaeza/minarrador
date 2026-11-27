@@ -1,0 +1,11 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "default",
+  "description": "The app's own windows: events, and dragging a frameless window. The hidden PDF renderer loads a file:// page and is deliberately not listed, so it has no IPC at all.",
+  "windows": ["library", "dictations", "indicator"],
+  "permissions": [
+    "core:default",
+    "core:window:allow-start-dragging",
+    "core:window:allow-toggle-maximize"
+  ]
+}

@@ -1,0 +1,74 @@
+[package]
+name = "minarrador"
+version = "1.0.0"
+description = "Local-only meeting notes: records mic + system audio, transcribes and summarises on your machine."
+authors = ["Renato Baeza"]
+license = "MIT"
+edition = "2021"
+rust-version = "1.80"
+default-run = "minarrador"
+
+[lib]
+name = "minarrador_lib"
+path = "src/lib.rs"
+
+[[bin]]
+name = "minarrador"
+path = "src/main.rs"
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = ["tray-icon", "image-png"] }
+tauri-plugin-dialog = "2"
+tauri-plugin-global-shortcut = "2"
+tauri-plugin-single-instance = "2"
+tauri-plugin-clipboard-manager = "2"
+tauri-plugin-opener = "2"
+tauri-winrt-notification = "0.7"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio = { version = "1", features = ["full"] }
+tokio-util = "0.7"
+futures-util = "0.3"
+reqwest = { version = "0.12", default-features = false, features = ["json", "multipart", "stream", "native-tls"] }
+cpal = "0.16"
+chrono = { version = "0.4", features = ["serde"] }
+uuid = { version = "1", features = ["v4"] }
+regex = "1"
+zip = { version = "2", default-features = false, features = ["deflate"] }
+trash = "5"
+image = { version = "0.25", default-features = false, features = ["jpeg", "png", "bmp", "webp"] }
+fontdue = "0.9"
+base64 = "0.22"
+http = "1"
+url = "2"
+percent-encoding = "2"
+winreg = "0.55"
+webview2-com = "0.39"
+windows = { version = "0.62", features = ["Win32_Foundation"] }
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.59", features = [
+  "Win32_Foundation",
+  "Win32_System_Power",
+  "Win32_System_JobObjects",
+  "Win32_System_Threading",
+  "Win32_Storage_FileSystem",
+  "Win32_UI_WindowsAndMessaging",
+  "Win32_UI_Input_KeyboardAndMouse",
+  "Win32_UI_Shell",
+  "Win32_Graphics_Gdi",
+  "Win32_Security",
+] }
+
+[dev-dependencies]
+tempfile = "3"
+
+[profile.release]
+codegen-units = 1
+lto = true
+opt-level = "s"
+panic = "unwind"
+strip = true

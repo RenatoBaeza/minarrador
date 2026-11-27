@@ -5,7 +5,7 @@
 // main. Each feature is its own module beside it — library-reader (Recording),
 // library-quickcopy, library-disk, library-todos, library-settings — sharing the
 // helpers in library-common. Everything the window can do is bounded by the
-// `library` bridge in library-preload.ts; it has no Node access and no path of
+// `library` bridge in library-bridge.ts; it has no Node access and no path of
 // its own — a meeting is a folder name it hands back to the main process.
 //
 // Loaded as an ES module (`<script type="module">`), so the features arrive as

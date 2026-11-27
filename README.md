@@ -20,33 +20,22 @@ If something goes wrong after a meeting — the usual culprit is Ollama not runn
 
 The app also listens for sustained audio in the background and can suggest starting a recording when it sounds like a meeting is happening.
 
-**Voice input** is the same speech-to-text machinery for a different job: press **`Win+Shift+X`** anywhere, say what you want to type, and press it again. Minarrador transcribes it locally, pastes it into the window that had the cursor, copies it to your clipboard, and files it in the **Dictations** history. It is a toggle — press the key once to start, again to stop — because Electron's global shortcuts only fire when a key goes down, and the app deliberately ships no keyboard drivers.
+**Voice input** is the same speech-to-text machinery for a different job: press **`Win+Shift+X`** anywhere, say what you want to type, and press it again. Minarrador transcribes it locally, pastes it into the window that had the cursor, copies it to your clipboard, and files it in the **Dictations** history. It is a toggle — press the key once to start, again to stop — because a global shortcut only fires when a key goes down, and the app deliberately installs no keyboard hooks.
 
 ## Prerequisites
 
 | Requirement     | Details                                                       |
 | --------------- | ------------------------------------------------------------- |
 | **Windows**     | 10 or 11 (x64)                                                |
-| **Node.js**     | v20.11 or later — [download](https://nodejs.org)              |
+| **WebView2**    | Built into Windows 11; the installer fetches it on Windows 10 if missing |
 | **Ollama**      | Latest release — [download](https://ollama.com/download)      |
-| **whisper.cpp** | Optional, for live captions and a far faster saved transcript — `npm run whisper:setup` |
+| **whisper.cpp** | Optional, for live captions and a far faster saved transcript — **Settings → Install whisper.cpp** |
 
 ### whisper.cpp (live captions and the saved transcript)
 
-One command fetches the prebuilt binaries and a model into `vendor/whisper/`:
+**Settings → Install whisper.cpp** fetches the prebuilt CPU binaries and the model you pick into `%APPDATA%\Minarrador\whisper`. That downloads whisper.cpp v1.9.2 (8 MB) and, by default, the multilingual `base` model (142 MB). It is the only thing in Minarrador that touches the network, and it only happens when you press the button — afterwards everything is on disk and stays there.
 
-```bash
-npm run whisper:setup
-```
-
-That downloads whisper.cpp v1.9.2 (8 MB) and the multilingual `base` model (142 MB). It is the only step in Minarrador that touches the network, and it is deliberately something you run rather than something the app does on its own — afterwards everything is on disk and stays there.
-
-```bash
-npm run whisper:setup -- --model small      # slower, more accurate
-npm run whisper:setup -- --model large-v3-turbo-q5_0   # the accurate pick (547 MB)
-npm run whisper:setup -- --variant cublas-12.4   # NVIDIA GPU build
-npm run whisper:setup -- --help             # all models and variants
-```
+For development, a `vendor/whisper/` folder in the checkout (`bin/whisper-server.exe` plus `models/*.bin`) is picked up as well.
 
 For fewer mistakes in the preview, use `--model large-v3-turbo-q5_0`. It is `large-v3-turbo` quantised to 5 bits — close to the accuracy of the full 2.9 GB `large-v3` at a fifth of the size, because turbo's decoder is distilled to 4 layers from 32.
 
@@ -54,7 +43,7 @@ It is also far slower than `base`, and on the CPU build that matters more than t
 
 The saved transcript is a separate pass over the recorded audio once you stop, using the same weights — and it has no clock to keep up with, so a slower model there costs you minutes rather than words. At the throughput above, an hour of meeting is about three minutes of transcription on `base`, against roughly fifty on `large-v3-turbo-q5_0` — or thirty-odd with all 24 threads. The audio model, for comparison, takes about as long as the meeting itself.
 
-Models accumulate rather than replace, so running setup again for a second model leaves the first in place. Pick between them in **Settings → Whisper model**, in the meetings window. Skip this step and both passes fall back to your Ollama audio model: the live preview works but lags noticeably, and the saved transcript takes about as long as the meeting did, since an audio LLM costs roughly a second per request no matter how short the clip. It is also the difference between Ollama being needed for the notes alone and being needed for everything.
+Models accumulate rather than replace, so installing a second model leaves the first in place. Pick between them in **Settings → Whisper model**, in the meetings window. Skip this step and both passes fall back to your Ollama audio model: the live preview works but lags noticeably, and the saved transcript takes about as long as the meeting did, since an audio LLM costs roughly a second per request no matter how short the clip. It is also the difference between Ollama being needed for the notes alone and being needed for everything.
 
 ### Ollama model
 
@@ -70,17 +59,18 @@ ollama pull gemma4:12b
 
 ### From source (development)
 
+You need [Rust](https://rustup.rs) (stable, MSVC toolchain, with the Visual Studio C++ build tools) and Node.js 20.11+ for the TypeScript pages.
+
 ```bash
-# Clone the repo
 git clone https://github.com/rntbz/minarrador.git
 cd minarrador
-
-# Install dependencies
 npm install
-
-# Start the app
-npm start
+npm start          # tauri dev: builds the pages and the Rust core, then launches
 ```
+
+`npm start -- -- --library` opens the meetings window straight away. Set
+`MINARRADOR_DATA_DIR` to a scratch folder to run against throwaway settings
+instead of your real `%APPDATA%\Minarrador`.
 
 ### Build the installer
 
@@ -88,7 +78,7 @@ npm start
 npm run dist
 ```
 
-This produces a Windows NSIS installer at `dist/Minarrador-Setup-1.0.0.exe`. Run it to install Minarrador like any other app.
+This produces a Windows NSIS installer under `src-tauri/target/release/bundle/nsis/`. Run it to install Minarrador like any other app.
 
 ## Permissions
 
@@ -102,7 +92,7 @@ Minarrador needs access to your **microphone** and **system audio**. Here's what
 
 ### System audio
 
-System audio capture uses Electron's built-in screen-capture loopback. No extra permissions are needed — Windows does not gate audio-only loopback behind a privacy toggle.
+System audio is captured with WASAPI loopback on the default output device — whatever your speakers or headphones play. No extra permissions are needed: Windows does not gate audio loopback behind a privacy toggle. If you switch output devices mid-meeting, Minarrador follows the new default within a few seconds.
 
 > **Note:** If you run into issues with system audio, right-click the tray icon → **Troubleshooting → Restart Audio Capture**.
 
@@ -215,16 +205,6 @@ write the notes from inside the app:
 
 - Open the meetings window, pick the recording, and press **Generate notes**.
   A failed run says what went wrong right above the button.
-- Or use **Generate Notes for …** in the tray menu, which offers the most recent
-  recording that has none.
-
-From a source checkout you can also run it from a terminal, which is the only
-way to override the models or the engine for a single run:
-
-```bash
-npm run pipeline -- "C:\Users\you\Documents\Minarrador\2026-08-11_14-32-05"
-npm run pipeline -- "<folder>" --engine ollama --summary qwen3.5:9b
-```
 
 ### Settings
 
@@ -243,7 +223,7 @@ the difference is a meeting's notes.
 | Start and stop shortcut    | `Ctrl+Shift+R`         | Global shortcut that toggles recording; marked red if another app already holds it |
 | Dictate shortcut           | `Win+Shift+X`          | Global shortcut that starts/stops a voice capture; marked red if another app already holds it |
 | Transcribe with (voice)    | Ollama                 | Engine for the finished dictated text — whisper.cpp is the faster alternative |
-| Paste where you were typing | ✓                     | Types the dictated text into the foreground window via Windows' built-in PowerShell; the clipboard always gets a copy |
+| Paste where you were typing | ✓                     | Pastes the dictated text into the foreground window with a simulated Ctrl+V; the clipboard always gets a copy |
 | Suggest recording on audio | ✓                      | Notify when sustained speech is detected    |
 | Start at login             | ✓                      | Launch minimised to tray on Windows startup |
 | Open the live transcript   | ✓                      | Shows the preview window when a recording starts |
@@ -264,7 +244,7 @@ the difference is a meeting's notes.
 | --------------------------------------- | ------------------------------------------------------------------------------------------ |
 | **"Ollama not reachable"** in tray menu | Click **Open Ollama** — in the tray menu, or in **Settings**. It starts the daemon and waits for it |
 | **No audio-capable models found**       | Pull one: `ollama pull gemma4:12b`                                                         |
-| **whisper.cpp marked red in Settings**  | Run `npm run whisper:setup`; the live preview falls back to Ollama until it is installed   |
+| **whisper.cpp marked red in Settings**  | Use **Settings → Install whisper.cpp**; the live preview falls back to Ollama until it is installed |
 | **Live captions lag far behind**        | You are on the Ollama fallback, or a large whisper model — try `--model base` or `tiny`    |
 | **Mic not detected**                    | Check Windows mic permissions (see [Permissions](#permissions) above)                      |
 | **System audio not working**            | Try **Troubleshooting → Restart Audio Capture** from the tray menu                         |
@@ -280,16 +260,14 @@ You can also copy full diagnostics to your clipboard: **Troubleshooting → Copy
 
 ## npm scripts
 
-| Command                      | Description                                              |
-| ---------------------------- | -------------------------------------------------------- |
-| `npm run build`              | Compile the TypeScript into `out/`                       |
-| `npm start`                  | Build and launch the app                                 |
-| `npm test`                   | Build and run the test suite                             |
-| `npm run dist`               | Build the NSIS installer for Windows x64                 |
-| `npm run icons`              | Regenerate app and tray icons                            |
-| `npm run whisper:setup`      | Download whisper.cpp and a model into `vendor/whisper`   |
-| `npm run pipeline -- "path"` | Re-run transcription + summarisation on a meeting folder |
-| `npm run capture-test`       | Test audio capture in isolation                          |
+| Command             | Description                                                        |
+| ------------------- | ------------------------------------------------------------------ |
+| `npm start`         | `tauri dev` — build the pages and the Rust core, launch the app    |
+| `npm run build:ui`  | Compile the window pages into `out/renderer`                       |
+| `npm test`          | Run the Rust test suite (`cargo test`)                             |
+| `npm run lint`      | ESLint over the pages, clippy over the Rust                        |
+| `npm run check`     | Type-check, lint and test                                          |
+| `npm run dist`      | Build the NSIS installer for Windows x64                           |
 
 ## Privacy
 
@@ -300,8 +278,8 @@ Minarrador is **completely local**:
 - The PDF renderer blocks all network requests — even model-generated HTML cannot phone home
 - No analytics, no crash reporting, no accounts
 - The running app makes zero network requests beyond `127.0.0.1` (Ollama, and the whisper.cpp server it starts itself)
-- The dictation auto-paste simulates Ctrl+V through the PowerShell built into Windows — the text never leaves your clipboard and the foreground app, and nothing is sent anywhere
-- `npm run whisper:setup` is the one command that downloads anything, and only whisper.cpp itself
+- The dictation auto-paste presses Ctrl+V with the Windows `SendInput` call — the text never leaves your clipboard and the foreground app, and nothing is sent anywhere
+- **Settings → Install whisper.cpp** is the one thing that downloads anything, and only whisper.cpp itself
 
 ## License
 

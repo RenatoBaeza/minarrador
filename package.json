@@ -2,11 +2,11 @@
   "name": "minarrador",
   "productName": "Minarrador",
   "version": "1.0.0",
-  "description": "Local-only meeting notes: records mic + system audio, transcribes and summarizes with Ollama on your machine.",
-  "main": "out/src/main/main.js",
+  "description": "Local-only meeting notes: records mic + system audio, transcribes and summarizes on your machine.",
   "author": "Renato Baeza",
   "license": "MIT",
   "private": true,
+  "type": "module",
   "repository": {
     "type": "git",
     "url": "git+https://github.com/RenatoBaeza/minarrador.git"
@@ -19,85 +19,20 @@
     "node": ">=20.11"
   },
   "scripts": {
-    "clean": "node -e \"require('node:fs').rmSync('out', { recursive: true, force: true })\"",
-    "build": "npm run clean && tsc -p tsconfig.json && tsc -p src/renderer/tsconfig.json && tsc -p src/renderer/tsconfig.preload.json && tsc -p src/renderer/tsconfig.worklet.json && node out/scripts/copy-static.js",
-    "typecheck": "tsc -p tsconfig.json --noEmit && tsc -p src/renderer/tsconfig.json --noEmit && tsc -p src/renderer/tsconfig.preload.json --noEmit && tsc -p src/renderer/tsconfig.worklet.json --noEmit",
-    "start": "npm run build && electron .",
-    "test": "npm run build && node --test \"out/test/**/*.test.js\"",
-    "lint": "eslint .",
-    "lint:fix": "eslint . --fix",
+    "build:ui": "node -e \"require('node:fs').rmSync('out', { recursive: true, force: true })\" && tsc -p src/renderer/tsconfig.json && node scripts/copy-static.mjs",
+    "typecheck": "tsc -p src/renderer/tsconfig.json --noEmit",
+    "lint": "eslint . && cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets -- -D warnings",
+    "test": "cargo test --manifest-path src-tauri/Cargo.toml",
     "check": "npm run typecheck && npm run lint && npm test",
-    "icons": "npm run build && node out/scripts/make-icons.js",
-    "whisper:setup": "npm run build && node out/scripts/setup-whisper.js",
-    "pipeline": "npm run build && electron out/scripts/run-pipeline.js",
-    "capture-test": "npm run build && electron out/scripts/capture-test.js",
-    "dist": "npm run build && electron-builder --win nsis"
+    "start": "tauri dev",
+    "dist": "tauri build"
   },
   "devDependencies": {
     "@eslint/js": "^10.0.1",
-    "@types/node": "^24.19.0",
-    "electron": "^43.3.0",
-    "electron-builder": "^26.18.0",
+    "@tauri-apps/cli": "^2",
     "eslint": "^10.8.1",
     "globals": "^17.9.0",
     "typescript": "^6.0.3",
     "typescript-eslint": "^8.73.0"
-  },
-  "build": {
-    "appId": "com.rntbz.minarrador",
-    "productName": "Minarrador",
-    "artifactName": "Minarrador-Setup-${version}.${ext}",
-    "files": [
-      "out/src/**/*",
-      "assets/**/*",
-      "package.json",
-      "!**/*.map"
-    ],
-    "extraResources": [
-      {
-        "from": "vendor/whisper",
-        "to": "whisper",
-        "filter": [
-          "**/*"
-        ]
-      }
-    ],
-    "directories": {
-      "output": "dist",
-      "buildResources": "assets"
-    },
-    "asar": true,
-    "electronFuses": {
-      "runAsNode": false,
-      "enableNodeOptionsEnvironmentVariable": false,
-      "enableNodeCliInspectArguments": false,
-      "enableCookieEncryption": true,
-      "onlyLoadAppFromAsar": true,
-      "enableEmbeddedAsarIntegrityValidation": true
-    },
-    "publish": null,
-    "win": {
-      "target": [
-        {
-          "target": "nsis",
-          "arch": [
-            "x64"
-          ]
-        }
-      ],
-      "icon": "assets/icon.ico"
-    },
-    "nsis": {
-      "oneClick": false,
-      "perMachine": false,
-      "allowToChangeInstallationDirectory": true,
-      "createDesktopShortcut": true,
-      "createStartMenuShortcut": true,
-      "shortcutName": "Minarrador",
-      "installerIcon": "assets/icon.ico",
-      "uninstallerIcon": "assets/icon.ico",
-      "runAfterFinish": true,
-      "deleteAppDataOnUninstall": false
-    }
   }
 }

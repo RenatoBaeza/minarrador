@@ -49,7 +49,7 @@ export interface Settings {
  *
  * Nothing here names a place: the notes folder, the Ollama host and the whisper
  * root are paths, and a page that could set one could point this app's reading
- * and writing anywhere on the machine. The preload's FIELDS and main's gate are
+ * and writing anywhere on the machine. The bridge's FIELDS and the core's gate (settings_gate.rs) are
  * both typed from this one list, so the two cannot drift apart.
  */
 export type LibrarySettingKey =

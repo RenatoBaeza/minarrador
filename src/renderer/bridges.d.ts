@@ -1,15 +1,10 @@
-// The surface each preload exposes on `window`, typed once for both sides.
+// The surface each bridge module installs on `window`, typed once for both sides.
 //
-// A preload implements one of these and a page calls it, so the two can never
-// disagree about a method's name or what it returns. Types only: a sandboxed
-// preload can require nothing but Electron, and a page nothing at all.
+// A bridge implements one of these over Tauri commands and a page calls it, so
+// the two can never disagree about a method's name or what it returns.
 
 import type {
-  AudioDevice,
-  CaptureLevels,
-  CaptureStatus,
   DictateIndicatorState,
-  DictateStatus,
   Dictation,
   DiskChoice,
   DiskEntry,
@@ -31,40 +26,6 @@ import type {
 export interface SpeakerNames {
   readonly mic: string;
   readonly system: string;
-}
-
-/** What the capture worker is told to open. */
-export interface CaptureConfig {
-  active: boolean;
-  captureMic: boolean;
-  captureSystem: boolean;
-  micDeviceId: string;
-  micDeviceLabel: string;
-}
-
-export interface CaptureBridge {
-  sendPcm(buffer: ArrayBuffer): void;
-  sendLevel(levels: CaptureLevels): void;
-  sendStatus(status: Partial<CaptureStatus>): void;
-  sendDevices(devices: AudioDevice[]): void;
-  onConfigure(fn: (cfg: CaptureConfig) => void): void;
-  /** `channels` is the WAV layout main is writing: 1 summed, or 2 kept apart. */
-  onSetRecording(fn: (value: boolean, channels: number) => void): void;
-}
-
-export interface DictateStart {
-  micDeviceId: string;
-  micDeviceLabel: string;
-  /** A settings-pane mic test: levels only, nothing recorded. */
-  test?: boolean;
-}
-
-export interface DictateBridge {
-  sendPcm(buffer: ArrayBuffer): void;
-  sendLevel(level: number): void;
-  sendStatus(status: DictateStatus & { micOk?: boolean }): void;
-  onStart(fn: (cfg: DictateStart) => void): void;
-  onStop(fn: () => void): void;
 }
 
 export interface DictateIndicatorBridge {
@@ -151,12 +112,18 @@ export interface LibraryBridge {
   };
 }
 
+/** The slice of `window.__TAURI__` (withGlobalTauri) the bridges use. */
+export interface TauriGlobal {
+  core: { invoke<T>(command: string, args?: Record<string, unknown>): Promise<T> };
+  event: { listen<T>(event: string, handler: (event: { payload: T }) => void): Promise<() => void> };
+  window: { getCurrentWindow(): { startDragging(): Promise<void>; toggleMaximize(): Promise<void> } };
+}
+
 declare global {
-  // Each window's preload exposes exactly one of these; a page reaches its own
+  // Each window's bridge installs exactly one of these; a page reaches its own
   // through `window.<name>`, never as a bare global.
   interface Window {
-    capture: CaptureBridge;
-    dictate: DictateBridge;
+    __TAURI__: TauriGlobal;
     dictateIndicator: DictateIndicatorBridge;
     dictations: DictationsBridge;
     library: LibraryBridge;

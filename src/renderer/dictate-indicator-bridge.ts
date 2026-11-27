@@ -1,14 +1,11 @@
-// Bridge for the dictation indicator: a read-only window that is never allowed
-// to steal focus, so it only ever receives state. It has nothing to ask for.
+// The dictation pill's bridge: it only ever listens.
 
-import { contextBridge, ipcRenderer } from 'electron';
-
+import { listen } from './bridge-common.js';
 import type { DictateIndicatorBridge } from './bridges';
+import type { DictateIndicatorState } from '../shared/types';
 
 const api: DictateIndicatorBridge = {
-  onState: (fn) => {
-    ipcRenderer.on('dictate:state', (_e, payload) => fn(payload ?? {}));
-  },
+  onState: (fn) => listen<Partial<DictateIndicatorState>>('dictate:state', (payload) => fn(payload ?? {})),
 };
 
-contextBridge.exposeInMainWorld('dictateIndicator', api);
+window.dictateIndicator = api;

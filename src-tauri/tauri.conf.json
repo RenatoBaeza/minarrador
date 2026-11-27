@@ -1,0 +1,34 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "Minarrador",
+  "version": "1.0.0",
+  "identifier": "com.rntbz.minarrador",
+  "build": {
+    "frontendDist": "../out/renderer",
+    "beforeDevCommand": "npm run build:ui",
+    "beforeBuildCommand": "npm run build:ui"
+  },
+  "app": {
+    "windows": [],
+    "withGlobalTauri": true,
+    "security": {
+      "csp": "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self'; media-src 'self' http://meeting-audio.localhost meeting-audio:; connect-src ipc: http://ipc.localhost",
+      "freezePrototype": true
+    }
+  },
+  "bundle": {
+    "active": true,
+    "targets": ["nsis"],
+    "publisher": "Renato Baeza",
+    "copyright": "MIT",
+    "category": "Productivity",
+    "shortDescription": "Local-only meeting notes",
+    "icon": ["../assets/icon.ico", "../assets/icon.png"],
+    "windows": {
+      "nsis": {
+        "installMode": "currentUser",
+        "installerIcon": "../assets/icon.ico"
+      }
+    }
+  }
+}

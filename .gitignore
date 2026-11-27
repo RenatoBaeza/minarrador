@@ -14,7 +14,7 @@ pnpm-debug.log*
 # whisper.cpp binaries and GGML weights (npm run whisper:setup)
 /vendor/
 
-# Electron specific
+# Packaging leftovers
 /.cache/
 *.blockmap
 builder-debug.yml
@@ -42,3 +42,7 @@ Thumbs.db
 # code-signing keys
 *.pfx
 *.p12
+
+# Rust / Tauri
+/src-tauri/target/
+/src-tauri/gen/

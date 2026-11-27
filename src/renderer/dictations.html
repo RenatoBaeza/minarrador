@@ -2,8 +2,6 @@
 <html lang="en">
   <head>
     <meta charset="utf-8" />
-    <meta http-equiv="Content-Security-Policy"
-      content="default-src 'none'; script-src 'self'; style-src 'self'" />
     <title>Dictations</title>
     <link rel="stylesheet" href="dictations.css" />
   </head>
@@ -29,6 +27,7 @@
       <span class="foot-hint">Edits save when you leave a box · Esc closes</span>
     </footer>
 
+    <script type="module" src="dictations-bridge.js"></script>
     <script type="module" src="dictations.js"></script>
   </body>
 </html>

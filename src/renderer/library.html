@@ -2,13 +2,12 @@
 <html lang="en">
   <head>
     <meta charset="utf-8" />
-    <meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self'; media-src meeting-audio:" />
     <title>Minarrador</title>
     <link rel="stylesheet" href="library.css" />
   </head>
   <body data-mode="reader">
     <header class="titlebar">
-      <img class="app-icon" src="../../../assets/icon.png" alt="" draggable="false" />
+      <img class="app-icon" src="icon.png" alt="" draggable="false" />
       <span class="brand">Minarrador</span>
       <span id="section-name" class="sub">Recording</span>
       <button id="minimize" class="chrome" type="button" title="Minimise" aria-label="Minimise">&#8211;</button>
@@ -99,6 +98,7 @@
       </main>
     </div>
 
+    <script type="module" src="library-bridge.js"></script>
     <script type="module" src="library.js"></script>
   </body>
 </html>
