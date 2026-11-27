@@ -20,7 +20,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::net::TcpListener;
+use tokio::net::{TcpListener, TcpStream};
 use tokio_util::sync::CancellationToken;
 
 const AUTH_URL: &str = "https://accounts.google.com/o/oauth2/v2/auth";
@@ -30,10 +30,7 @@ const SIGN_IN_TIMEOUT: Duration = Duration::from_secs(300);
 const HTTP_TIMEOUT: Duration = Duration::from_secs(30);
 const KEYRING_SERVICE: &str = "Minarrador";
 
-const PAGE_DONE: &str = "<!doctype html><meta charset=utf-8><title>Minarrador</title>\
-<body style=\"font:16px system-ui;margin:3em\"><h2>Signed in to Minarrador</h2><p>You can close this tab.</p>";
-const PAGE_DENIED: &str = "<!doctype html><meta charset=utf-8><title>Minarrador</title>\
-<body style=\"font:16px system-ui;margin:3em\"><h2>Sign-in cancelled</h2><p>You can close this tab.</p>";
+const ICON_PNG: &[u8] = include_bytes!("../../assets/icon.png");
 
 /// Where sync goes and which Google client signs in to it.
 #[derive(Debug, Clone)]
@@ -215,14 +212,14 @@ pub async fn sign_in(
         .append_pair("prompt", "consent select_account");
     open(url.as_str())?;
 
-    let code = tokio::select! {
+    let (code, mut browser) = tokio::select! {
         r = wait_for_code(&listener, &state) => r?,
         _ = tokio::time::sleep(SIGN_IN_TIMEOUT) => return Err("Sign-in timed out — nothing came back from the browser.".into()),
         _ = cancel.cancelled() => return Err(String::new()),
     };
     drop(listener);
 
-    let body = token_request(&[
+    let result = token_request(&[
         ("grant_type", "authorization_code"),
         ("code", &code),
         ("client_id", &cfg.client_id),
@@ -231,13 +228,35 @@ pub async fn sign_in(
         ("code_verifier", &verifier),
     ])
     .await
-    .map_err(|(_, e)| e)?;
-    let tokens = tokens_from(body)?;
-    let account = account_from_id_token(&tokens.id_token).ok_or("Google's ID token could not be read.")?;
-    Ok((account, tokens))
+    .map_err(|(_, e)| e)
+    .and_then(tokens_from)
+    .and_then(|tokens| {
+        let account = account_from_id_token(&tokens.id_token).ok_or("Google's ID token could not be read.")?;
+        Ok((account, tokens))
+    });
+    // The tab shows what actually happened, not just that Google redirected.
+    let page = match &result {
+        Ok((account, _)) => Page::Done { email: &account.email },
+        Err(reason) => Page::Failed { reason },
+    };
+    respond(&mut browser, "200 OK", &page.html()).await;
+    result
 }
 
-async fn wait_for_code(listener: &TcpListener, state: &str) -> Result<String, String> {
+async fn respond(sock: &mut TcpStream, status: &str, body: &str) {
+    let response = format!(
+        "HTTP/1.1 {status}\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: {}\r\n\
+Content-Security-Policy: default-src 'none'; img-src data:; style-src 'unsafe-inline'\r\n\
+Cache-Control: no-store\r\nConnection: close\r\n\r\n{body}",
+        body.len()
+    );
+    let _ = sock.write_all(response.as_bytes()).await;
+    let _ = sock.shutdown().await;
+}
+
+/// The redirect's code, with the browser's connection still open so the page
+/// it gets can say how the sign-in ended.
+async fn wait_for_code(listener: &TcpListener, state: &str) -> Result<(String, TcpStream), String> {
     loop {
         let (mut sock, _) = listener.accept().await.map_err(|e| format!("Lost the browser's answer: {e}"))?;
         let mut buf = vec![0u8; 8192];
@@ -245,21 +264,87 @@ async fn wait_for_code(listener: &TcpListener, state: &str) -> Result<String, St
             Ok(Ok(n)) => n,
             _ => 0,
         };
-        let request = String::from_utf8_lossy(&buf[..n]);
-        let (status, body, result) = match parse_callback(&request, state) {
-            Callback::Code(code) => ("200 OK", PAGE_DONE, Some(Ok(code))),
-            Callback::Denied(e) => ("200 OK", PAGE_DENIED, Some(Err(if e == "access_denied" { String::new() } else { format!("Google refused the sign-in ({e}).") }))),
-            Callback::Other => ("404 Not Found", "", None),
-        };
-        let response = format!(
-            "HTTP/1.1 {status}\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: {}\r\nCache-Control: no-store\r\nConnection: close\r\n\r\n{body}",
-            body.len()
-        );
-        let _ = sock.write_all(response.as_bytes()).await;
-        let _ = sock.shutdown().await;
-        if let Some(result) = result {
-            return result;
+        let request = String::from_utf8_lossy(&buf[..n]).into_owned();
+        match parse_callback(&request, state) {
+            Callback::Code(code) => return Ok((code, sock)),
+            Callback::Denied(e) => {
+                let reason = if e == "access_denied" { String::new() } else { format!("Google refused the sign-in ({e}).") };
+                let page = if reason.is_empty() { Page::Cancelled } else { Page::Failed { reason: &reason } };
+                respond(&mut sock, "200 OK", &page.html()).await;
+                return Err(reason);
+            }
+            Callback::Other => respond(&mut sock, "404 Not Found", "").await,
         }
+    }
+}
+
+// ------------------------------------------------------- the browser's page
+
+/// What the browser tab says once Google hands it back. Styled like the app
+/// window: the same dark surfaces, the indigo accent, Segoe UI, the app icon.
+pub enum Page<'a> {
+    Done { email: &'a str },
+    Cancelled,
+    Failed { reason: &'a str },
+}
+
+fn escape(s: &str) -> String {
+    s.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;").replace('"', "&quot;")
+}
+
+const PAGE_STYLE: &str = r#"
+:root{color-scheme:dark;--bg:#16161a;--card:#1e1e24;--line:#2c2c34;--chip:#2a2a32;--text:#eaeaea;--muted:#9ca3af;--faint:#6b7280;--accent:#4c6ef5;--ok:#34d399;--bad:#f87171}
+*{box-sizing:border-box}
+body{margin:0;min-height:100vh;display:grid;place-items:center;padding:24px 16px;
+  background:radial-gradient(900px 480px at 50% -8%,rgba(76,110,245,.22),transparent 62%),var(--bg);
+  color:var(--text);font:15px/1.55 "Segoe UI Variable Text","Segoe UI",system-ui,sans-serif}
+.card{width:100%;max-width:440px;background:var(--card);border:1px solid var(--line);border-radius:16px;
+  padding:36px 32px 26px;text-align:center;box-shadow:0 24px 70px rgba(0,0,0,.5);animation:rise .35s cubic-bezier(.22,.61,.36,1)}
+@keyframes rise{from{opacity:0;transform:translateY(8px)}to{opacity:1;transform:none}}
+@media (prefers-reduced-motion:reduce){.card{animation:none}}
+.mark{position:relative;width:76px;height:76px;margin:0 auto 22px}
+.mark img{width:76px;height:76px;border-radius:20px;display:block;box-shadow:0 8px 24px rgba(76,110,245,.25)}
+.badge{position:absolute;right:-7px;bottom:-7px;width:30px;height:30px;border-radius:50%;display:grid;place-items:center;
+  font:700 15px/1 "Segoe UI",system-ui,sans-serif;border:3px solid var(--card);color:#0d0d13}
+.ok .badge{background:var(--ok)} .bad .badge{background:var(--bad)} .muted .badge{background:var(--muted)}
+h1{margin:0 0 8px;font:600 23px/1.3 "Segoe UI Variable Display","Segoe UI",system-ui,sans-serif;letter-spacing:-.01em}
+p{margin:0 0 10px;color:var(--muted)}
+p.lead{color:var(--text)} .bad p.lead{color:var(--bad)}
+strong{color:var(--text);font-weight:600}
+.close{margin-top:22px;padding-top:18px;border-top:1px solid var(--line);font-size:13px;color:var(--muted)}
+kbd{display:inline-block;margin-left:4px;padding:1px 7px;border-radius:6px;background:var(--chip);border:1px solid var(--line);
+  color:var(--text);font:600 12px/1.6 "Segoe UI",system-ui,sans-serif}
+.brand{margin-top:16px;font-size:11px;letter-spacing:.12em;text-transform:uppercase;color:var(--faint)}
+"#;
+
+impl Page<'_> {
+    pub fn html(&self) -> String {
+        let (tone, badge, title, lead, detail) = match self {
+            Page::Done { email } => (
+                "ok",
+                "&#10003;",
+                "You're signed in",
+                if email.is_empty() {
+                    "Minarrador is linked to your Google account.".to_string()
+                } else {
+                    format!("Minarrador is linked to <strong>{}</strong>.", escape(email))
+                },
+                "Your settings, quick copy, to-dos and dictations sync to it. Audio, transcripts and meeting notes stay on your computer.",
+            ),
+            Page::Cancelled => ("muted", "&#8211;", "Sign-in cancelled", "Nothing was changed.".to_string(), "You can sign in any time from Minarrador."),
+            Page::Failed { reason } => ("bad", "!", "Sign-in didn't finish", escape(reason), "Go back to Minarrador and try again."),
+        };
+        let icon = base64::engine::general_purpose::STANDARD.encode(ICON_PNG);
+        format!(
+            "<!doctype html><html lang=\"en\"><head><meta charset=\"utf-8\">\
+<meta name=\"viewport\" content=\"width=device-width,initial-scale=1\">\
+<title>Minarrador — {title}</title><link rel=\"icon\" href=\"data:image/png;base64,{icon}\">\
+<style>{PAGE_STYLE}</style></head><body><main class=\"card {tone}\">\
+<div class=\"mark\"><img src=\"data:image/png;base64,{icon}\" alt=\"\"><span class=\"badge\">{badge}</span></div>\
+<h1>{title}</h1><p class=\"lead\">{lead}</p><p>{detail}</p>\
+<div class=\"close\">You can close this tab and go back to the app.<kbd>Ctrl + W</kbd></div>\
+<div class=\"brand\">Minarrador</div></main></body></html>"
+        )
     }
 }
 
@@ -329,6 +414,25 @@ mod tests {
         assert_eq!(verifier.len(), 64);
         assert_eq!(challenge.len(), 43);
         assert_ne!(pkce_pair().0, verifier);
+    }
+
+    #[test]
+    fn pages_escape_what_they_show() {
+        let html = Page::Done { email: "a<b>@c.d" }.html();
+        assert!(html.contains("a&lt;b&gt;@c.d") && !html.contains("a<b>"));
+        assert!(Page::Failed { reason: "nope" }.html().contains("didn't finish"));
+        assert!(Page::Cancelled.html().contains("cancelled"));
+    }
+
+    /// `MINARRADOR_RENDER_OUT=<dir> cargo test -- --ignored render_sign_in_pages`
+    #[test]
+    #[ignore]
+    fn render_sign_in_pages() {
+        let dir = std::path::PathBuf::from(std::env::var("MINARRADOR_RENDER_OUT").expect("MINARRADOR_RENDER_OUT"));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("signin-done.html"), Page::Done { email: "someone@example.com" }.html()).unwrap();
+        std::fs::write(dir.join("signin-cancelled.html"), Page::Cancelled.html()).unwrap();
+        std::fs::write(dir.join("signin-failed.html"), Page::Failed { reason: "Google refused: invalid_client" }.html()).unwrap();
     }
 
     #[test]

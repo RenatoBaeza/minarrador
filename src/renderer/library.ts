@@ -14,6 +14,7 @@
 import { SECTIONS, byId, isSection, setNavigator, listEl, navEls, queryEl, readerEl, recordEl, searchingEl, sectionNameEl, view } from './library-common.js';
 import { addLiveLine, openMeeting, refresh, renderPlaceholder, renderHealth, renderProgress, renderReader, select, toggleRecord } from './library-reader.js';
 import { renderSettings } from './library-settings.js';
+import { renderAccount } from './library-account.js';
 import { qcEditor, quickCopy, renderQuickCopy, saveQuickCopy } from './library-quickcopy.js';
 import { renderTodos, saveTodos, tdEditor, todo } from './library-todos.js';
 import { diskProgressText, diskView, renderDisk } from './library-disk.js';
@@ -216,6 +217,7 @@ window.library.onChanged(async () => {
 // notice is built from the same state, so it follows along.
 window.library.settings.onChanged(async () => {
   view.settings = await window.library.settings.get();
+  renderAccount(view.settings);
   if (view.mode === 'settings') renderSettings();
   else if (!view.selected) renderPlaceholder();
 });
@@ -269,6 +271,7 @@ window.library.onShow((section) => showSection(section));
 // onto an empty archive, and the reason it will stay empty belongs there.
 Promise.all([refresh(), window.library.settings.get()]).then(([, settings]) => {
   view.settings = settings;
+  renderAccount(settings);
   // The tab is sticky across launches; the meeting is too, falling back to the
   // newest when it is gone — the window is usually opened to read the one that
   // just finished.

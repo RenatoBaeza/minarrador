@@ -47,6 +47,13 @@
             <span>To-do</span>
           </button>
         </div>
+        <div class="nav-bottom">
+        <!-- Sign in / who is signed in; filled by renderAccount(). Hidden in a
+             build without sync, so nothing here promises what it cannot do. -->
+        <button id="account" class="account-item" type="button" hidden>
+          <span id="account-mark" class="account-mark" aria-hidden="true"></span>
+          <span id="account-label">Sign in</span>
+        </button>
         <button class="nav-item" data-mode="settings" type="button" title="Settings (Ctrl+,)">
           <svg viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
             <circle cx="12" cy="12" r="3" />
@@ -54,6 +61,7 @@
           </svg>
           <span>Settings</span>
         </button>
+        </div>
       </nav>
 
       <main>

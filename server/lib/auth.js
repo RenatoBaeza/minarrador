@@ -17,7 +17,10 @@ export async function userFrom(req) {
     const p = ticket.getPayload();
     if (!p?.sub) return null;
     return { sub: p.sub, email: p.email ?? '', name: p.name ?? '' };
-  } catch {
+  } catch (e) {
+    // The reason, never the token: a wrong audience or an expired token is
+    // otherwise indistinguishable from no token at all.
+    console.warn(`id token rejected: ${e?.message ?? e} (expected audience ${audience.join(', ')})`);
     return null;
   }
 }

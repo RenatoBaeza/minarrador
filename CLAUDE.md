@@ -25,6 +25,7 @@ Local-only meeting notes app for Windows. Records mic + system audio, transcribe
 │       ├── *-bridge.ts          # One per window: installs window.library / .dictations / .dictateIndicator
 │       ├── bridges.d.ts         # The window.<name> API each bridge implements
 │       ├── library.*, library-*.ts   # The app window: sidebar + Recording, Quick copy, Disk usage, To-do, Settings
+│       ├── library-account.ts   # Sidebar account button: "Sign in" when signed out, initial + sync dot when in
 │       ├── dictate-indicator.*  # Floating "listening" pill
 │       └── dictations.*         # Dictation history window
 ├── src-tauri/
@@ -144,7 +145,7 @@ Off until someone presses **Sign in with Google** in Settings, and absent from a
 
 **What syncs**: `SYNCED_SETTINGS` (a subset of `LIBRARY_SETTINGS`: no paths, mic device, thread count, installed weights, login item or wallpaper), `snippets.json`, `todos.json`, `dictations.json`. Never audio, transcripts, notes or PDFs. The local files stay the source of truth; offline and signed out behave as before.
 
-**Protocol**: one server document per user per kind (`_id = sub:kind`), each with an `updatedAt`. Local writes call `cloud::changed(kind)` (from `apply_setting`, `snippets_save`, `todos_save`, the dictation store's add/update/remove), which marks the kind dirty and kicks a debounced (3 s) sync; the loop also pulls every 5 minutes and at startup. A push lands only if newer (atomic filter on the server); a losing push adopts the server's copy. The **first sync after signing in merges** instead (todos by id + `updatedAt`, dictations by id, snippets by label+text; the account's settings win), so linking a second machine loses nothing. Everything arriving goes through the same gates as window input: `gate_library_patch` for settings (applied with `services::apply_patch`, which does not mark dirty), `normalize` for lists; `library:synced` tells the page to reload a list that is not mid-edit. Sign-out revokes the token and leaves local data untouched.
+**Protocol**: one server document per user per kind (`_id = sub:kind`), each with an `updatedAt`. Local writes call `cloud::changed(kind)` (from `apply_setting`, `snippets_save`, `todos_save`, the dictation store's add/update/remove), which marks the kind dirty and kicks a debounced (3 s) sync; the loop also pulls every 5 minutes and at startup. A push lands only if newer (atomic filter on the server); a losing push adopts the server's copy. The **first sync after signing in merges** instead (todos by id + `updatedAt`, dictations by id, snippets by label+text; the account's settings win), so linking a second machine loses nothing. Everything arriving goes through the same gates as window input: `gate_library_patch` for settings (applied with `services::apply_patch`, which does not mark dirty), `normalize` for lists; `library:synced` tells the page to reload a list that is not mid-edit. Sign-out revokes the token and leaves local data untouched. The browser tab the loopback listener answers is built in `oauth::Page` (app styling, icon inlined, shows the actual outcome after the token exchange).
 
 ### Post-recording pipeline (`pipeline.rs`)
 

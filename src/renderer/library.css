@@ -171,6 +171,102 @@ body {
   background: #4c6ef5;
 }
 
+/* Settings and the account sit together at the bottom of the sidebar. */
+.nav-bottom {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+/* Signed out: the way in, always in sight. Signed in: who, at a glance. */
+.account-item {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 5px;
+  width: 100%;
+  padding: 8px 2px 7px;
+  border: 1px solid transparent;
+  border-radius: 8px;
+  background: transparent;
+  color: #9ca3af;
+  font: inherit;
+  font-size: 11px;
+  line-height: 1.2;
+  text-align: center;
+  cursor: default;
+}
+
+.account-item[hidden] {
+  display: none;
+}
+
+.account-item:hover {
+  background: #2a2a32;
+  color: #eaeaea;
+}
+
+.account-item.signed-out {
+  border-color: rgba(76, 110, 245, 0.45);
+  background: rgba(76, 110, 245, 0.12);
+  color: #dfe5ff;
+}
+
+.account-item.signed-out:hover {
+  background: rgba(76, 110, 245, 0.22);
+}
+
+.account-item:disabled {
+  opacity: 0.7;
+}
+
+.account-mark {
+  position: relative;
+  display: grid;
+  place-items: center;
+  width: 24px;
+  height: 24px;
+  border-radius: 50%;
+  font-size: 12px;
+  font-weight: 600;
+  color: #fff;
+}
+
+.account-mark svg {
+  width: 18px;
+  height: 18px;
+}
+
+/* The initial of whoever is signed in. */
+.signed-in .account-mark {
+  background: #4c6ef5;
+}
+
+/* Google's mark sits on white, as Google draws it. */
+.signed-out .account-mark,
+.waiting .account-mark {
+  background: #fff;
+}
+
+.account-mark .dot {
+  position: absolute;
+  right: -2px;
+  bottom: -2px;
+  width: 9px;
+  height: 9px;
+  border-radius: 50%;
+  border: 2px solid #1e1e24;
+  background: #34d399;
+}
+
+.account-mark .dot.failed {
+  background: #f59e0b;
+}
+
+.account-mark .dot.busy {
+  background: #4c6ef5;
+}
+
 /* Everything but Recording takes the whole width: the meeting rail belongs to
    the archive, not to the app. */
 body:not([data-mode='reader']) .rail {
