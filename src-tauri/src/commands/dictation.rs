@@ -25,7 +25,11 @@ pub fn dictations_update(window: WebviewWindow, id: String, text: String) -> Opt
     if !ours(&window) {
         return None;
     }
-    core().dictations.update(&id, &text)
+    let next = core().dictations.update(&id, &text);
+    if next.is_some() {
+        crate::cloud::changed("dictations");
+    }
+    next
 }
 
 #[tauri::command]
@@ -33,7 +37,11 @@ pub fn dictations_remove(window: WebviewWindow, id: String) -> Option<Vec<Dictat
     if !ours(&window) {
         return None;
     }
-    core().dictations.remove(&id)
+    let next = core().dictations.remove(&id);
+    if next.is_some() {
+        crate::cloud::changed("dictations");
+    }
+    next
 }
 
 #[tauri::command]

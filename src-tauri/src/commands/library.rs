@@ -32,6 +32,7 @@ pub fn snippets_save(window: WebviewWindow, items: Value) -> Vec<Snippet> {
         return vec![];
     }
     let saved = core().snippets.save(&items);
+    crate::cloud::changed("snippets");
     refresh_tray();
     notify_settings();
     log_info!("quick copy: {} shorthand(s) saved", saved.len());
@@ -52,6 +53,7 @@ pub fn todos_save(window: WebviewWindow, items: Value) -> Vec<Todo> {
         return vec![];
     }
     let saved = core().todos.save(&items);
+    crate::cloud::changed("todos");
     log_info!("to-do: {} task(s) saved", saved.len());
     crate::desktop_todos::after_save();
     saved

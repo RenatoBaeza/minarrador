@@ -13,6 +13,8 @@ pub mod win;
 pub mod ollama;
 pub mod whisper;
 pub mod whisper_setup;
+pub mod oauth;
+pub mod cloud;
 pub mod pipeline;
 pub mod library;
 pub mod stores;
@@ -38,7 +40,7 @@ pub mod app;
 
 use tauri::RunEvent;
 
-use commands::{dictation as dc, disk as dk, library as lc, settings as sc};
+use commands::{dictation as dc, disk as dk, library as lc, settings as sc, sync as sy};
 
 pub fn run() {
     // A fault in the core is logged, not fatal: a recording in progress is
@@ -100,6 +102,9 @@ pub fn run() {
             sc::settings_test_mic_stop,
             sc::settings_pull_model,
             sc::settings_install_whisper,
+            sy::sync_sign_in,
+            sy::sync_sign_out,
+            sy::sync_now,
             dk::disk_choose,
             dk::disk_cancel,
             dk::disk_list,

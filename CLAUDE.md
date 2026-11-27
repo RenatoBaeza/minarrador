@@ -1,6 +1,6 @@
 # Minarrador
 
-Local-only meeting notes app for Windows. Records mic + system audio, transcribes and summarises with whisper.cpp and Ollama, and can dictate a spoken sentence straight into whatever you're typing — nothing leaves the machine.
+Local-only meeting notes app for Windows. Records mic + system audio, transcribes and summarises with whisper.cpp and Ollama, and can dictate a spoken sentence straight into whatever you're typing — no meeting data leaves the machine. Optionally, signing in with Google syncs the light data (portable settings, quick copy, to-dos, dictation text) through a small server into MongoDB.
 
 ## Tech stack
 
@@ -10,6 +10,7 @@ Local-only meeting notes app for Windows. Records mic + system audio, transcribe
 - **Ollama** — local LLM for the notes, and for the transcript when whisper.cpp is not installed
 - **whisper.cpp** — `whisper-server.exe` child process; the live transcript and, by default, the saved one
 - **WebView2** — renders the pages, and prints the PDF brief (`PrintToPdf`)
+- **Google sign-in + MongoDB** (opt-in) — installed-app OAuth with PKCE in Rust (`oauth.rs`), sync in `cloud.rs`, and a Vercel function in `server/` that verifies the ID token and talks to Atlas
 - **TypeScript** (strict) for the window pages only, compiled by plain `tsc` into `out/renderer` — no framework, no bundler
 
 ## Project layout
@@ -38,7 +39,7 @@ Local-only meeting notes app for Windows. Records mic + system audio, transcribe
 │       ├── recording.rs     # Start/stop/finalize, state.stopping, disk + duration guards, pipeline runs
 │       ├── services.rs      # Ollama refresh/launch, hotkeys, apply_setting, notes folder, login item
 │       ├── voice.rs         # Dictation start/stop/paste flow, mic test
-│       ├── commands/        # #[tauri::command]s, one module per namespace: library, settings, disk, dictation
+│       ├── commands/        # #[tauri::command]s, one module per namespace: library, settings, disk, dictation, sync
 │       ├── capture.rs       # Capture worker thread (owns the streams, mixes, levels) + CaptureController
 │       ├── audio.rs         # cpal sources, FIR resampler → 16 kHz, timeline SampleQueue
 │       ├── live.rs          # LiveTranscriber (segmenting + engines), SpeechDetector, SilenceDetector
@@ -46,7 +47,9 @@ Local-only meeting notes app for Windows. Records mic + system audio, transcribe
 │       ├── pipeline.rs      # transcribe → summarise → PDF; engines injected as closures
 │       ├── ollama.rs        # Ollama HTTP client (transcribe, chat, pull), clean_transcript, collapse_repeats
 │       ├── whisper.rs       # whisper-server supervisor + /inference client, clean_whisper_text
-│       ├── whisper_setup.rs # Downloads whisper.cpp; the one outbound path
+│       ├── whisper_setup.rs # Downloads whisper.cpp
+│       ├── oauth.rs         # Google sign-in: loopback redirect + PKCE, token refresh, Credential Manager
+│       ├── cloud.rs         # Opt-in sync of settings/snippets/todos/dictations; first-link merge, LWW
 │       ├── pdf.rs           # HTML → PDF in a hidden, IPC-less WebView2 window
 │       ├── library.rs       # Read-only view over the notes folder (list, read, search, cache)
 │       ├── audio_serve.rs   # meeting-audio: a meeting's WAV as mono, by byte range (pure)
@@ -62,6 +65,7 @@ Local-only meeting notes app for Windows. Records mic + system audio, transcribe
 │       ├── win.rs           # Win32: job object, free space, sleep blocker, SendInput paste, monitors
 │       ├── types.rs         # Serde payloads matching src/shared/types.d.ts field for field
 │       └── logger.rs        # File logger (log_info!/log_warn!/log_error!)
+├── server/            # Sync server: one Vercel function (api/sync.js) + MongoDB; see server/README.md
 ├── vendor/whisper/    # Optional dev copy of whisper.cpp (bin/, models/) — gitignored
 └── out/               # Compiled pages Tauri serves (gitignored)
 ```
@@ -134,6 +138,14 @@ One download at a time (`state.setup`), cancellable: `settings_pull_model` accep
 
 A second worker thread with its own mic stream, so dictation can run mid-meeting. Toggle (shortcuts fire on key-down only): start opens the mic and a `LiveTranscriber` whose captions go to the pill; stop waits for the worker's last batch, trims room tone (`trim_silence`, 50 ms RMS gate), and transcribes with `dictation_engine_for(dictateEngine)` — the Ollama audio model by default, falling back to whichever engine can run. The text goes to the clipboard, then `win::paste_clipboard` waits for the hotkey's modifiers to be released and sends Ctrl+V with `SendInput` (an elevated window silently refuses; the clipboard has it either way), then the archive (`dictations.json`, newest first, 200 max). A failed transcription keeps the clip under `%APPDATA%\Minarrador\dictation-errors`. Five minutes is the ceiling. The settings pane's **Test** opens the same worker in test mode and streams levels on `settings:micTest` for up to 15 s.
 
+### Account and sync (`oauth.rs`, `cloud.rs`, `server/`)
+
+Off until someone presses **Sign in with Google** in Settings, and absent from a build made without `MINARRADOR_SYNC_URL`, `MINARRADOR_GOOGLE_CLIENT_ID` and `MINARRADOR_GOOGLE_CLIENT_SECRET` (compiled in with `option_env!`; also read at run time; https only outside debug). Sign-in opens the system browser and receives the code on a one-shot `127.0.0.1:<random>` listener (PKCE, `state` checked). The refresh token goes to **Windows Credential Manager** (`keyring`, one entry per data folder); `sync.json` holds only the account's display info and per-kind progress.
+
+**What syncs**: `SYNCED_SETTINGS` (a subset of `LIBRARY_SETTINGS`: no paths, mic device, thread count, installed weights, login item or wallpaper), `snippets.json`, `todos.json`, `dictations.json`. Never audio, transcripts, notes or PDFs. The local files stay the source of truth; offline and signed out behave as before.
+
+**Protocol**: one server document per user per kind (`_id = sub:kind`), each with an `updatedAt`. Local writes call `cloud::changed(kind)` (from `apply_setting`, `snippets_save`, `todos_save`, the dictation store's add/update/remove), which marks the kind dirty and kicks a debounced (3 s) sync; the loop also pulls every 5 minutes and at startup. A push lands only if newer (atomic filter on the server); a losing push adopts the server's copy. The **first sync after signing in merges** instead (todos by id + `updatedAt`, dictations by id, snippets by label+text; the account's settings win), so linking a second machine loses nothing. Everything arriving goes through the same gates as window input: `gate_library_patch` for settings (applied with `services::apply_patch`, which does not mark dirty), `normalize` for lists; `library:synced` tells the page to reload a list that is not mid-edit. Sign-out revokes the token and leaves local data untouched.
+
 ### Post-recording pipeline (`pipeline.rs`)
 
 1. **Transcribe** — reads the WAV, chunks the downmix once at quiet moments (`split_into_chunks`, `chunkSeconds`), and for a two-channel recording reads each side separately with its own prompt tail (`tracks_of`), skipping silent chunks (`SILENCE_RMS`). Writes `transcript.txt` (speaker-prefixed) and `transcript.json` (segments with `speaker`, `startSeconds`).
@@ -166,7 +178,7 @@ Engines are closures in `Engines` (built by `recording::engines`), so the stages
 - **Rust 2021, clippy clean** (`cargo clippy --all-targets -- -D warnings`). Errors that cross into a window are `String` messages; nothing panics on bad input from disk or a page — files and payloads arrive as `serde_json::Value` and are coerced.
 - **Lock discipline**: `core().state()` is a std `Mutex`; never hold it across an `.await` or while calling into the capture/dictation controllers.
 - **Blocking work off the async runtime**: filesystem walks, WAV reads, zip extraction, wallpaper rendering run in `spawn_blocking`.
-- **Network access lives in `ollama.rs`, `whisper.rs` and `whisper_setup.rs`.** The first two only reach `127.0.0.1`; `whisper_setup.rs` is the sole outbound path and fetches whisper.cpp and nothing else.
+- **Network access lives in `ollama.rs`, `whisper.rs`, `whisper_setup.rs`, `oauth.rs` and `cloud.rs`.** The first two only reach `127.0.0.1`; `whisper_setup.rs` fetches whisper.cpp and nothing else; `oauth.rs` talks to Google's OAuth endpoints and `cloud.rs` to the configured sync server, both only once signed in, and never with meeting data.
 - **Pages** are TypeScript, browser only, ES modules with `.js` import specifiers, no bundler; they reach the core only through their bridge.
 - **No external runtime processes** beyond Ollama and whisper-server: paste is `SendInput`, the wallpaper is the registry + `SystemParametersInfoW` — no PowerShell anywhere.
 - Settings default to `gemma4:12b` for both transcription and summarisation; Ollama host `http://127.0.0.1:11434`.
@@ -222,6 +234,7 @@ Stages in `pipeline.rs` take the meeting dir, the injected closures (`AsrFn`, `C
 | `settings_get`, `settings_set { patch }`, `settings_choose_notes_folder`, `settings_open_ollama`, `settings_cancel_setup`, `settings_test_mic_stop` | library | `settingsState()` |
 | `settings_pull_model { name }`, `settings_install_whisper { model }`, `settings_test_mic` | library | `{ ok, reason }` |
 | `settings_open_dictations`, `settings_open_log`, `settings_copy_diagnostics`, `settings_restart_capture` | library | — / bool |
+| `sync_sign_in`, `sync_now` / `sync_sign_out` | library | `{ ok, reason }` / `settingsState()` |
 | `dictations_list`, `dictations_update { id, text }`, `dictations_remove { id }`, `dictations_copy { text }`, `dictations_close` | dictations | list / list or `null` |
 
 | Event (core → window) | Payload |
@@ -234,12 +247,13 @@ Stages in `pipeline.rs` take the meeting dir, the injected closures (`AsrFn`, `C
 | `disk:progress` | `{ files, dirs, current }` |
 | `settings:changed` | — |
 | `settings:micTest` | `{ testing, level?, micLabel?, micError? }` |
+| `library:synced` | `'settings' \| 'snippets' \| 'todos' \| 'dictations'` (arrived from the account) |
 | `dictations:changed` | — |
 | `dictate:state` | `{ state, text?, error? }` (to the indicator) |
 
 ## Important notes
 
-- **No cloud, no telemetry, no accounts.** Two things can reach the internet, both only on a button press and neither with meeting data: `whisper_setup.rs` (GitHub + Hugging Face) and `Ollama::pull` (asks the local daemon to download a model).
+- **No telemetry, and an account only if you sign in.** Without signing in, two things can reach the internet, both only on a button press: `whisper_setup.rs` (GitHub + Hugging Face) and `Ollama::pull` (asks the local daemon to download a model). Signed in, `oauth.rs`/`cloud.rs` sync the light data described above; meeting audio, transcripts and notes never leave the machine.
 - Ollama transcription uses the **OpenAI-compatible** `/v1/chat/completions` endpoint because the native `/api/chat` route drops audio.
 - `collapse_repeats` (ollama.rs) defends against repetition loops; `clean_whisper_text` strips bracketed annotations and the phrases whisper invents on silence.
 - The paste is the one place the app touches another application's window, with a fixed key sequence and no user input.

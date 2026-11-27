@@ -19,6 +19,7 @@ import type {
   Settings,
   SettingsState,
   Snippet,
+  SyncKind,
   Todo,
 } from '../shared/types';
 
@@ -71,6 +72,8 @@ export interface LibraryBridge {
   /** One caption of the live preview, as it is produced. */
   onLiveLine(fn: (line: LiveLine) => void): void;
   onShow(fn: (section: LibrarySection) => void): void;
+  /** Something arrived from the account and was written to disk. */
+  onSynced(fn: (kind: SyncKind) => void): void;
   minimize(): void;
   close(): void;
 
@@ -109,6 +112,14 @@ export interface LibraryBridge {
     copyDiagnostics(): Promise<boolean>;
     restartCapture(): Promise<boolean>;
     onChanged(fn: () => void): void;
+  };
+
+  sync: {
+    /** Opens Google's consent page in the browser; resolves once it answers. */
+    signIn(): Promise<Outcome>;
+    /** Cancels a sign-in in progress, or signs out. Local files are kept. */
+    signOut(): Promise<SettingsState>;
+    now(): Promise<Outcome>;
   };
 }
 

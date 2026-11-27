@@ -242,6 +242,21 @@ pub struct DictationFlags {
     pub transcribing: bool,
 }
 
+/// Sign-in and sync, for the settings pane. Assembled by `cloud::state`.
+#[derive(Debug, Clone, Serialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct SyncState {
+    /// Built with a Google client and a sync server; otherwise not offered.
+    pub configured: bool,
+    pub signed_in: bool,
+    pub signing_in: bool,
+    pub syncing: bool,
+    pub email: String,
+    pub name: String,
+    pub last_sync_at: Option<String>,
+    pub error: Option<String>,
+}
+
 /// Everything the settings pane renders. Assembled by `ui::settings_state`.
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -266,6 +281,7 @@ pub struct SettingsState {
     pub notes_dir_exists: bool,
     pub snippet_count: usize,
     pub recording: bool,
+    pub sync: SyncState,
 }
 
 #[derive(Debug, Clone, Serialize)]

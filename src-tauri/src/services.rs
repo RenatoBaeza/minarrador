@@ -169,7 +169,20 @@ pub fn apply_dictate_hotkey() {
     s.dictate_hotkey_registered = ok;
 }
 
+/// A change made on this machine: applied, then queued for sync when it
+/// touches a setting that travels between machines.
 pub fn apply_setting(patch: Map<String, Value>) -> Settings {
+    let synced = patch.keys().any(|k| crate::cloud::SYNCED_SETTINGS.contains(&k.as_str()));
+    let settings = apply_patch(patch);
+    if synced {
+        crate::cloud::changed("settings");
+    }
+    settings
+}
+
+/// Saves a patch and applies whatever it changes — shared by local changes
+/// and settings arriving from the account.
+pub fn apply_patch(patch: Map<String, Value>) -> Settings {
     let keys: Vec<String> = patch.keys().cloned().collect();
     let has = |k: &str| keys.iter().any(|x| x == k);
     let settings = core().store.save(patch);

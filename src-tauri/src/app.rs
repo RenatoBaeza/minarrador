@@ -85,6 +85,7 @@ pub fn setup(app: &AppHandle) -> Result<(), String> {
         disk_scan: Mutex::new(None),
         disk_cancel: Mutex::new(None),
         tray: Mutex::new(None),
+        cloud: crate::cloud::Cloud::open(&user_data),
         user_data,
     });
     core::install(c.clone());
@@ -121,6 +122,7 @@ pub fn setup(app: &AppHandle) -> Result<(), String> {
     apply_dictate_hotkey();
     watch_for_resume();
     crate::desktop_todos::apply(true);
+    crate::cloud::start();
     notify_library();
 
     tauri::async_runtime::spawn(async move {

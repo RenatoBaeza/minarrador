@@ -12,7 +12,7 @@ const tseslint = require('typescript-eslint');
 const globals = require('globals');
 
 module.exports = tseslint.config(
-  { ignores: ['dist/**', 'out/**', 'node_modules/**', 'assets/**', 'vendor/**', 'src-tauri/**'] },
+  { ignores: ['dist/**', 'out/**', 'node_modules/**', 'assets/**', 'vendor/**', 'src-tauri/**', 'server/**'] },
 
   js.configs.recommended,
   ...tseslint.configs.recommended,

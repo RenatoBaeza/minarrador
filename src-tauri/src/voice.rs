@@ -78,7 +78,9 @@ pub async fn stop_dictation() {
             log_warn!("the auto-paste did not land — the clipboard still holds the text");
         }
     }
-    c.dictations.add(&result.text);
+    if c.dictations.add(&result.text).is_some() {
+        crate::cloud::changed("dictations");
+    }
     notify_dictations();
     let preview = if result.text.chars().count() > 90 { format!("{}…", result.text.chars().take(90).collect::<String>()) } else { result.text.clone() };
     let title = if pasted {

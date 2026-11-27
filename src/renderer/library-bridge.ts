@@ -7,11 +7,12 @@
 
 import { enableDrag, invoke, listen } from './bridge-common.js';
 import type { LibraryBridge, LibrarySection, OpenTarget, SpeakerNames } from './bridges';
-import type { Health, LibrarySettingKey, LiveLine, Snippet, Todo } from '../shared/types';
+import type { Health, LibrarySettingKey, LiveLine, Snippet, SyncKind, Todo } from '../shared/types';
 
 const TARGETS: readonly OpenTarget[] = ['folder', 'pdf', 'notes', 'transcript', 'audio'];
 const SPEAKERS: SpeakerNames = { mic: 'You', system: 'Others' };
 const SECTIONS: readonly LibrarySection[] = ['reader', 'quickcopy', 'disk', 'todos', 'settings'];
+const SYNC_KINDS: readonly SyncKind[] = ['settings', 'snippets', 'todos', 'dictations'];
 
 const FIELDS: Record<LibrarySettingKey, (value: unknown) => unknown> = {
   suggestOnAudio: Boolean,
@@ -105,6 +106,10 @@ const api: LibraryBridge = {
     // The section the window was opened onto, asked for once the page listens.
     void invoke<string | null>('library_initial_section').then(show);
   },
+  onSynced: (fn) =>
+    listen('library:synced', (kind) => {
+      if (SYNC_KINDS.includes(kind as SyncKind)) fn(kind as SyncKind);
+    }),
   minimize: () => void invoke('library_minimize'),
   close: () => void invoke('library_close'),
   quickCopy: {
@@ -139,6 +144,11 @@ const api: LibraryBridge = {
     copyDiagnostics: () => invoke('settings_copy_diagnostics'),
     restartCapture: () => invoke('settings_restart_capture'),
     onChanged: (fn) => listen('settings:changed', () => fn()),
+  },
+  sync: {
+    signIn: () => invoke('sync_sign_in'),
+    signOut: () => invoke('sync_sign_out'),
+    now: () => invoke('sync_now'),
   },
 };
 

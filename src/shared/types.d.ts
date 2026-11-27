@@ -205,6 +205,22 @@ export interface HotkeyState {
   choices: Choice<string>[];
 }
 
+/** Sign-in and sync. Built by cloud::state(). */
+export interface SyncState {
+  /** False in a build made without a Google client and a sync server. */
+  configured: boolean;
+  signedIn: boolean;
+  signingIn: boolean;
+  syncing: boolean;
+  email: string;
+  name: string;
+  lastSyncAt: string | null;
+  error: string | null;
+}
+
+/** What library:synced names: the kind that just arrived from the account. */
+export type SyncKind = 'settings' | 'snippets' | 'todos' | 'dictations';
+
 /** Everything the settings pane renders. Assembled by settingsState() in main. */
 export interface SettingsState {
   version: string;
@@ -228,6 +244,7 @@ export interface SettingsState {
   notesDirExists: boolean;
   snippetCount: number;
   recording: boolean;
+  sync: SyncState;
 }
 
 /**

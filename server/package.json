@@ -1,0 +1,16 @@
+{
+  "name": "minarrador-sync",
+  "private": true,
+  "version": "1.0.0",
+  "description": "The sync server behind Minarrador's Google sign-in: verifies Google ID tokens and stores each user's light data in MongoDB.",
+  "type": "module",
+  "engines": { "node": ">=20" },
+  "scripts": {
+    "dev": "vercel dev",
+    "deploy": "vercel deploy --prod"
+  },
+  "dependencies": {
+    "google-auth-library": "^9.15.1",
+    "mongodb": "^6.12.0"
+  }
+}

@@ -14,6 +14,7 @@ use tauri::AppHandle;
 use tokio_util::sync::CancellationToken;
 
 use crate::capture::CaptureController;
+use crate::cloud::Cloud;
 use crate::dictation::DictationController;
 use crate::diskusage::DiskScan;
 use crate::library::LibraryCache;
@@ -142,6 +143,7 @@ pub struct Core {
     pub disk_scan: Mutex<Option<DiskScan>>,
     pub disk_cancel: Mutex<Option<CancellationToken>>,
     pub tray: Mutex<Option<AppTray>>,
+    pub cloud: Cloud,
 }
 
 static CORE: OnceLock<Arc<Core>> = OnceLock::new();

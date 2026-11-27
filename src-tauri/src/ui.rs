@@ -71,6 +71,7 @@ pub fn settings_state() -> SettingsState {
         notes_dir_exists: Path::new(&settings.notes_dir).exists(),
         snippet_count: c.snippets.list().len(),
         recording: s.phase == Phase::Recording,
+        sync: crate::cloud::state(),
         settings,
     }
 }

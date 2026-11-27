@@ -772,6 +772,92 @@ export function voiceSection(frag: DocumentFragment, s: SettingsState): void {
   ]);
 }
 
+/** "3 minutes ago", for the last sync. */
+function since(iso: string | null): string {
+  if (!iso) return 'not yet';
+  const seconds = Math.max(0, (Date.now() - Date.parse(iso)) / 1000);
+  if (!Number.isFinite(seconds)) return 'not yet';
+  if (seconds < 60) return 'just now';
+  const minutes = Math.round(seconds / 60);
+  if (minutes < 60) return `${minutes} minute${minutes === 1 ? '' : 's'} ago`;
+  const hours = Math.round(minutes / 60);
+  if (hours < 24) return `${hours} hour${hours === 1 ? '' : 's'} ago`;
+  return new Date(iso).toLocaleDateString();
+}
+
+const SYNCED_WHAT = 'Settings, quick copy, to-dos and dictations';
+
+/**
+ * Sign in with Google to carry the light data between machines. Off until
+ * someone signs in, and absent from a build made without a sync server.
+ */
+export function accountSection(frag: DocumentFragment, s: SettingsState): void {
+  const sync = s.sync;
+  if (!sync?.configured) return;
+
+  if (sync.signingIn) {
+    group(frag, 'Account and sync', [
+      buttonRow({
+        title: 'Waiting for Google…',
+        hint: 'Finish signing in in the browser tab that just opened, then come back here.',
+        label: 'Cancel',
+        onClick: async () => {
+          view.settings = await window.library.sync.signOut();
+          if (view.mode === 'settings') renderSettings();
+        },
+      }),
+    ]);
+    return;
+  }
+
+  if (!sync.signedIn) {
+    group(frag, 'Account and sync', [
+      buttonRow({
+        title: 'Sync between your computers',
+        hint:
+          `${SYNCED_WHAT} follow your Google account to every machine you sign in on. ` +
+          'Audio, transcripts and meeting notes stay on this one.',
+        alert: sync.error ?? '',
+        label: 'Sign in with Google',
+        primary: true,
+        onClick: async (button) => {
+          button.disabled = true;
+          // A failure comes back as sync.error, shown on this row.
+          await window.library.sync.signIn().catch(() => undefined);
+          view.settings = await window.library.settings.get();
+          if (view.mode === 'settings') renderSettings();
+        },
+      }),
+    ]);
+    return;
+  }
+
+  const who = sync.name && sync.email ? `${sync.name} — ${sync.email}` : sync.email || sync.name;
+  group(frag, 'Account and sync', [
+    buttonRow({
+      title: 'Signed in',
+      value: who,
+      hint: `${SYNCED_WHAT} sync to this account. Audio, transcripts and meeting notes stay on this machine.`,
+      alert: sync.error ? `The last sync failed: ${sync.error}` : '',
+      missing: Boolean(sync.error),
+      ok: sync.error ? '' : sync.syncing ? 'Syncing…' : `Last synced ${since(sync.lastSyncAt)}.`,
+      label: 'Sync now',
+      disabled: sync.syncing,
+      onClick: (button) =>
+        runAction(button, 'Syncing…', 'Synced', async () => (await window.library.sync.now()).ok),
+    }),
+    buttonRow({
+      title: 'Sign out',
+      hint: 'Stops syncing on this machine. Everything stays here as it is, and in your account for your other machines.',
+      label: 'Sign out',
+      onClick: async () => {
+        view.settings = await window.library.sync.signOut();
+        if (view.mode === 'settings') renderSettings();
+      },
+    }),
+  ]);
+}
+
 export function renderSettings() {
   const s = view.settings;
   const doc = el('div', 'doc settings');
@@ -798,6 +884,7 @@ export function renderSettings() {
     box.append(setupRow(s.setup));
     frag.append(box);
   }
+  accountSection(frag, s);
   recordingSection(frag, s);
   ollamaSection(frag, s);
   liveSection(frag, s);
@@ -810,7 +897,9 @@ export function renderSettings() {
     el(
       'p',
       'settings-foot',
-      'Everything Minarrador does runs on this machine — audio, transcripts and notes never leave it.' +
+      (s.sync?.signedIn
+        ? `${SYNCED_WHAT} sync to your account; audio, transcripts and notes never leave this machine.`
+        : 'Everything Minarrador does runs on this machine — audio, transcripts and notes never leave it.') +
         (s.version ? ` Version ${s.version}.` : ''),
     ),
   );

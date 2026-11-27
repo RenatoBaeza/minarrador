@@ -16,7 +16,7 @@ use serde_json::Value;
 
 use crate::types::{Dictation, Snippet, Todo};
 
-fn write_atomic<T: Serialize>(file: &Path, value: &T) {
+pub(crate) fn write_atomic<T: Serialize>(file: &Path, value: &T) {
     if let Some(dir) = file.parent() {
         let _ = fs::create_dir_all(dir);
     }

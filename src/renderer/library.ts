@@ -14,7 +14,7 @@
 import { SECTIONS, byId, isSection, setNavigator, listEl, navEls, queryEl, readerEl, recordEl, searchingEl, sectionNameEl, view } from './library-common.js';
 import { addLiveLine, openMeeting, refresh, renderPlaceholder, renderHealth, renderProgress, renderReader, select, toggleRecord } from './library-reader.js';
 import { renderSettings } from './library-settings.js';
-import { qcEditor, renderQuickCopy, saveQuickCopy } from './library-quickcopy.js';
+import { qcEditor, quickCopy, renderQuickCopy, saveQuickCopy } from './library-quickcopy.js';
 import { renderTodos, saveTodos, tdEditor, todo } from './library-todos.js';
 import { diskProgressText, diskView, renderDisk } from './library-disk.js';
 
@@ -253,6 +253,13 @@ window.library.disk.onProgress((p) => {
 // changes — a source opening, Ollama answering, a recording's first seconds.
 window.library.onHealth((health) => renderHealth(health));
 void window.library.health().then(renderHealth);
+
+// Another machine's changes, already on disk. A list being edited keeps what
+// is typed — it is newer, and goes up on its next save.
+window.library.onSynced((kind) => {
+  if (kind === 'todos' && view.mode === 'todos' && !todo.dirty) void renderTodos();
+  if (kind === 'snippets' && view.mode === 'quickcopy' && !quickCopy.dirty) void renderQuickCopy();
+});
 
 // Main asking for a section, e.g. the tray's quick-copy "add one…" item.
 window.library.onShow((section) => showSection(section));

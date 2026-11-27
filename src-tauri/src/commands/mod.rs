@@ -7,6 +7,7 @@ pub mod dictation;
 pub mod disk;
 pub mod library;
 pub mod settings;
+pub mod sync;
 
 use tauri::WebviewWindow;
 
